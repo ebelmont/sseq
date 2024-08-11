@@ -298,7 +298,7 @@ impl<T: io::Read> std::ops::Drop for ChecksumReader<T> {
 fn open_file(path: PathBuf, early_check: bool) -> Option<Box<dyn io::Read>> {
     use io::BufRead;
 
-    fn do_early_check<T: Read>(path: PathBuf, mut reader: T) -> Option<Box<dyn Read>> {
+    fn do_early_check(path: PathBuf, mut reader: impl io::Read) -> Option<Box<dyn io::Read>> {
         let mut file_contents = Vec::new();
         let num_bytes = std::io::copy(&mut reader, &mut file_contents)
             .unwrap_or_else(|e| panic!("Error when reading from {path:?}: {e}"));
@@ -310,13 +310,13 @@ fn open_file(path: PathBuf, early_check: bool) -> Option<Box<dyn io::Read>> {
         }
 
         let checksum_pos = num_bytes as usize - 4;
-        let (content_bytes, mut check_bytes) = file_contents.split_at(checksum_pos);
+        let (content_bytes, mut checksum_bytes) = file_contents.split_at(checksum_pos);
         let mut adler = adler::Adler32::new();
         adler.write_slice(content_bytes); // Everything except the 32-bit checksum
-        let checksum = check_bytes.read_u32::<LittleEndian>().unwrap();
+        let checksum = checksum_bytes.read_u32::<LittleEndian>().unwrap();
 
         if adler.checksum() == checksum {
-            Some(Box::new(Cursor::new(file_contents)))
+            Some(Box::new(io::Cursor::new(file_contents)))
         } else {
             tracing::warn!("Checksum mismatch for {path:?}. Deleting file.");
             std::fs::remove_file(&path)
