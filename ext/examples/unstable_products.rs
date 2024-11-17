@@ -2,7 +2,7 @@
 //! for a single n and stem(a+c) <= a cutoff
 //! 
 
-use std::{path::PathBuf, sync::Arc, thread};
+use std::{path::PathBuf, sync::Arc};
 
 use algebra::module::{Module, SuspensionModule};
 
@@ -70,7 +70,6 @@ fn main() -> anyhow::Result<()> {
 
 
 
-    let mut handles = vec![];
     for a_n in 0..ac_max.n() {
         for a_s in 0..ac_max.s() {
             let a = Bidegree::n_s(a_n, a_s);
@@ -128,33 +127,30 @@ fn main() -> anyhow::Result<()> {
                         // This represents the map res1_{a.s} --> Sigma^{s2} k. It is used to build the rest of the map res1 --> res2.
                         let mut matrix = Matrix::new(p, num_gens_a, 1);
                         for idx in 0..num_gens_a {
-                            let handle = thread::spawn(move || {
-                                let hom = Arc::new(UnstableResolutionHomomorphism::new(
-                                    String::new(),
-                                    Arc::clone(&res1),
-                                    Arc::clone(&res2),
-                                    // hom maps a class of this degree to a class in degree zero
-                                    Bidegree::s_t(a.s(), a.t() - a.n())
-                                ));
+                            let hom = Arc::new(UnstableResolutionHomomorphism::new(
+                                String::new(),
+                                Arc::clone(&res1),
+                                Arc::clone(&res2),
+                                // hom maps a class of this degree to a class in degree zero
+                                Bidegree::s_t(a.s(), a.t() - a.n())
+                            ));
 
-                                matrix[idx].set_entry(0, 1); // set matrix to the standard basis vector e_idx.
-                                hom.extend_step( // this is just mapping res1_{a.s} --> res2_0
-                                    Bidegree::s_t(a.s(), a.t() - a.n() + sphere2), // degree in res1_{a.s} to construct the map (this is the degree that maps to the generator of Sigma^{sphere2}k)
-                                    Some(&matrix)
-                                    );
+                            matrix[idx].set_entry(0, 1); // set matrix to the standard basis vector e_idx.
+                            hom.extend_step( // this is just mapping res1_{a.s} --> res2_0
+                                Bidegree::s_t(a.s(), a.t() - a.n() + sphere2), // degree in res1_{a.s} to construct the map (this is the degree that maps to the generator of Sigma^{sphere2}k)
+                                Some(&matrix)
+                                );
 
-                                matrix[idx].set_entry(0, 0); // reset this entry to help setting matrix to e_{idx+1} on the next iteration
+                            matrix[idx].set_entry(0, 0); // reset this entry to help setting matrix to e_{idx+1} on the next iteration
 
-                                hom.extend_through_stem(res1_maxdeg);
+                            hom.extend_through_stem(res1_maxdeg);
 
-                                for (k, &v) in c_class.iter().enumerate() {
-                                    if v != 0 {
-                                        let gen = BidegreeGenerator::new(Bidegree::s_t(c.s(), sphere2 + c.t()), k);
-                                        hom.act(product[idx].slice_mut(0, product_num_gens), v, gen);
-                                    }
+                            for (k, &v) in c_class.iter().enumerate() {
+                                if v != 0 {
+                                    let gen = BidegreeGenerator::new(Bidegree::s_t(c.s(), sphere2 + c.t()), k);
+                                    hom.act(product[idx].slice_mut(0, product_num_gens), v, gen);
                                 }
-                            });
-                            handles.push(handle);
+                            }
                         }
                         product.row_reduce();
 
@@ -178,10 +174,6 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-    }
-    // Wait for all threads to finish
-    for handle in handles {
-        handle.join().unwrap();
     }
     Ok(())
 }
