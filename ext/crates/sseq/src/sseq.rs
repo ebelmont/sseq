@@ -77,6 +77,39 @@ pub struct Sseq<P: SseqProfile = Adams> {
     profile: PhantomData<P>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SseqBasisElementKind {
+    /// A boundary
+    B,
+    /// A cycle
+    Z,
+    /// An element supporting a differential
+    E,
+}
+
+impl std::fmt::Display for SseqBasisElementKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::B => write!(f, "B"),
+            Self::Z => write!(f, "Z"),
+            Self::E => write!(f, "E"),
+        }
+    }
+}
+
+pub struct SseqBasisElement {
+    pub kind: SseqBasisElementKind,
+    pub x: i32,
+    pub y: i32,
+    pub v: FpVector,
+}
+
+impl std::fmt::Display for SseqBasisElement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({},{}){}", self.kind, self.x, self.y, self.v)
+    }
+}
+
 impl<P: SseqProfile> Sseq<P> {
     pub fn new(p: ValidPrime, min_x: i32, min_y: i32) -> Self {
         Self {
@@ -374,6 +407,47 @@ impl<P: SseqProfile> Sseq<P> {
 
     pub fn page_data(&self, x: i32, y: i32) -> &BiVec<Subquotient> {
         &self.page_data[x][y]
+    }
+
+    /// Get a well-behaved basis for the bidegree (x, y) on the given page.
+    ///
+    /// In any spectral sequence $E$, a given bidegree $E_r^{x, y}$ contains its subspace of cycles
+    /// $Z_r^{x, y}$, i.e. the elements that don't support a differential, which contains its own
+    /// subspace of boundaries $B_r^{x,y}$, i.e. elements that are the image of a differential. This
+    /// method returns a basis for $E_r^{x, y}$, such that an initial segment of the basis is a
+    /// basis for $Z_r^{x, y}$, and an initial segment of *that* basis is a basis for $B_r^{x, y}$.
+    pub fn bze_basis(&self, x: i32, y: i32, r: i32) -> impl Iterator<Item = SseqBasisElement> + '_ {
+        let subquotient = &self.page_data(x, y)[r];
+
+        let ambient = subquotient.ambient_dimension();
+
+        let boundaries = subquotient.zeros().iter().map(move |v| SseqBasisElement {
+            kind: SseqBasisElementKind::B,
+            x,
+            y,
+            v: v.to_owned(),
+        });
+        let cycles = subquotient.gens().map(move |v| SseqBasisElement {
+            kind: SseqBasisElementKind::Z,
+            x,
+            y,
+            v: v.to_owned(),
+        });
+        let rest = subquotient.complement_pivots().map(move |i| {
+            let v = {
+                let mut v = FpVector::new(self.p, ambient);
+                v.add_basis_element(i, 1);
+                v
+            };
+            SseqBasisElement {
+                kind: SseqBasisElementKind::E,
+                x,
+                y,
+                v,
+            }
+        });
+
+        boundaries.chain(cycles).chain(rest)
     }
 
     /// Compute the product between `product` and the class `class` at `(x, y)`. Returns `None` if
