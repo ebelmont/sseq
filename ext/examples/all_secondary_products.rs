@@ -78,6 +78,16 @@ enum SecondaryHomotopyBasisElementKind {
     λE,
 }
 
+impl SecondaryHomotopyBasisElementKind {
+    fn is_lambda(&self) -> bool {
+        !self.is_classical()
+    }
+
+    fn is_classical(&self) -> bool {
+        matches!(self, Self::B | Self::Z)
+    }
+}
+
 impl std::fmt::Display for SecondaryHomotopyBasisElementKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -98,10 +108,7 @@ impl SecondaryHomotopyGroups {
         let all_basis_elements = self.basis_elements.get(&elt.b).unwrap();
 
         let mut basis_elements = Vec::new();
-        for classical_basis_element in all_basis_elements.iter().filter(|e| {
-            e.kind == SecondaryHomotopyBasisElementKind::B
-                || e.kind == SecondaryHomotopyBasisElementKind::Z
-        }) {
+        for classical_basis_element in all_basis_elements.iter().filter(|e| e.kind.is_classical()) {
             if elt
                 .classical
                 .iter()
@@ -114,10 +121,7 @@ impl SecondaryHomotopyGroups {
         }
         assert!(elt.classical.is_zero());
 
-        for lambda_basis_element in all_basis_elements.iter().filter(|e| {
-            e.kind == SecondaryHomotopyBasisElementKind::λZ
-                || e.kind == SecondaryHomotopyBasisElementKind::λE
-        }) {
+        for lambda_basis_element in all_basis_elements.iter().filter(|e| e.kind.is_lambda()) {
             if elt
                 .lambda
                 .iter()
@@ -130,7 +134,7 @@ impl SecondaryHomotopyGroups {
         }
         if !elt.lambda.is_zero() {
             anyhow::bail!(format!(
-                "Failed to express {elt_str} as a sum using basis {all_basis_elements}",
+                "Failed to express {elt_str} as a sum using basis [{all_basis_elements}]",
                 all_basis_elements = all_basis_elements.iter().join(", "),
             ));
         } else {
@@ -169,106 +173,56 @@ fn main() -> anyhow::Result<()> {
     let res_lift = Arc::new(SecondaryResolution::new(Arc::clone(&resolution)));
 
     let span = tracing::Span::current();
-    let compute_nth_stem =
-        |n| {
-            let unit_lift = if is_unit {
-                Arc::clone(&res_lift)
-            } else {
-                Arc::new(SecondaryResolution::new(Arc::clone(&unit)))
-            };
-
-            // Compute E3 page
-            let res_sseq = Arc::new(res_lift.e3_page());
-            let unit_sseq = if is_unit {
-                Arc::clone(&res_sseq)
-            } else {
-                Arc::new(unit_lift.e3_page())
-            };
-
-            let basis_elements = HashMap::new();
-
-            for b in resolution.iter_stem() {
-                basis_elements.insert(b, Vec::new());
-            }
-
-            for b in resolution.iter_stem() {
-                let r = get_r(&res_sseq, b);
-                for elt in res_sseq.bze_basis(b.n(), b.s() as i32, r) {
-                    match elt.kind {
-                        SseqBasisElementKind::B => {
-                            basis_elements.get_mut(&b).unwrap().push(
-                                SecondaryHomotopyBasisElement {
-                                    b,
-                                    kind: SecondaryHomotopyBasisElementKind::B,
-                                    v: elt.v,
-                                },
-                            );
-                        }
-                        SseqBasisElementKind::Z => {
-                            basis_elements.get_mut(&b).unwrap().push(
-                                SecondaryHomotopyBasisElement {
-                                    b,
-                                    kind: SecondaryHomotopyBasisElementKind::Z,
-                                    v: elt.v.clone(),
-                                },
-                            );
-                            if b.s() > 0 {
-                                let b_prime = b - Bidegree::n_s(0, 1);
-                                basis_elements.get_mut(&b_prime).unwrap().push(
-                                    SecondaryHomotopyBasisElement {
-                                        b: b_prime,
-                                        kind: SecondaryHomotopyBasisElementKind::λZ,
-                                        v: elt.v,
-                                    },
-                                );
-                            }
-                        }
-                        SseqBasisElementKind::E => {
-                            let b_prime = b - Bidegree::n_s(0, 1);
-                            basis_elements.get_mut(&b_prime).unwrap().push(
-                                SecondaryHomotopyBasisElement {
-                                    b: b_prime,
-                                    kind: SecondaryHomotopyBasisElementKind::λE,
-                                    v: elt.v,
-                                },
-                            );
-                        }
-                    }
-                }
-            }
-
-            let data = ProductComputationData {
-                p,
-                resolution: Arc::clone(&resolution),
-                unit: Arc::clone(&unit),
-                is_unit,
-                res_lift: Arc::clone(&res_lift),
-                unit_lift,
-                res_sseq: Arc::clone(&res_sseq),
-                unit_sseq,
-                homotopy_groups: Arc::new(SecondaryHomotopyGroups { basis_elements }),
-            };
-
-            let restrict_s = std::env::var("HOMOLOGICAL_DEGREE")
-                .ok()
-                .and_then(|s| str::parse::<u32>(&s).ok());
-
-            resolution
-                .iter_stem()
-                .skip(1)
-                .filter(|b| b.n() == n && restrict_s.map_or(true, |s| b.s() == s))
-                .maybe_par_bridge()
-                .try_for_each(|b| -> anyhow::Result<()> {
-                    let _tracing_guard = span.enter();
-                    let r = get_r(&res_sseq, b);
-                    res_sseq
-                        .bze_basis(b.n(), b.s() as i32, r)
-                        .take_while(|e| e.kind != SseqBasisElementKind::E)
-                        .maybe_par_bridge()
-                        .try_for_each(|v| compute_products(v, data.clone()))
-                })?;
-            anyhow::Ok(())
+    let compute_nth_stem = |n| {
+        let unit_lift = if is_unit {
+            Arc::clone(&res_lift)
+        } else {
+            Arc::new(SecondaryResolution::new(Arc::clone(&unit)))
         };
+
+        // Compute E3 page
+        let res_sseq = Arc::new(res_lift.e3_page());
+        let unit_sseq = if is_unit {
+            Arc::clone(&res_sseq)
+        } else {
+            Arc::new(unit_lift.e3_page())
+        };
+
+        let homotopy_groups =
+            compute_secondary_homotopy_groups(Arc::clone(&resolution), Arc::clone(&res_sseq));
+
+        let data = ProductComputationData {
+            p,
+            resolution: Arc::clone(&resolution),
+            unit: Arc::clone(&unit),
+            is_unit,
+            res_lift: Arc::clone(&res_lift),
+            unit_lift,
+            res_sseq: Arc::clone(&res_sseq),
+            unit_sseq,
+            homotopy_groups: Arc::new(homotopy_groups),
+        };
+
+        let restrict_s = std::env::var("HOMOLOGICAL_DEGREE")
+            .ok()
+            .and_then(|s| str::parse::<u32>(&s).ok());
+
+        resolution
+            .iter_stem()
+            .skip(1)
+            .filter(|b| b.n() == n && restrict_s.map_or(true, |s| b.s() == s))
+            .maybe_par_bridge()
+            .try_for_each(|b| -> anyhow::Result<()> {
+                let _tracing_guard = span.enter();
+                let r = get_r(&res_sseq, b);
+                res_sseq
+                    .bze_basis(b.n(), b.s() as i32, r)
+                    .take_while(|e| e.kind != SseqBasisElementKind::E)
+                    .maybe_par_bridge()
+                    .try_for_each(|v| compute_products(v, data.clone()))
+            })?;
+        anyhow::Ok(())
+    };
 
     let half_max_stem = max.n() / 2;
     for n in 0..half_max_stem {
@@ -292,6 +246,68 @@ fn main() -> anyhow::Result<()> {
 fn get_r(sseq: &sseq::Sseq<sseq::Adams>, b: Bidegree) -> i32 {
     let d = sseq.page_data(b.n(), b.s() as i32);
     std::cmp::min(3, d.len() - 1)
+}
+
+fn compute_secondary_homotopy_groups(
+    resolution: Arc<QueryModuleResolution>,
+    res_sseq: Arc<Sseq>,
+) -> SecondaryHomotopyGroups {
+    let basis_elements = HashMap::new();
+
+    for b in resolution.iter_stem() {
+        basis_elements.insert(b, Vec::new());
+    }
+
+    for b in resolution.iter_stem() {
+        let r = get_r(&res_sseq, b);
+        for elt in res_sseq.bze_basis(b.n(), b.s() as i32, r) {
+            match elt.kind {
+                SseqBasisElementKind::B => {
+                    basis_elements
+                        .get_mut(&b)
+                        .unwrap()
+                        .push(SecondaryHomotopyBasisElement {
+                            b,
+                            kind: SecondaryHomotopyBasisElementKind::B,
+                            v: elt.v,
+                        });
+                }
+                SseqBasisElementKind::Z => {
+                    basis_elements
+                        .get_mut(&b)
+                        .unwrap()
+                        .push(SecondaryHomotopyBasisElement {
+                            b,
+                            kind: SecondaryHomotopyBasisElementKind::Z,
+                            v: elt.v.clone(),
+                        });
+                    if b.s() > 0 {
+                        let b_prime = b - Bidegree::n_s(0, 1);
+                        basis_elements.get_mut(&b_prime).unwrap().push(
+                            SecondaryHomotopyBasisElement {
+                                b: b_prime,
+                                kind: SecondaryHomotopyBasisElementKind::λZ,
+                                v: elt.v,
+                            },
+                        );
+                    }
+                }
+                SseqBasisElementKind::E => {
+                    let b_prime = b - Bidegree::n_s(0, 1);
+                    basis_elements
+                        .get_mut(&b_prime)
+                        .unwrap()
+                        .push(SecondaryHomotopyBasisElement {
+                            b: b_prime,
+                            kind: SecondaryHomotopyBasisElementKind::λE,
+                            v: elt.v,
+                        });
+                }
+            }
+        }
+    }
+
+    SecondaryHomotopyGroups { basis_elements }
 }
 
 #[tracing::instrument(skip(data), fields(%elt))]
