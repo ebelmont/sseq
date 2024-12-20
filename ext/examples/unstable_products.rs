@@ -1,5 +1,8 @@
 //! Computes the product S^{|a|+|c|+n} --c--> S^{|a|+n} --a--> S^n
 //! for a single n and stem(a+c) <= a cutoff
+//! The output is formatted as tsv, where the fields are:
+//! n, stem of a, filtration of a, basis index of a, stem of c, filtration of c, basis index of c,
+//! vector representing a linear combination of basis elements in the degree of ac
 //! 
 
 use std::{path::PathBuf, sync::Arc};
@@ -215,12 +218,12 @@ fn compute_composites(
                     println!(
                         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                         sphere1,
-                        c.n(),
-                        c.s(),
-                        c_idx,
                         a.n(),
                         a.s(),
                         i,
+                        c.n(),
+                        c.s(),
+                        c_idx,
                         row_trunc
                     );
                 }
