@@ -19,35 +19,6 @@ struct SecondaryHomotopyGroups {
     basis_elements: HashMap<Bidegree, Vec<SecondaryHomotopyBasisElement>>,
 }
 
-struct SecondaryHomotopyElement {
-    b: Bidegree,
-    classical: FpVector,
-    lambda: FpVector,
-}
-
-impl SecondaryHomotopyElement {
-    fn new(b: Bidegree, classical: FpVector, lambda: FpVector) -> Self {
-        Self {
-            b,
-            classical,
-            lambda,
-        }
-    }
-}
-
-impl std::fmt::Display for SecondaryHomotopyElement {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "({n},{s}) ({classical} + λ {lambda})",
-            n = self.b.n(),
-            s = self.b.s(),
-            classical = self.classical,
-            lambda = self.lambda
-        )
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SecondaryHomotopyBasisElement {
     b: Bidegree,
@@ -99,49 +70,60 @@ impl std::fmt::Display for SecondaryHomotopyBasisElementKind {
     }
 }
 
-impl SecondaryHomotopyGroups {
-    fn to_basis_elements(
-        &self,
-        mut elt: SecondaryHomotopyElement,
-    ) -> anyhow::Result<Vec<SecondaryHomotopyBasisElement>> {
-        let elt_str = format!("{}", elt);
-        let all_basis_elements = self.basis_elements.get(&elt.b).unwrap();
+fn mult_by_lambda(kind: SseqBasisElementKind) -> Option<SecondaryHomotopyBasisElementKind> {
+    use SecondaryHomotopyBasisElementKind as SHBEK;
+    use SseqBasisElementKind as SBEK;
 
-        let mut basis_elements = Vec::new();
-        for classical_basis_element in all_basis_elements.iter().filter(|e| e.kind.is_classical()) {
-            if elt
-                .classical
-                .iter()
-                .zip(classical_basis_element.v.iter())
-                .any(|(c1, c2)| c1 > 0 && c2 > 0)
-            {
-                elt.classical.add(&classical_basis_element.v, 1);
-                basis_elements.push(classical_basis_element.clone());
-            }
-        }
-        assert!(elt.classical.is_zero());
-
-        for lambda_basis_element in all_basis_elements.iter().filter(|e| e.kind.is_lambda()) {
-            if elt
-                .lambda
-                .iter()
-                .zip(lambda_basis_element.v.iter())
-                .any(|(c1, c2)| c1 > 0 && c2 > 0)
-            {
-                elt.lambda.add(&lambda_basis_element.v, 1);
-                basis_elements.push(lambda_basis_element.clone());
-            }
-        }
-        if !elt.lambda.is_zero() {
-            anyhow::bail!(format!(
-                "Failed to express {elt_str} as a sum using basis [{all_basis_elements}]",
-                all_basis_elements = all_basis_elements.iter().join(", "),
-            ));
-        } else {
-            Ok(basis_elements)
-        }
+    match kind {
+        SBEK::B => None,
+        SBEK::Z => Some(SHBEK::λZ),
+        SBEK::E => Some(SHBEK::λE),
     }
 }
+
+// impl SecondaryHomotopyGroups {
+//     fn to_basis_elements(
+//         &self,
+//         mut elt: SecondaryHomotopyElement,
+//     ) -> anyhow::Result<Vec<SecondaryHomotopyBasisElement>> {
+//         let elt_str = format!("{}", elt);
+//         let all_basis_elements = self.basis_elements.get(&elt.b).unwrap();
+
+//         let mut basis_elements = Vec::new();
+//         for classical_basis_element in all_basis_elements.iter().filter(|e| e.kind.is_classical()) {
+//             if elt
+//                 .classical
+//                 .iter()
+//                 .zip(classical_basis_element.v.iter())
+//                 .any(|(c1, c2)| c1 > 0 && c2 > 0)
+//             {
+//                 elt.classical.add(&classical_basis_element.v, 1);
+//                 basis_elements.push(classical_basis_element.clone());
+//             }
+//         }
+//         assert!(elt.classical.is_zero());
+
+//         for lambda_basis_element in all_basis_elements.iter().filter(|e| e.kind.is_lambda()) {
+//             if elt
+//                 .lambda
+//                 .iter()
+//                 .zip(lambda_basis_element.v.iter())
+//                 .any(|(c1, c2)| c1 > 0 && c2 > 0)
+//             {
+//                 elt.lambda.add(&lambda_basis_element.v, 1);
+//                 basis_elements.push(lambda_basis_element.clone());
+//             }
+//         }
+//         if !elt.lambda.is_zero() {
+//             anyhow::bail!(format!(
+//                 "Failed to express {elt_str} as a sum using basis [{all_basis_elements}]",
+//                 all_basis_elements = all_basis_elements.iter().join(", "),
+//             ));
+//         } else {
+//             Ok(basis_elements)
+//         }
+//     }
+// }
 
 #[derive(Clone)]
 struct ProductComputationData {
@@ -434,7 +416,7 @@ fn compute_products(elt: SseqBasisElement, data: ProductComputationData) -> anyh
                         println!("Failed to express {name} [λ{gen}]: {e}");
                     } else {
                         println!(
-                            "{name} λ[{gen}] = {}",
+                            "{name} [λ{gen}] = {}",
                             output_element.unwrap().iter().join(" + ")
                         );
                     }
