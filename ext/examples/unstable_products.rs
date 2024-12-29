@@ -210,7 +210,7 @@ fn compute_composites(
                     }
                 }
             }
-            product.row_reduce();
+            //product.row_reduce();
 
             for (i,row) in product.iter().enumerate() {
                 let row_trunc = row.slice(0, product_num_gens);
