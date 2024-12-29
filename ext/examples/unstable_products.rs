@@ -29,6 +29,7 @@ struct CompositeComputationData {
     resolution1: Arc<UnstableResolution<FiniteChainComplex<SuspensionModule<Box<dyn Module<Algebra = SteenrodAlgebra>>>>>>,
     resolution2: Arc<UnstableResolution<FiniteChainComplex<SuspensionModule<Box<dyn Module<Algebra = SteenrodAlgebra>>>>>>,
     sphere1: i32,
+    offset: i32,
 }
 
 
@@ -54,6 +55,8 @@ fn main() -> anyhow::Result<()> {
 
     eprintln!("\nComputing products --c--> --a--> for all c and all a in a range");
 
+    let offset = query::raw("Offset? ", str::parse::<i32>);
+
     let sphere1 = query::raw("sphere of Ext class a", str::parse::<std::num::NonZeroI32>).get();
     let ac_max = Bidegree::n_s(
         query::raw("Max stem", str::parse),
@@ -65,17 +68,24 @@ fn main() -> anyhow::Result<()> {
      * The map of spheres S^{s3} --> S^{s2} --> S^{s1} where s2 = s1 + a.n and s3 = s2 + c.n
      * S^{|a| + |c| + s1} --> S^{|a| + s1} --> S^{s1} induces a map on
      * cohomology in the other direction. res1 is the resolution of Sigma^{s1} k and res2 is the
-     * resolution of Sigma^{|a| + s1} k.
+     * resolution of Sigma^{|a| + s1} k. Write e_n := Sigma^n k.
      * We compute the a map of resolutions
-     * ... --> res1_{c.s + a.s} --> ... --> res1_{a.s} ----> ... --> Sigma^{s1} k
-     * ... --> res2_{c.s}  -------> ... --> Sigma^{s2} k
-     * ... --> Sigma^{s3} k
+     * ... --> res1_{c.s + a.s} --> ... --> res1_{a.s} ----> ... --> e_{s1}
+     * ... --> res2_{c.s}  -------> ... --> e_{s2}
+     * ... --> e_{s3}
      * a is represented by a class in (s,t) = (a.s, s1 + a.t) in res1
      * c is represented by a class in (s,t) = (c.s, s2 + c.t) in res2
      * The first map of complexes has degree (s,t) = (a.s, s1 + a.t - s2) = (a.s, a.t - a.n).
      * The second map of complexes has degree (s,t) = (c.s, s2 + c.t - s3) = (c.s, c.t - c.n).
-     * The product is res1_{c.s + a.s} --> res2_{c.s} --> Sigma^{s3} k.
+     * The product is res1_{c.s + a.s} --> res2_{c.s} --> e_{s3}.
+     *
+     * This is Ext^{0, a.s}(e_{s2}, e_{s1}) x Ext^{0, c.s}(e_{s3}, e_{s2}).
+     * In order to compute the first term in the Leibniz rule, we also need
+     * Ext^{0, a.s}(e_{s2}, e_{s1}) x Ext^{-1, c.s}(e_{s3}, e_{s2}).
+     * In the procedure above, replace the degree of a by (s,t) = (a.s, s1 + a.t - 1)
+     * and the first map of complexes has degree (s,t) = (a.s, a.t - a.n - 1).
      */
+
 
     let res1: Arc<UnstableResolution<FiniteChainComplex<_>>> =
         Arc::new(UnstableResolution::new_with_save(
@@ -122,6 +132,7 @@ fn main() -> anyhow::Result<()> {
                 resolution1: Arc::clone(&res1),
                 resolution2: Arc::clone(&res2),
                 sphere1,
+                offset,
             };
 
 
@@ -147,6 +158,7 @@ fn compute_composites(
     let sphere1 = data.sphere1;
     let sphere2 = sphere1 + a.n();
     let cmax_s = data.ac_max.s() - a.s();
+    let offset = data.offset;
 
 
     for c_s in 0..cmax_s {
@@ -173,8 +185,8 @@ fn compute_composites(
         for c_idx in 0..num_c_classes {
             c_class[c_idx] = 1;
 
-            let ac_deg = Bidegree::s_t(a.s() + c.s(), a.t() + c.t() + sphere1);
-            let num_gens_a = res1.number_of_gens_in_bidegree(Bidegree::s_t(a.s(), a.t() + sphere1));
+            let ac_deg = Bidegree::s_t(a.s() + c.s(), a.t() + c.t() + sphere1 - offset);
+            let num_gens_a = res1.number_of_gens_in_bidegree(Bidegree::s_t(a.s(), a.t() + sphere1 - offset));
             let product_num_gens = res1.number_of_gens_in_bidegree(ac_deg);
             if num_gens_a == 0 || product_num_gens == 0 {
                 continue;
@@ -190,16 +202,16 @@ fn compute_composites(
                     Arc::clone(&res1),
                     Arc::clone(&res2),
                     // hom maps a class of this degree to a class in degree zero
-                    Bidegree::s_t(a.s(), a.t() - a.n())
+                    Bidegree::s_t(a.s(), a.t() - a.n() - offset)
                 ));
 
                 matrix[idx].set_entry(0, 1); // set matrix to the standard basis vector e_idx.
                 hom.extend_step( // this is just mapping res1_{a.s} --> res2_0
-                    Bidegree::s_t(a.s(), a.t() - a.n() + sphere2), // degree in res1_{a.s} to construct the map (this is the degree that maps to the generator of Sigma^{sphere2}k)
+                    Bidegree::s_t(a.s(), a.t() - a.n() + sphere2 - offset), // degree in res1_{a.s} to construct the map (this is the degree that maps to the generator of Sigma^{sphere2}k)
                     Some(&matrix)
                     );
 
-                matrix[idx].set_entry(0, 0); // reset this entry to help setting matrix to e_{idx+1} on the next iteration
+                matrix[idx].set_entry(0, 0); // reset this entry to help setting matrix to the next standard basis vector e_{idx+1} on the next iteration
 
                 hom.extend_through_stem(ac_deg);
 
