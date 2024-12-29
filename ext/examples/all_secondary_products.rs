@@ -1,8 +1,9 @@
-//! Computes all products in $\Mod_{C\tau^2}$.
+//! Computes all products in $\Mod_{C\lambda^2}$.
 
 use std::{sync::Arc, vec};
 
 use algebra::module::Module;
+use dashmap::DashMap as HashMap;
 use ext::{
     chain_complex::{ChainComplex, FreeChainComplex},
     resolution_homomorphism::ResolutionHomomorphism,
@@ -12,10 +13,117 @@ use ext::{
 use fp::{matrix::Matrix, prime::ValidPrime, vector::FpVector};
 use itertools::Itertools;
 use maybe_rayon::prelude::*;
-use sseq::{
-    coordinates::{Bidegree, BidegreeElement, BidegreeGenerator},
-    Sseq,
-};
+use sseq::{coordinates::Bidegree, Sseq, SseqBasisElement, SseqBasisElementKind};
+
+struct SecondaryHomotopyGroups {
+    basis_elements: HashMap<Bidegree, Vec<SecondaryHomotopyBasisElement>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SecondaryHomotopyBasisElement {
+    b: Bidegree,
+    kind: SecondaryHomotopyBasisElementKind,
+    v: FpVector,
+}
+
+impl std::fmt::Display for SecondaryHomotopyBasisElement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{kind} ({n},{s}){v}",
+            kind = self.kind,
+            n = self.b.n(),
+            s = self.b.s(),
+            v = self.v
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SecondaryHomotopyBasisElementKind {
+    B,
+    Z,
+    #[allow(non_camel_case_types)]
+    λZ,
+    #[allow(non_camel_case_types)]
+    λE,
+}
+
+impl SecondaryHomotopyBasisElementKind {
+    fn is_lambda(&self) -> bool {
+        !self.is_classical()
+    }
+
+    fn is_classical(&self) -> bool {
+        matches!(self, Self::B | Self::Z)
+    }
+}
+
+impl std::fmt::Display for SecondaryHomotopyBasisElementKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::B => write!(f, "B"),
+            Self::Z => write!(f, "Z"),
+            Self::λZ => write!(f, "λZ"),
+            Self::λE => write!(f, "λE"),
+        }
+    }
+}
+
+fn mult_by_lambda(kind: SseqBasisElementKind) -> Option<SecondaryHomotopyBasisElementKind> {
+    use SecondaryHomotopyBasisElementKind as SHBEK;
+    use SseqBasisElementKind as SBEK;
+
+    match kind {
+        SBEK::B => None,
+        SBEK::Z => Some(SHBEK::λZ),
+        SBEK::E => Some(SHBEK::λE),
+    }
+}
+
+// impl SecondaryHomotopyGroups {
+//     fn to_basis_elements(
+//         &self,
+//         mut elt: SecondaryHomotopyElement,
+//     ) -> anyhow::Result<Vec<SecondaryHomotopyBasisElement>> {
+//         let elt_str = format!("{}", elt);
+//         let all_basis_elements = self.basis_elements.get(&elt.b).unwrap();
+
+//         let mut basis_elements = Vec::new();
+//         for classical_basis_element in all_basis_elements.iter().filter(|e| e.kind.is_classical()) {
+//             if elt
+//                 .classical
+//                 .iter()
+//                 .zip(classical_basis_element.v.iter())
+//                 .any(|(c1, c2)| c1 > 0 && c2 > 0)
+//             {
+//                 elt.classical.add(&classical_basis_element.v, 1);
+//                 basis_elements.push(classical_basis_element.clone());
+//             }
+//         }
+//         assert!(elt.classical.is_zero());
+
+//         for lambda_basis_element in all_basis_elements.iter().filter(|e| e.kind.is_lambda()) {
+//             if elt
+//                 .lambda
+//                 .iter()
+//                 .zip(lambda_basis_element.v.iter())
+//                 .any(|(c1, c2)| c1 > 0 && c2 > 0)
+//             {
+//                 elt.lambda.add(&lambda_basis_element.v, 1);
+//                 basis_elements.push(lambda_basis_element.clone());
+//             }
+//         }
+//         if !elt.lambda.is_zero() {
+//             anyhow::bail!(format!(
+//                 "Failed to express {elt_str} as a sum using basis [{all_basis_elements}]",
+//                 all_basis_elements = all_basis_elements.iter().join(", "),
+//             ));
+//         } else {
+//             Ok(basis_elements)
+//         }
+//     }
+// }
 
 #[derive(Clone)]
 struct ProductComputationData {
@@ -27,6 +135,7 @@ struct ProductComputationData {
     unit_lift: Arc<SecondaryResolution<QueryModuleResolution>>,
     res_sseq: Arc<Sseq>,
     unit_sseq: Arc<Sseq>,
+    homotopy_groups: Arc<SecondaryHomotopyGroups>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -61,6 +170,9 @@ fn main() -> anyhow::Result<()> {
             Arc::new(unit_lift.e3_page())
         };
 
+        let homotopy_groups =
+            compute_secondary_homotopy_groups(Arc::clone(&resolution), Arc::clone(&res_sseq));
+
         let data = ProductComputationData {
             p,
             resolution: Arc::clone(&resolution),
@@ -68,8 +180,9 @@ fn main() -> anyhow::Result<()> {
             is_unit,
             res_lift: Arc::clone(&res_lift),
             unit_lift,
-            res_sseq,
+            res_sseq: Arc::clone(&res_sseq),
             unit_sseq,
+            homotopy_groups: Arc::new(homotopy_groups),
         };
 
         let restrict_s = std::env::var("HOMOLOGICAL_DEGREE")
@@ -83,11 +196,12 @@ fn main() -> anyhow::Result<()> {
             .maybe_par_bridge()
             .try_for_each(|b| -> anyhow::Result<()> {
                 let _tracing_guard = span.enter();
-                let dim = resolution.number_of_gens_in_bidegree(b);
-                (0..dim).maybe_par_bridge().try_for_each(|i| {
-                    let g = BidegreeGenerator::new(b, i);
-                    compute_products(g, data.clone())
-                })
+                let r = get_r(&res_sseq, b);
+                res_sseq
+                    .bze_basis(b.n(), b.s() as i32, r)
+                    .take_while(|e| e.kind != SseqBasisElementKind::E)
+                    .maybe_par_bridge()
+                    .try_for_each(|v| compute_products(v, data.clone()))
             })?;
         anyhow::Ok(())
     };
@@ -111,18 +225,77 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn get_page_data(sseq: &sseq::Sseq<sseq::Adams>, b: Bidegree) -> &fp::matrix::Subquotient {
+fn get_r(sseq: &sseq::Sseq<sseq::Adams>, b: Bidegree) -> i32 {
     let d = sseq.page_data(b.n(), b.s() as i32);
-    &d[std::cmp::min(3, d.len() - 1)]
+    std::cmp::min(3, d.len() - 1)
 }
 
-#[tracing::instrument(skip(data), fields(%generator))]
-fn compute_products(
-    generator: BidegreeGenerator,
-    data: ProductComputationData,
-) -> anyhow::Result<()> {
-    let name = format!("x_{}", generator);
-    let shift = generator.degree();
+fn compute_secondary_homotopy_groups(
+    resolution: Arc<QueryModuleResolution>,
+    res_sseq: Arc<Sseq>,
+) -> SecondaryHomotopyGroups {
+    let basis_elements = HashMap::new();
+
+    for b in resolution.iter_stem() {
+        basis_elements.insert(b, Vec::new());
+    }
+
+    for b in resolution.iter_stem() {
+        let r = get_r(&res_sseq, b);
+        for elt in res_sseq.bze_basis(b.n(), b.s() as i32, r) {
+            match elt.kind {
+                SseqBasisElementKind::B => {
+                    basis_elements
+                        .get_mut(&b)
+                        .unwrap()
+                        .push(SecondaryHomotopyBasisElement {
+                            b,
+                            kind: SecondaryHomotopyBasisElementKind::B,
+                            v: elt.v,
+                        });
+                }
+                SseqBasisElementKind::Z => {
+                    basis_elements
+                        .get_mut(&b)
+                        .unwrap()
+                        .push(SecondaryHomotopyBasisElement {
+                            b,
+                            kind: SecondaryHomotopyBasisElementKind::Z,
+                            v: elt.v.clone(),
+                        });
+                    if b.s() > 0 {
+                        let b_prime = b - Bidegree::n_s(0, 1);
+                        basis_elements.get_mut(&b_prime).unwrap().push(
+                            SecondaryHomotopyBasisElement {
+                                b: b_prime,
+                                kind: SecondaryHomotopyBasisElementKind::λZ,
+                                v: elt.v,
+                            },
+                        );
+                    }
+                }
+                SseqBasisElementKind::E => {
+                    let b_prime = b - Bidegree::n_s(0, 1);
+                    basis_elements
+                        .get_mut(&b_prime)
+                        .unwrap()
+                        .push(SecondaryHomotopyBasisElement {
+                            b: b_prime,
+                            kind: SecondaryHomotopyBasisElementKind::λE,
+                            v: elt.v,
+                        });
+                }
+            }
+        }
+    }
+
+    SecondaryHomotopyGroups { basis_elements }
+}
+
+#[tracing::instrument(skip(data), fields(%elt))]
+fn compute_products(elt: SseqBasisElement, data: ProductComputationData) -> anyhow::Result<()> {
+    let name = format!("{}", elt);
+    let shift = Bidegree::n_s(elt.x, elt.y as u32);
 
     if data.resolution.next_homological_degree() <= shift.s() + 2 {
         eprintln!("Adams filtration of {name} too large, skipping");
@@ -136,18 +309,15 @@ fn compute_products(
         shift,
     ));
 
-    let mut matrix = Matrix::new(data.p, hom.source.number_of_gens_in_bidegree(shift), 1);
-
-    if matrix.rows() == 0 || matrix.columns() == 0 {
-        panic!("No classes in this bidegree");
-    }
-
-    let mut v = vec![0; matrix.rows()];
-    v[generator.idx()] = 1;
-    matrix[generator.idx()].set_entry(0, 1);
+    let matrix = Matrix::from_row(
+        data.p,
+        elt.v.to_owned(),
+        hom.source.number_of_gens_in_bidegree(shift),
+    )
+    .transpose();
 
     hom.extend_step(shift, Some(&matrix));
-    // let extend_max = shift + generator.degree() + TAU_BIDEGREE;
+    // let extend_max = shift + generator.degree() + LAMBDA_BIDEGREE;
     let res_max = Bidegree::n_s(
         data.resolution.module(0).max_computed_degree(),
         data.resolution.next_homological_degree() - 1,
@@ -162,24 +332,6 @@ fn compute_products(
         data.unit.compute_through_stem(res_max - shift);
     }
 
-    // Check that class survives to E3.
-    {
-        let m = data
-            .res_lift
-            .homotopy(shift.s() + 2)
-            .homotopies
-            .hom_k(shift.t());
-        assert_eq!(m.len(), v.len());
-        let mut sum = vec![0; m[0].len()];
-        for (x, d2) in v.iter().zip_eq(&m) {
-            sum.iter_mut().zip_eq(d2).for_each(|(a, b)| *a += x * b);
-        }
-        if sum.iter().any(|x| *x % data.p != 0) {
-            eprintln!("{name} supports a non-zero d2, skipping");
-            return Ok(());
-        }
-    }
-
     let hom_lift = SecondaryResolutionHomomorphism::new(
         Arc::clone(&data.res_lift),
         Arc::clone(&data.unit_lift),
@@ -191,7 +343,7 @@ fn compute_products(
     let name = hom_lift.name();
     // Iterate through the multiplicand
     for b in data.unit.iter_stem().skip(1) {
-        if (b.n(), b.s()) > (generator.n(), generator.s()) {
+        if (b.n(), b.s() as i32) > (elt.x, elt.y) {
             // By symmetry, it's enough to compute products with cycles in degrees at most as large
             // as the generator (in the lexicographic order). The `iter_stem` iterator returns
             // bidegrees that are lexicographically increasing.
@@ -207,7 +359,7 @@ fn compute_products(
         // d2 that hits the potential target.
         if !data
             .resolution
-            .has_computed_bidegree(b + shift + TAU_BIDEGREE)
+            .has_computed_bidegree(b + shift + LAMBDA_BIDEGREE)
         {
             continue;
         }
@@ -222,14 +374,18 @@ fn compute_products(
             continue;
         }
 
-        let page_data = get_page_data(data.unit_sseq.as_ref(), b);
+        let r = get_r(data.unit_sseq.as_ref(), b);
+        let bze_basis = data
+            .unit_sseq
+            .bze_basis(b.n(), b.s() as i32, r)
+            .collect::<Vec<_>>();
 
         let target_num_gens = data.resolution.number_of_gens_in_bidegree(b + shift);
-        let tau_num_gens = data
+        let lambda_num_gens = data
             .resolution
-            .number_of_gens_in_bidegree(b + shift + TAU_BIDEGREE);
+            .number_of_gens_in_bidegree(b + shift + LAMBDA_BIDEGREE);
 
-        if target_num_gens == 0 && tau_num_gens == 0 {
+        if target_num_gens == 0 && lambda_num_gens == 0 {
             continue;
         }
 
@@ -239,43 +395,78 @@ fn compute_products(
         // First print the products with non-surviving classes
         if target_num_gens > 0 {
             let hom_k = hom.get_map((b + shift).s()).hom_k(b.t());
-            for i in page_data
-                .complement_pivots()
-                .filter(|i| hom_k[*i].iter().any(|c| *c != 0))
+            for gen in bze_basis
+                .iter()
+                .filter(|e| e.kind == SseqBasisElementKind::E)
             {
-                let gen = BidegreeGenerator::new(b, i);
-                println!("{name} τ x_{gen} = τ {:?}", &hom_k[i]);
+                let i = gen.v.first_nonzero().unwrap().0;
+                if hom_k[i].iter().any(|x| *x != 0) {
+                    let zero_below = FpVector::new(
+                        data.p,
+                        data.resolution
+                            .number_of_gens_in_bidegree(b + shift - LAMBDA_BIDEGREE),
+                    );
+                    let answer = SecondaryHomotopyElement {
+                        b: b + shift - LAMBDA_BIDEGREE,
+                        classical: zero_below,
+                        lambda: FpVector::from_slice(data.p, &hom_k[i]),
+                    };
+                    let output_element = data.homotopy_groups.to_basis_elements(answer);
+                    if let Err(e) = output_element {
+                        println!("Failed to express {name} [λ{gen}]: {e}");
+                    } else {
+                        println!(
+                            "{name} [λ{gen}] = {}",
+                            output_element.unwrap().iter().join(" + ")
+                        );
+                    }
+                }
             }
         }
 
+        let subspace_gens = bze_basis
+            .iter()
+            .filter(|e| e.kind != SseqBasisElementKind::E);
+
         // Now print the secondary products
-        if page_data.subspace_dimension() == 0 {
+        if subspace_gens.clone().count() == 0 {
             continue;
         }
 
         let mut outputs = vec![
-            FpVector::new(data.p, target_num_gens + tau_num_gens);
-            page_data.subspace_dimension()
+            FpVector::new(data.p, target_num_gens + lambda_num_gens);
+            subspace_gens.clone().count()
         ];
 
         hom_lift.hom_k(
             Some(&data.res_sseq),
             b,
-            page_data.subspace_gens(),
+            subspace_gens.clone().map(|e| e.v.as_slice()),
             outputs.iter_mut().map(FpVector::as_slice_mut),
         );
-        for (gen, output) in page_data
-            .subspace_gens()
+
+        for (gen, output) in subspace_gens
             .zip_eq(outputs)
             .filter(|(_, v)| v.iter().any(|x| x != 0))
         {
-            println!(
-                "{name} [{basis_string}] = {} + τ {}",
-                output.slice(0, target_num_gens),
-                output.slice(target_num_gens, target_num_gens + tau_num_gens),
-                basis_string = BidegreeElement::new(b, gen.to_owned()).to_basis_string(),
+            let output = SecondaryHomotopyElement::new(
+                b + shift,
+                output.slice(0, target_num_gens).to_owned(),
+                output
+                    .slice(target_num_gens, target_num_gens + lambda_num_gens)
+                    .to_owned(),
             );
+            let output_element = data.homotopy_groups.to_basis_elements(output);
+            if let Err(e) = output_element {
+                println!("Failed to express {name} [{gen}]: {e}");
+            } else {
+                println!(
+                    "{name} [{gen}] = {}",
+                    output_element.unwrap().iter().join(" + ")
+                );
+            }
         }
     }
     Ok(())
 }
+

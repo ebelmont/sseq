@@ -14,7 +14,7 @@
 
 use std::{
     fmt::Display,
-    io::{Read, Write},
+    io,
     sync::{mpsc, Arc, Mutex},
 };
 
@@ -185,19 +185,17 @@ impl MilnorSubalgebra {
     }
 
     fn optimal_for(b: Bidegree) -> Self {
-        let mut result = Self::zero_algebra();
-        for subalgebra in SubalgebraIterator::new() {
+        let b_is_in_vanishing_region = |subalgebra: &Self| {
             let coeff = (1 << subalgebra.profile.len()) - 1;
-            if b.t() < coeff * (b.s() as i32 + 1) + subalgebra.top_degree() {
-                // (s,t) is not in the vanishing region of `subalgebra` or any further subalgebra
-                break;
-            }
-            result = subalgebra;
-        }
-        result
+            b.t() >= coeff * (b.s() as i32 + 1) + subalgebra.top_degree()
+        };
+        SubalgebraIterator::new()
+            .take_while(b_is_in_vanishing_region)
+            .last()
+            .unwrap_or(Self::zero_algebra())
     }
 
-    fn to_bytes(&self, buffer: &mut impl Write) -> std::io::Result<()> {
+    fn to_bytes(&self, buffer: &mut impl io::Write) -> io::Result<()> {
         buffer.write_u64::<LittleEndian>(self.profile.len() as u64)?;
         buffer.write_all(&self.profile)?;
 
@@ -207,7 +205,7 @@ impl MilnorSubalgebra {
         buffer.write_all(&zeros[0..padding])
     }
 
-    fn from_bytes(data: &mut impl Read) -> std::io::Result<Self> {
+    fn from_bytes(data: &mut impl io::Read) -> io::Result<Self> {
         let len = data.read_u64::<LittleEndian>()? as usize;
         let mut profile = vec![0; len];
 
@@ -222,10 +220,7 @@ impl MilnorSubalgebra {
         Ok(Self { profile })
     }
 
-    fn signature_to_bytes(
-        signature: &[PPartEntry],
-        buffer: &mut impl Write,
-    ) -> std::io::Result<()> {
+    fn signature_to_bytes(signature: &[PPartEntry], buffer: &mut impl io::Write) -> io::Result<()> {
         if cfg!(target_endian = "little") && std::mem::size_of::<PPartEntry>() == 2 {
             unsafe {
                 let buf: &[u8] = std::slice::from_raw_parts(
@@ -250,7 +245,7 @@ impl MilnorSubalgebra {
         Ok(())
     }
 
-    fn signature_from_bytes(&self, data: &mut impl Read) -> std::io::Result<Vec<PPartEntry>> {
+    fn signature_from_bytes(&self, data: &mut impl io::Read) -> io::Result<Vec<PPartEntry>> {
         let len = self.profile.len();
         let mut signature: Vec<PPartEntry> = vec![0; len];
 
@@ -349,7 +344,7 @@ impl<'a> SignatureIterator<'a> {
     }
 }
 
-impl<'a> Iterator for SignatureIterator<'a> {
+impl Iterator for SignatureIterator<'_> {
     type Item = Vec<PPartEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -401,10 +396,6 @@ pub struct Resolution<M: ZeroModule<Algebra = MilnorAlgebra>> {
 }
 
 impl<M: ZeroModule<Algebra = MilnorAlgebra>> Resolution<M> {
-    pub fn prime(&self) -> ValidPrime {
-        TWO
-    }
-
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -487,13 +478,13 @@ impl<M: ZeroModule<Algebra = MilnorAlgebra>> Resolution<M> {
 
     #[tracing::instrument(skip_all, fields(signature = ?signature, throughput))]
     fn write_qi(
-        f: &mut Option<impl Write>,
+        f: &mut Option<impl io::Write>,
         scratch: &mut FpVector,
         signature: &[PPartEntry],
         next_mask: &[usize],
         full_matrix: &Matrix,
         masked_matrix: &AugmentedMatrix<2>,
-    ) -> std::io::Result<()> {
+    ) -> io::Result<()> {
         let f = match f {
             Some(f) => f,
             None => return Ok(()),
@@ -724,6 +715,7 @@ impl<M: ZeroModule<Algebra = MilnorAlgebra>> Resolution<M> {
     }
 
     /// Step resolution for s = 0
+    #[tracing::instrument(skip(self))]
     fn step0(&self, t: i32) {
         self.zero_module.extend_by_zero(t);
 
@@ -774,6 +766,7 @@ impl<M: ZeroModule<Algebra = MilnorAlgebra>> Resolution<M> {
     }
 
     /// Step resolution for s = 1
+    #[tracing::instrument(skip(self))]
     fn step1(&self, t: i32) -> anyhow::Result<()> {
         let p = self.prime();
 
@@ -846,6 +839,8 @@ impl<M: ZeroModule<Algebra = MilnorAlgebra>> Resolution<M> {
                 .save_file(SaveKind::NassauDifferential, b)
                 .open_file(dir.clone())
             {
+                tracing::info!("Loading differential at {b}");
+
                 let num_new_gens = f.read_u64::<LittleEndian>()? as usize;
                 // This need not be equal to `target_res_dimension`. If we saved a big resolution
                 // and now only want to load up to a small stem, then `target_res_dimension` will
@@ -955,6 +950,10 @@ impl<M: ZeroModule<Algebra = MilnorAlgebra>> ChainComplex for Resolution<M> {
     type Algebra = MilnorAlgebra;
     type Homomorphism = FreeModuleHomomorphism<FreeModule<Self::Algebra>>;
     type Module = FreeModule<Self::Algebra>;
+
+    fn prime(&self) -> ValidPrime {
+        TWO
+    }
 
     fn algebra(&self) -> Arc<Self::Algebra> {
         self.zero_module.algebra()

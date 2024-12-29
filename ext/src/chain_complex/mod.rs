@@ -135,6 +135,12 @@ where
         self.module(b.s()).number_of_gens_in_degree(b.t())
     }
 
+    /// Iterate through all nonzero bidegrees in increasing order of stem.
+    fn iter_nonzero_stem(&self) -> impl Iterator<Item = Bidegree> + '_ {
+        self.iter_stem()
+            .filter(move |&b| self.number_of_gens_in_bidegree(b) > 0)
+    }
+
     /// Get a string representation of d(gen), where d is the differential of the resolution.
     fn boundary_string(&self, gen: BidegreeGenerator, compact: bool) -> String {
         let d = self.differential(gen.s());
@@ -187,8 +193,7 @@ pub trait ChainComplex: Send + Sync {
     /// The first s such that `self.module(s)` is not defined.
     fn next_homological_degree(&self) -> u32;
 
-    /// Iterate through all defined bidegrees in increasing order of stem. The return values are of
-    /// the form `(s, n, t)`.
+    /// Iterate through all defined bidegrees in increasing order of stem.
     fn iter_stem(&self) -> StemIterator<'_, Self> {
         StemIterator {
             cc: self,
@@ -253,7 +258,7 @@ pub struct StemIterator<'a, CC: ?Sized> {
     max_s: u32,
 }
 
-impl<'a, CC: ChainComplex + ?Sized> Iterator for StemIterator<'a, CC> {
+impl<CC: ChainComplex + ?Sized> Iterator for StemIterator<'_, CC> {
     type Item = Bidegree;
 
     fn next(&mut self) -> Option<Self::Item> {

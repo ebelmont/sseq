@@ -1,7 +1,4 @@
-use std::{
-    io::{Read, Write},
-    ops::Deref,
-};
+use std::{io, ops::Deref};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use itertools::Itertools;
@@ -60,7 +57,7 @@ impl Subspace {
         ret
     }
 
-    pub fn from_bytes(p: ValidPrime, data: &mut impl Read) -> std::io::Result<Self> {
+    pub fn from_bytes(p: ValidPrime, data: &mut impl io::Read) -> io::Result<Self> {
         let rows = data.read_u64::<LittleEndian>()? as usize;
         let ambient_dimension = data.read_u64::<LittleEndian>()? as usize;
 
@@ -71,7 +68,7 @@ impl Subspace {
         Ok(Self { matrix })
     }
 
-    pub fn to_bytes(&self, buffer: &mut impl Write) -> std::io::Result<()> {
+    pub fn to_bytes(&self, buffer: &mut impl io::Write) -> io::Result<()> {
         buffer.write_u64::<LittleEndian>(self.matrix.rows() as u64)?;
         buffer.write_u64::<LittleEndian>(self.ambient_dimension() as u64)?;
 
@@ -243,11 +240,18 @@ impl Subspace {
     }
 
     pub fn sum(&self, other: &Self) -> Self {
+        assert_eq!(self.prime(), other.prime());
+        assert_eq!(self.ambient_dimension(), other.ambient_dimension());
+
         let self_rows = self.matrix.clone().into_iter();
         let other_rows = other.matrix.clone().into_iter();
         let new_rows = self_rows.chain(other_rows).collect();
 
-        let mut ret = Self::from_matrix(Matrix::from_rows(self.prime(), new_rows));
+        let mut ret = Self::from_matrix(Matrix::from_rows(
+            self.prime(),
+            new_rows,
+            self.ambient_dimension(),
+        ));
         ret.matrix.trim(0, self.matrix.columns() + 1, 0);
         ret
     }
@@ -289,5 +293,52 @@ impl std::fmt::Display for Subspace {
 
         write!(f, "{output}")?;
         Ok(())
+    }
+}
+
+#[cfg(feature = "proptest")]
+pub mod arbitrary {
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::matrix::matrix_inner::arbitrary::MatrixArbParams;
+    pub use crate::matrix::matrix_inner::arbitrary::MAX_COLUMNS as MAX_DIM;
+
+    #[derive(Debug, Clone)]
+    pub struct SubspaceArbParams {
+        pub p: Option<ValidPrime>,
+        pub dim: BoxedStrategy<usize>,
+    }
+
+    impl Default for SubspaceArbParams {
+        fn default() -> Self {
+            Self {
+                p: None,
+                dim: (0..=MAX_DIM).boxed(),
+            }
+        }
+    }
+
+    impl Arbitrary for Subspace {
+        type Parameters = SubspaceArbParams;
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+            let p = match args.p {
+                Some(p) => Just(p).boxed(),
+                None => any::<ValidPrime>().boxed(),
+            };
+
+            (p, args.dim)
+                .prop_flat_map(move |(p, dim)| {
+                    Matrix::arbitrary_rref_with(MatrixArbParams {
+                        p: Some(p),
+                        rows: (0..=dim + 1).boxed(),
+                        columns: Just(dim).boxed(),
+                    })
+                })
+                .prop_map(Self::from_matrix)
+                .boxed()
+        }
     }
 }

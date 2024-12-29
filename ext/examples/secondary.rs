@@ -24,7 +24,7 @@
 //!
 //! To compute data for a single `s`, run the script with the environment variable
 //! `SECONDARY_JOB=s`. The minimum value of `s` is the cohomological degree shift of the secondary
-//! homotopy (i.e. the difference in degrees between the input class and the τ part of the answer;
+//! homotopy (i.e. the difference in degrees between the input class and the λ part of the answer;
 //! 2 in the case of `secondary`), and the maximum value of `s` is the `max_s` of the resolution.
 //!
 //! After running this script for all `s` in the range, run it as usual to produce the final
@@ -71,15 +71,12 @@ fn main() -> anyhow::Result<()> {
     let d2_shift = Bidegree::n_s(-1, 2);
 
     // Iterate through target of the d2
-    for b in lift.underlying().iter_stem() {
+    for b in lift.underlying().iter_nonzero_stem() {
         if b.s() < 3 {
             continue;
         }
 
         if b.t() - 1 > resolution.module(b.s() - 2).max_computed_degree() {
-            continue;
-        }
-        if resolution.number_of_gens_in_bidegree(b) == 0 {
             continue;
         }
         let homotopy = lift.homotopy(b.s());

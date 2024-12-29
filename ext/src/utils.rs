@@ -22,8 +22,8 @@ pub type QueryModuleResolution = Resolution<CCC>;
 
 /// The type returned by [`query_module`]. The value of this type depends on whether
 /// [`nassau`](crate::nassau) is enabled. In any case, it is an augmented free chain complex over
-/// either [`SteenrodAlgebra`] or [`MilnorAlgebra`](algebra::MilnorAlgebra) and supports the
-/// `compute_through_stem` function.
+/// either [`SteenrodAlgebra`] or [`MilnorAlgebra`] and supports the `compute_through_stem`
+/// function.
 #[cfg(feature = "nassau")]
 pub type QueryModuleResolution = crate::nassau::Resolution<FDModule<MilnorAlgebra>>;
 
@@ -465,7 +465,7 @@ pub fn get_unit(
 }
 
 mod logging {
-    use std::io::Write;
+    use std::io;
 
     pub struct LogWriter<T> {
         writer: T,
@@ -473,14 +473,14 @@ mod logging {
         start: std::time::Instant,
     }
 
-    impl<T: Write> Write for LogWriter<T> {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    impl<T: io::Write> io::Write for LogWriter<T> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             let written = self.writer.write(buf)?;
             self.bytes += written as u64;
             Ok(written)
         }
 
-        fn flush(&mut self) -> std::io::Result<()> {
+        fn flush(&mut self) -> io::Result<()> {
             self.writer.flush()
         }
     }
@@ -503,7 +503,7 @@ mod logging {
         }
     }
 
-    impl<T: Write> LogWriter<T> {
+    impl<T: io::Write> LogWriter<T> {
         /// Return the throughput in MiB/s
         pub fn into_throughput(mut self) -> Throughput {
             self.writer.flush().unwrap();
@@ -540,6 +540,8 @@ mod logging {
     pub fn init_logging() {
         tracing::subscriber::set_global_default(ext_tracing_subscriber())
             .expect("Failed to enable logging");
+
+        tracing::info!("Logging initialized");
     }
 }
 

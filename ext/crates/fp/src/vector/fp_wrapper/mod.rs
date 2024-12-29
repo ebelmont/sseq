@@ -12,10 +12,7 @@
 //! we can't simply define `type FpVector = FqVector<Fp<2>>` like we previously did: we need to use
 //! a transparent wrapper.
 
-use std::{
-    convert::TryInto,
-    io::{Read, Write},
-};
+use std::{convert::TryInto, io};
 
 use itertools::Itertools;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -104,9 +101,9 @@ impl FpVector {
         pub fn new<P: Prime>(p: P, len: usize) -> (from FqVector);
         pub fn new_with_capacity<P: Prime>(p: P, len: usize, capacity: usize) -> (from FqVector);
 
-        pub fn update_from_bytes(&mut self, data: &mut impl Read) -> (std::io::Result<()>);
-        pub fn from_bytes<P: Prime>(p: P, len: usize, data: &mut impl Read) -> (from io FqVector);
-        pub fn to_bytes(&self, buffer: &mut impl Write) -> (std::io::Result<()>);
+        pub fn update_from_bytes(&mut self, data: &mut impl io::Read) -> (io::Result<()>);
+        pub fn from_bytes<P: Prime>(p: P, len: usize, data: &mut impl io::Read) -> (from io FqVector);
+        pub fn to_bytes(&self, buffer: &mut impl io::Write) -> (io::Result<()>);
     }
 
     pub fn from_slice<P: Prime>(p: P, slice: &[u32]) -> Self {
@@ -140,7 +137,7 @@ impl<'a> FpSlice<'a> {
     }
 }
 
-impl<'a> FpSliceMut<'a> {
+impl FpSliceMut<'_> {
     dispatch_vector! {
         pub fn prime(&self) -> ValidPrime;
         pub fn @scale(&mut self, c: u32);
@@ -158,7 +155,7 @@ impl<'a> FpSliceMut<'a> {
     }
 }
 
-impl<'a> FpVectorIterator<'a> {
+impl FpVectorIterator<'_> {
     dispatch_vector! {
         pub fn skip_n(&mut self, n: usize);
     }
@@ -170,7 +167,7 @@ impl std::fmt::Display for FpVector {
     }
 }
 
-impl<'a> std::fmt::Display for FpSlice<'a> {
+impl std::fmt::Display for FpSlice<'_> {
     /// # Example
     /// ```
     /// # use fp::vector::FpVector;
@@ -204,7 +201,7 @@ impl std::ops::AddAssign<&Self> for FpVector {
     }
 }
 
-impl<'a> Iterator for FpVectorIterator<'a> {
+impl Iterator for FpVectorIterator<'_> {
     type Item = u32;
 
     dispatch_vector! {
@@ -212,7 +209,7 @@ impl<'a> Iterator for FpVectorIterator<'a> {
     }
 }
 
-impl<'a> Iterator for FpVectorNonZeroIterator<'a> {
+impl Iterator for FpVectorNonZeroIterator<'_> {
     type Item = (usize, u32);
 
     dispatch_vector! {
@@ -229,6 +226,7 @@ impl<'a> IntoIterator for &'a FpVector {
     }
 }
 
+impl_from!();
 impl_try_into!();
 
 impl Serialize for FpVector {
