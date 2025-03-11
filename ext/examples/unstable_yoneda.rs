@@ -1,9 +1,10 @@
-//! Computing the Yoneda product $E_2^{s_1}(S^{\theta_1}, S^{\theta_2}) \cdot E_2^{s_2}(S^{\theta_2}, S^{\theta_3}) \to E_2^{s_1+s_2}(S^{\theta_1}, S^{\theta_3})$
+//! Computing the Yoneda product $E_2^{s_1}(\Sigma^{\theta_1}F_2, \Sigma^{\theta_2}F_2) \cdot E_2^{s_2}(\Sigma^{\theta_2}F_2, \Sigma^{\theta_3}F_2) \to E_2^{s_1+s_2}(\Sigma^{\theta_1}F_2, \Sigma^{\theta_3}F_2)$
 //! for given $\theta_1$ and all $\theta_2, \theta_3, s_1, s_2$. Here $E_2^s$ means $Ext^{s,0}$ in the (s, t) grading.
 //! The output is formatted as tsv, where the fields are:
-//! th1, stem of elt1, filtration of elt1, basis index of elt1, th2, stem of elt2, filtration of elt2, basis index of elt2,
-//! vector representing a linear combination of basis elements in the degree of elt1 . elt2.
-//! The order is composition notation order. See the comment below for more on what this means.
+//! theta1, theta2, theta3, s1, index1, s2, index2, product
+//! where index is the index of the basis element, and the product is expressed as a vector (linear
+//! combination of basis elements in the degree of the product).
+//! See the comment below for more on what this means.
 //! 
 
 use std::{path::PathBuf, sync::Arc};
@@ -115,7 +116,6 @@ fn main() -> anyhow::Result<()> {
             )?);
         // We use res2 in degree (s,t) = (s2, th3). Compute this in the maximum degrees
         // needed.
-        //println!("th2 = {}, prod_max = ({}, {})", th2, prod_max.t(), prod_max.s());
         res2.compute_through_bidegree(res_max_deg);
 
         for s1 in 0..prod_max.s()+1 {
@@ -167,7 +167,6 @@ fn compute_composites(
         /*if (th2 - s1 - th1 == 0 && s1 == 0) || (th3 - s2 - th2 == 0 && s2 == 0) {  // Don't multiply by degree (stem,filt) = (0,0)
             continue;
         }*/
-        //println!("th1={th1}, th2={th2}, th3={th3}, s1={s1}, s2={s2}, ({},{s1},{th1}), ({}, {s2}, {th2})", th2-s1, th3-s2);
         let num_c_classes = res2.number_of_gens_in_bidegree(
             Bidegree::s_t(s2 as u32, th3)
             );
@@ -175,7 +174,6 @@ fn compute_composites(
             Bidegree::s_t(s1 as u32, th2)
             );*/
         /*if num_c_classes == 0 {
-            println!("{th1}\t{th2}\t{th3}\t{s1}\t0\t{s2}\t0\t0");
             continue;
         }*/
 
