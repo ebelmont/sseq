@@ -161,21 +161,21 @@ fn compute_composites(
         * We are not interested in multiplying stable*stable, except where both
         * are the first class in the stable range.
         */
-        /*if th2 - s1 - th1 < th1 && th3 - s2 - th2 < th2 {
+        if th2 - s1 - th1 < th1 - 2 && th3 - s2 - th2 < th2 - 2 {
             continue;
-        }*/
-        /*if (th2 - s1 - th1 == 0 && s1 == 0) || (th3 - s2 - th2 == 0 && s2 == 0) {  // Don't multiply by degree (stem,filt) = (0,0)
+        }
+        if (th2 - s1 - th1 == 0 && s1 == 0) || (th3 - s2 - th2 == 0 && s2 == 0) {  // Don't multiply by degree (stem,filt) = (0,0)
             continue;
-        }*/
+        }
         let num_c_classes = res2.number_of_gens_in_bidegree(
             Bidegree::s_t(s2 as u32, th3)
             );
         /*let num_a_classes = res1.number_of_gens_in_bidegree(
             Bidegree::s_t(s1 as u32, th2)
             );*/
-        /*if num_c_classes == 0 {
+        if num_c_classes == 0 {
             continue;
-        }*/
+        }
 
 
         let mut c_class = vec!(0; num_c_classes);
@@ -223,9 +223,7 @@ fn compute_composites(
                     }
                 }
             }
-            //product.row_reduce();
 
-            //println!("num_c_classes: {th2}, {s2}, {th3}, {c_idx}, {num_c_classes}, {}", product.iter().len());
             for (i,row) in product.iter().enumerate() {
                 let row_trunc = row.slice(0, product_num_gens);
                 if !row_trunc.iter().all(|x| x == 0) {
