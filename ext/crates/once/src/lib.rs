@@ -574,6 +574,24 @@ impl<T> OnceVec<T> {
         })
     }
 }
+impl<T: Clone> OnceVec<T> {
+    /// Converts the contents of this `OnceVec` into a `Vec<T>`.
+    pub fn to_vec(&self) -> Vec<T> {
+        self.iter().map(|x| x.clone()).collect()
+    }
+    pub fn pop_front(&self) -> OnceVec<T> {
+        // Convert to a Vec<T>
+        let mut vec = self.to_vec();
+
+        // Remove the first element if the vector is not empty.
+        if !vec.is_empty() {
+            vec.remove(0);
+        }
+
+        // Create a new OnceVec from the modified vector.
+        OnceVec::from_vec(vec)
+    }
+}
 
 impl<T: Send + Sync> OnceVec<T> {
     /// A parallel version of `extend`. If the `concurrent` feature is enabled, the function `f`

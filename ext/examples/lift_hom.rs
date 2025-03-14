@@ -86,6 +86,39 @@ fn main() -> anyhow::Result<()> {
 
     assert_eq!(source.prime(), target.prime());
     let p = source.prime();
+    let b = Bidegree::n_s(
+        query::with_default("Max source n", "30", str::parse),
+        query::with_default("Max source s", "7", str::parse),
+    );
+
+    let source_name = source.name();
+    let target = query::with_default("Target module", source_name, |s| {
+        if s == source_name {
+            Ok(Arc::clone(&source))
+        } else if cfg!(feature = "nassau") {
+            Err(anyhow!("Can only resolve S_2 with nassau"))
+        } else {
+            let config: utils::Config = s.try_into()?;
+            let save_dir = query::optional("Target save directory", |x| {
+                Result::<PathBuf, std::convert::Infallible>::Ok(PathBuf::from(x))
+            });
+
+            let mut target = utils::construct(config, save_dir)
+                .context("Failed to load module from save file")
+                .unwrap();
+
+            target.set_name(s.to_owned());
+
+            #[cfg(feature = "nassau")]
+            unreachable!();
+
+            #[cfg(not(feature = "nassau"))]
+            Ok(Arc::new(target))
+        }
+    });
+
+    assert_eq!(source.prime(), target.prime());
+    let p = source.prime();
 
     let name: String = query::raw("Name of product", str::parse);
 

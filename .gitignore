@@ -29,3 +29,8 @@ chart/python/*.egg-info
 
 #vscode
 **/.vscode
+
+#MacOS
+.DS_Store
+ext/.DS_Store
+ext/crates/.DS_Store

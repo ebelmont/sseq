@@ -10,7 +10,7 @@ use algebra::{
         homomorphism::{ModuleHomomorphism, MuFreeModuleHomomorphism},
         Module, MuFreeModule,
     },
-    Algebra, MuAlgebra,
+    Algebra, MuAlgebra, UnstableAlgebra,
 };
 use anyhow::Context;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -71,11 +71,11 @@ where
 {
     name: String,
     lock: Mutex<()>,
-    complex: Arc<CC>,
-    modules: OnceVec<Arc<MuFreeModule<U, CC::Algebra>>>,
-    zero_module: Arc<MuFreeModule<U, CC::Algebra>>,
-    chain_maps: OnceVec<Arc<MuFreeModuleHomomorphism<U, CC::Module>>>,
-    differentials: OnceVec<Arc<MuFreeModuleHomomorphism<U, MuFreeModule<U, CC::Algebra>>>>,
+    pub complex: Arc<CC>,
+    pub modules: OnceVec<Arc<MuFreeModule<U, CC::Algebra>>>,
+    pub zero_module: Arc<MuFreeModule<U, CC::Algebra>>,
+    pub chain_maps: OnceVec<Arc<MuFreeModuleHomomorphism<U, CC::Module>>>,
+    pub differentials: OnceVec<Arc<MuFreeModuleHomomorphism<U, MuFreeModule<U, CC::Algebra>>>>,
 
     ///  For each *internal* degree, store the kernel of the most recently calculated chain map as
     ///  returned by `generate_old_kernel_and_compute_new_kernel`, to be used if we run
@@ -98,6 +98,31 @@ where
     /// augmentation map are useful when the target chain complex is not concentrated in one
     /// degree, and they tend to be quite small anyway.
     pub load_quasi_inverse: bool,
+}
+
+impl<A, CC: ChainComplex<Algebra = A, Module = MuFreeModule<false, A>>> MuResolution<false, CC>
+where
+    A: UnstableAlgebra,
+{
+    pub fn augmented_loops(res: &Self) -> Self {
+        // Clone differentials and apply loops on each clone.
+        let differentials_cloned: OnceVec<_> =
+            res.differentials.iter().map(|d| d.loops()).collect();
+
+        Self {
+            name: res.name.clone(),
+            lock: Mutex::new(()),                      // Create a new lock
+            complex: Arc::clone(&res.complex),         // Share the underlying complex
+            modules: res.modules.clone(),              // Clone OnceVec
+            zero_module: Arc::clone(&res.zero_module), // Share the zero module
+            chain_maps: res.chain_maps.clone(),        // Clone OnceVec
+            differentials: differentials_cloned,       // Use cloned differentials
+            kernels: DashMap::new(),                   // Create new DashMap
+            save_dir: res.save_dir.clone(),
+            should_save: res.should_save,
+            load_quasi_inverse: res.load_quasi_inverse,
+        }
+    }
 }
 
 impl<const U: bool, CC: ChainComplex> MuResolution<U, CC>
@@ -179,6 +204,33 @@ where
                     Arc::clone(&self.modules[i - 1]),
                     0,
                 )));
+        }
+    }
+
+    pub fn pop_front(&self) {
+        // Pop from modules
+        self.modules.pop_front();
+
+        // Pop from chain_maps
+        self.chain_maps.pop_front();
+
+        // Pop from differentials
+        self.differentials.pop_front();
+    }
+
+    pub fn augmented(res: &Self) -> Self {
+        Self {
+            name: res.name.clone(),
+            lock: Mutex::new(()),                         // Create a new lock
+            complex: Arc::clone(&res.complex),            // Share the underlying complex
+            modules: res.modules.pop_front(),             // Create new OnceVec
+            zero_module: Arc::clone(&res.zero_module),    // Share the zero module
+            chain_maps: res.chain_maps.pop_front(),       // Create new OnceVec
+            differentials: res.differentials.pop_front(), // Create new OnceVec
+            kernels: DashMap::new(),                      // Create new DashMap
+            save_dir: res.save_dir.clone(),
+            should_save: res.should_save,
+            load_quasi_inverse: res.load_quasi_inverse,
         }
     }
 

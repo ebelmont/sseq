@@ -1,11 +1,5 @@
 use std::sync::Arc;
 
-use fp::{
-    matrix::{MatrixSliceMut, QuasiInverse, Subspace},
-    vector::{FpVector, Slice, SliceMut},
-};
-use once::OnceBiVec;
-
 use crate::{
     algebra::MuAlgebra,
     module::{
@@ -13,7 +7,14 @@ use crate::{
         homomorphism::{ModuleHomomorphism, ZeroHomomorphism},
         Module, MuFreeModule,
     },
+    UnstableAlgebra,
 };
+use fp::{
+    matrix::{MatrixSliceMut, QuasiInverse, Subspace},
+    vector::{FpVector, Slice, SliceMut},
+};
+use once::OnceBiVec;
+use std::any::Any;
 
 pub type FreeModuleHomomorphism<M> = MuFreeModuleHomomorphism<false, M>;
 pub type UnstableFreeModuleHomomorphism<M> = MuFreeModuleHomomorphism<true, M>;
@@ -261,7 +262,52 @@ where
         self.quasi_inverses.push_checked(quasi_inverse, degree);
     }
 }
+// Ensure that the Module type M implements Any + Send + Sync so we can downcast.
+impl<const U: bool, A> MuFreeModuleHomomorphism<U, MuFreeModule<U, A>>
+where
+    A: MuAlgebra<U>,
+{
+    // Restrict the method further so that M::Algebra must implement UnstableAlgebra.
+    pub fn loops(&self) -> Self
+    where
+        A: UnstableAlgebra,
+    {
+        // Create a new instance with copied data
+        let mut result = Self {
+            degree_shift: self.degree_shift.clone(),
+            source: self.source.clone(),
+            target: self.target.clone(),
+            outputs: self.outputs.clone(),
+            images: self.images.clone(),
+            kernels: self.kernels.clone(),
+            quasi_inverses: self.quasi_inverses.clone(),
+            min_degree: self.min_degree.clone(),
+        };
 
+        // Convert the target into an Arc<dyn Any + Send + Sync> so that we can downcast.
+        let target_any: Arc<dyn Any + Send + Sync> = self.target.clone();
+        // Downcast to the expected concrete type. This requires that the target is actually
+        // a MuFreeModule<true, M::Algebra>.
+        let target_freemodule = Arc::downcast::<MuFreeModule<true, A>>(target_any)
+            .expect("Target is not a MuFreeModule<true, _>");
+        // Now that we have the target as a MuFreeModule<true, M::Algebra>, we can safely call
+        // its methods.
+        for deg in target_freemodule.min_degree()..target_freemodule.max_generator_degree().unwrap()
+        {
+            // Get mutable access to outputs for degree `deg`
+            if let Some(out_vec) = result.outputs.data.get_mut(deg as usize) {
+                for idx in 0..out_vec.len() {
+                    let opgen = target_freemodule.index_to_op_gen(deg, idx);
+                    if opgen.looped(target_freemodule.algebra()) {
+                        // Modify the FpVector entry at index `idx`
+                        out_vec[idx].set_entry(idx, 0);
+                    }
+                }
+            }
+        }
+        result
+    }
+}
 impl<const U: bool, M: Module> ZeroHomomorphism<MuFreeModule<U, M::Algebra>, M>
     for MuFreeModuleHomomorphism<U, M>
 where

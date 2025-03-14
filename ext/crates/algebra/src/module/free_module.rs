@@ -1,3 +1,4 @@
+use fp::vector::FpVector;
 use std::sync::Arc;
 
 use fp::vector::{Slice, SliceMut};
@@ -16,6 +17,24 @@ pub struct OperationGeneratorPair {
     pub generator_index: usize,
 }
 
+impl OperationGeneratorPair {
+    /// Checks if an op_gen pair in a free unstable module gets killed when that module is looped
+    /// down
+    pub fn looped<A: MuAlgebra<true>>(&self, algebra: std::sync::Arc<A>) -> bool {
+        // Construct the looped free module with the given generator degree.
+        let loops =
+            MuFreeModule::<true, A>::new(algebra, "loops".to_string(), self.generator_degree - 1);
+
+        // Compute the degree as the sum of generator_degree and operation_degree.
+        let deg = self.generator_degree + self.operation_degree;
+
+        // Compute the dimensions at the given degree.
+        loops.compute_basis(deg);
+
+        // Return whether operation_index does not exceed the down dimension.
+        self.operation_index <= loops.dimension(deg)
+    }
+}
 pub type FreeModule<A> = MuFreeModule<false, A>;
 pub type UnstableFreeModule<A> = MuFreeModule<true, A>;
 
@@ -291,6 +310,12 @@ impl<const U: bool, A: MuAlgebra<U>> MuFreeModule<U, A> {
     /// elements from the generator.
     pub fn internal_generator_offset(&self, degree: i32, internal_gen_idx: usize) -> usize {
         self.generator_to_index[degree][internal_gen_idx]
+    }
+
+    pub fn gen_vec(&self, degree: i32, internal_gen_idx: usize) -> FpVector {
+        let mut vector = FpVector::new(self.prime(), self.dimension(degree));
+        vector.set_entry(self.generator_to_index[degree][internal_gen_idx], 1);
+        return vector;
     }
 
     /// Iterate the degrees and indices of each generator up to degree `degree`.

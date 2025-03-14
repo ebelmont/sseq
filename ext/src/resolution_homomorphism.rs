@@ -220,6 +220,7 @@ where
 
         let num_gens = f_cur.source().number_of_gens_in_degree(input.t());
         let fx_dimension = f_cur.target().dimension(output.t());
+        println!("{:?} and {:?} and {:?}", input.t(), num_gens, fx_dimension);
 
         if num_gens == 0 || fx_dimension == 0 {
             return f_cur.add_generators_from_rows_ooo(
@@ -261,6 +262,7 @@ where
 
             return f_cur.add_generators_from_rows_ooo(input.t(), outputs);
         }
+
         let mut outputs = vec![FpVector::new(p, fx_dimension); num_gens];
         let d_source = self.source.differential(input.s());
         let d_target = self.target.differential(output.s());
@@ -454,6 +456,53 @@ where
 
             f.get_matrix(m.as_slice_mut(), t);
             hom.extend_step(Bidegree::s_t(0, t), Some(&m));
+        }
+        hom
+    }
+
+    pub fn from_derived_module_homomorphism(
+        name: String,
+        source: Arc<CC1>,
+        target: Arc<CC2>,
+        f: &impl ModuleHomomorphism<
+            Source = <<CC1 as AugmentedChainComplex>::TargetComplex as ChainComplex>::Module,
+            Target = <<CC2 as AugmentedChainComplex>::TargetComplex as ChainComplex>::Module,
+        >,
+    ) -> Self {
+        assert_eq!(source.target().max_s(), 1);
+        assert_eq!(target.target().max_s(), 1);
+
+        let source_module = source.target().module(1);
+        let target_module = target.target().module(2);
+        assert!(Arc::ptr_eq(&source_module, &f.source()));
+        assert!(Arc::ptr_eq(&target_module, &f.target()));
+
+        let p = source.prime();
+        let shift = Bidegree::s_t(1, f.degree_shift());
+
+        let max_degree = source_module.max_generator_degree().expect(
+            "MuResolutionHomomorphism::from_module_homomorphism requires finite \
+             max_generator_degree",
+        );
+
+        let hom = Self::new(name, source, target, shift);
+
+        source_module.compute_basis(max_degree);
+        target_module.compute_basis(shift.t() + max_degree);
+
+        let max = Bidegree::s_t(0, max_degree);
+        hom.source.compute_through_bidegree(max);
+        hom.target.compute_through_bidegree(max + shift);
+
+        for t in source_module.min_degree()..=max_degree {
+            let mut m = Matrix::new(
+                p,
+                source_module.dimension(t),
+                target_module.dimension(t + shift.t()),
+            );
+
+            f.get_matrix(m.as_slice_mut(), t);
+            hom.extend_step(Bidegree::s_t(1, t), Some(&m));
         }
         hom
     }
