@@ -1,5 +1,5 @@
 //! Computing the Yoneda product $E_2^{s_1}(\Sigma^{\theta_1}F_2, \Sigma^{\theta_2}F_2) \cdot E_2^{s_2}(\Sigma^{\theta_2}F_2, \Sigma^{\theta_3}F_2) \to E_2^{s_1+s_2}(\Sigma^{\theta_1}F_2, \Sigma^{\theta_3}F_2)$
-//! for given $\theta_1$ and all $\theta_2, \theta_3, s_1, s_2$. Here $E_2^s$ means $Ext^{s,0}$ in the (s, t) grading.
+//! for given $\theta_1$ and all $\theta_2, \theta_3, s_1, s_2$ in a range of degrees. Here $E_2^s$ means $Ext^{s,0}$ in the (s, t) grading.
 //! The output is formatted as tsv, where the fields are:
 //! theta1, theta2, theta3, s1, index1, s2, index2, product
 //! where index is the index of the basis element, and the product is expressed as a vector (linear
@@ -26,7 +26,7 @@ use maybe_rayon::prelude::*;
 #[derive(Clone)]
 struct CompositeComputationData {
     p: ValidPrime,
-    prod_max: Bidegree,
+    res_max_deg: Bidegree,
     resolution1: Arc<UnstableResolution<FiniteChainComplex<SuspensionModule<Box<dyn Module<Algebra = SteenrodAlgebra>>>>>>,
     resolution2: Arc<UnstableResolution<FiniteChainComplex<SuspensionModule<Box<dyn Module<Algebra = SteenrodAlgebra>>>>>>,
     th1: i32,
@@ -56,17 +56,10 @@ fn main() -> anyhow::Result<()> {
 
 
     eprintln!("\nComputing the Yoneda product E_2^(s1,0)(H^* S^(th1), H^* S^(th2)) . E_2^(s2,0)(H^* S^(th2), H^* S^(th3))");
-    eprintln!("for your choice of th1, and all (th2, th3, s1, s2) in a range.");
+    eprintln!("for your choice of th1, and all (th2, th3, s1, s2) such that the corresponding");
+    eprintln!("Ytilde product lands in internal degree <= prod_max_t for your choice of prod_max_t.");
 
-    let th1 = query::raw("th1 = ?", str::parse::<std::num::NonZeroI32>).get();
 
-    let prod_max = Bidegree::n_s(
-        query::raw("Max stem", str::parse),
-        query::raw("Max filtration", str::parse),
-    );
-
-    let res_max_deg = Bidegree::s_t(prod_max.s(), prod_max.t() + th1);
-    
     /*
      * Write e_n := Sigma^n F_2.
      * Resolve e_{th1} and e_{th2}.
@@ -81,9 +74,40 @@ fn main() -> anyhow::Result<()> {
      * The product is res1_{s1 + s2} --> res2_{s2} --> e_{th3}
      * and has (s,t) = (s1 + s2, th3).
      * The variable names in the code refer to a = elt1, c = elt2.
+     *
+     * The product that converges to (extended) composition in homotopy is the Ytilde product,
+     * which is suspension composed with what we compute here. We want to restrict degrees here so
+     * that the output of Ytilde is restricted to t <= (input degree).
+     *
+     * Ytilde: Ext^{s1}(e_{th1}, e_{n1+th1+s1}) x Ext^{s2}(e_{th2}, e_{n2+th2+s2})
+     *    --suspend--> Ext^{s1}(e_{th1}, e_{n1+th1+s1}) x Ext^{s2}(e_{n1+th1+s1})
+     *    --Yoneda--> Ext^{s1+s2}(e_{th1}, e_{n1+n2+th1+s1+s2})
+     * where n = stem and s = filtration. So our th2 = n1+th1+s1 and our th3 = n1+n2+th1+s1+s2.
+     *
+     * t in the Ytilde product = stem+filtration = n1+n2+s1+s2 = th3 - th1.
+     * With th1 fixed, this means we want to restrict:
+     * th1 <= th3 <= prod_max_t + th1
+     * th1 <= th2 <= th3
+     *
+     * To find the cutoff for filtration, we use the Adams vanishing line,
+     * which says (with a little wiggle room) that s <= 1/2(t-s) + 5, or s <= (t+10)/3.
+     * This means an upper bound for Adams filtration of the Ytilde product is
+     * s1 + s2 <= (prod_max_t+10)/3, and Ytilde filtration = Y filtration.
+     *
      */
 
 
+
+    let th1 = query::raw("th1", str::parse::<std::num::NonZeroI32>).get();
+
+    let prod_max_t : i32 = query::raw("Max internal degree (prod_max_t)", str::parse);
+
+    /*
+     * We need res1 up to degree (s,t) = (s1+s2, th3). Compute the maximum up front.
+     */
+    let max_s = (prod_max_t+10)/3+1;
+    let res_max_deg = Bidegree::s_t(max_s as u32, prod_max_t + th1);
+    
     let res1: Arc<UnstableResolution<FiniteChainComplex<_>>> =
         Arc::new(UnstableResolution::new_with_save(
             Arc::new(FiniteChainComplex::ccdz(Arc::new(SuspensionModule::new(
@@ -99,13 +123,7 @@ fn main() -> anyhow::Result<()> {
     //let res1_maxdeg = Bidegree::s_t(prod_max.s(), prod_max.t());
     res1.compute_through_bidegree(res_max_deg);
 
-    /*
-     * Yoneda target has s=s1+s2, t=th3 and converges to an element in pi_{th3-s1-s2}(S^{th1})
-     * So we want the stem th3-s1-s2-th1 <= prod_max.n(), and also s1+s2 <= prod_max.s()
-     * so th3 <= prod_max.n() + prod_max.s() + th1. We have the same condition on th2, with th2 <=
-     * th3.
-     */
-    for th2 in th1..th1+prod_max.t()+1 {
+    for th2 in th1..(res_max_deg.t() + 1) {
         let res2: Arc<UnstableResolution<FiniteChainComplex<_>>> =
             Arc::new(UnstableResolution::new_with_save(
                 Arc::new(FiniteChainComplex::ccdz(Arc::new(SuspensionModule::new(
@@ -118,10 +136,10 @@ fn main() -> anyhow::Result<()> {
         // needed.
         res2.compute_through_bidegree(res_max_deg);
 
-        for s1 in 0..prod_max.s()+1 {
+        for s1 in 0..(res_max_deg.s() + 1) {
             let data = CompositeComputationData {
                 p, 
-                prod_max,
+                res_max_deg,
                 resolution1: Arc::clone(&res1),
                 resolution2: Arc::clone(&res2),
                 th1,
@@ -130,7 +148,7 @@ fn main() -> anyhow::Result<()> {
             };
 
 
-            let s2_max = prod_max.s() - s1;
+            let s2_max = res_max_deg.s() - s1;
             (0..s2_max+1)
                 .maybe_par_bridge()
                 .try_for_each(|s2| {
@@ -145,7 +163,7 @@ fn compute_composites(
     s2: i32,
     data: CompositeComputationData,
     ) -> anyhow::Result<()> {
-    let prod_max = data.prod_max;
+    let res_max_deg = data.res_max_deg;
     let res1 = data.resolution1;
     let res2 = data.resolution2;
     let th1 = data.th1;
@@ -154,19 +172,19 @@ fn compute_composites(
 
 
     // Want (stem of target) = th3-(s1+s2)-th1 <= prod_max.n()
-    for th3 in th2..(s1+s2+th1+prod_max.n()+1)  {
+    for th3 in th2..res_max_deg.t() {
        /* The stable range is stem <= sphere - 2. A class in Ext^{s1, 0}(e_{th1}, e_{th2})
         * converges to a class in [S^{th2-s1}, S^{th1}] with stem th2 - s1 - th1 and sphere S^{th1}.
         * The other class has stem = th3 - s2 - th2 and sphere S^{th2}.
         * We are not interested in multiplying stable*stable, except where both
         * are the first class in the stable range.
         */
-        if th2 - s1 - th1 < th1 - 2 && th3 - s2 - th2 < th2 - 2 {
+        /*if th2 - s1 - th1 < th1 - 2 && th3 - s2 - th2 < th2 - 2 {
             continue;
         }
         if (th2 - s1 - th1 == 0 && s1 == 0) || (th3 - s2 - th2 == 0 && s2 == 0) {  // Don't multiply by degree (stem,filt) = (0,0)
             continue;
-        }
+        }*/
         let num_c_classes = res2.number_of_gens_in_bidegree(
             Bidegree::s_t(s2 as u32, th3)
             );
@@ -174,6 +192,14 @@ fn compute_composites(
             Bidegree::s_t(s1 as u32, th2)
             );*/
         if num_c_classes == 0 {
+            /*println!(
+                "{}\t{}\t{}\t{}\t*\t{}\t*\t0",
+                th1,
+                th2, 
+                th3, 
+                s1,
+                s2,
+            );*/
             continue;
         }
 
@@ -186,9 +212,27 @@ fn compute_composites(
             let num_gens_a = res1.number_of_gens_in_bidegree(Bidegree::s_t(s1 as u32, th2));
             let product_num_gens = res1.number_of_gens_in_bidegree(prod_deg);
             if num_gens_a == 0 {
+                /*println!(
+                    "{}\t{}\t{}\t{}\t*\t{}\t{}\t0",
+                    th1,
+                    th2, 
+                    th3, 
+                    s1,
+                    s2,
+                    c_idx
+                );*/
                 continue;
             }
             if product_num_gens == 0 {
+                /*println!(
+                    "{}\t{}\t{}\t{}\t*\t{}\t{}\t0",
+                    th1,
+                    th2, 
+                    th3, 
+                    s1,
+                    s2,
+                    c_idx
+                );*/
                 continue;
             }
 
@@ -239,6 +283,18 @@ fn compute_composites(
                         row_trunc
                     );
                 }
+                /*else {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t0",
+                        th1,
+                        th2, 
+                        th3, 
+                        s1,
+                        i,
+                        s2,
+                        c_idx,
+                    );
+                }*/
             }
             c_class[c_idx] = 0; // reset c_class so we can set it to the next standard basis vector
         }
