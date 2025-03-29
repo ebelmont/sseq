@@ -179,12 +179,12 @@ fn compute_composites(
         * We are not interested in multiplying stable*stable, except where both
         * are the first class in the stable range.
         */
-        /*if th2 - s1 - th1 < th1 - 2 && th3 - s2 - th2 < th2 - 2 {
+        if th2 - s1 - th1 < th1 - 2 && th3 - s2 - th2 < th2 - 2 {
             continue;
         }
         if (th2 - s1 - th1 == 0 && s1 == 0) || (th3 - s2 - th2 == 0 && s2 == 0) {  // Don't multiply by degree (stem,filt) = (0,0)
             continue;
-        }*/
+        }
         let num_c_classes = res2.number_of_gens_in_bidegree(
             Bidegree::s_t(s2 as u32, th3)
             );
