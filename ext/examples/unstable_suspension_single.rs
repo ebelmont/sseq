@@ -20,7 +20,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use algebra::module::{Module, SuspensionModule};
 use ext::{
-    chain_complex::{FiniteChainComplex, FreeChainComplex},
+    chain_complex::{ChainComplex, FiniteChainComplex, FreeChainComplex},
     resolution::UnstableResolution,
     resolution_homomorphism::UnstableResolutionHomomorphism,
 };
@@ -43,14 +43,20 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    let shift_t = query::raw("Target sphere: ", str::parse::<i32>);
-
-    let max = Bidegree::n_s(
-        query::raw("Max n", str::parse),
-        query::raw("Max s", str::parse),
-    );
+    let max_t = query::raw("Max t", str::parse);
+    let shift_t = query::raw("Target sphere", str::parse);
+    let max = Bidegree::s_t(max_t, max_t as i32);
     let min_degree = Bidegree::s_t(0, module.min_degree());
 
+    let res_b: Arc<UnstableResolution<FiniteChainComplex<_>>> =
+        Arc::new(UnstableResolution::new_with_save(
+            Arc::new(FiniteChainComplex::ccdz(Arc::new(SuspensionModule::new(
+                Arc::clone(&module),
+                0,
+            )))),
+            save_dir(0),
+        )?);
+    res_b.compute_through_bidegree(max);
 
     let shift = Bidegree::s_t(0, shift_t);
     let res_a: Arc<UnstableResolution<FiniteChainComplex<_>>> =
@@ -70,8 +76,8 @@ fn main() -> anyhow::Result<()> {
         save_dir(shift_t),
     )?);
 
-    res_a.compute_through_stem(max + shift);
-    res_b.compute_through_stem(max + shift);
+    res_a.compute_through_bidegree(max + shift);
+    res_b.compute_through_bidegree(max + shift);
 
     let suspension_shift = Bidegree::s_t(0, 1);
     let hom = UnstableResolutionHomomorphism::new(
@@ -87,11 +93,12 @@ fn main() -> anyhow::Result<()> {
     );
     hom.extend_all();
 
-    for n in 2 * ((min_degree + shift).n() - 1)..=(max + shift).n() {
+    // n is not the stem in the Adams chart; it is stem + shift_t + max_t
+    for n in 2 * ((min_degree + shift).n() - 1)..=(min_degree.t() + shift_t + max.t()) {
         if n < (min_degree + shift).n() {
             continue;
         }
-        for s in 0..=max.s() {
+        for s in 0..=(max.t() - (n - min_degree.t() - shift_t)) as u32 {
             let source = Bidegree::n_s(n, s);
             let target = source - suspension_shift;
             let source_num_gens = res_b.number_of_gens_in_bidegree(source);
