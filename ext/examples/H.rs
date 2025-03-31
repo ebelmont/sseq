@@ -43,7 +43,7 @@ fn hopf(n: i32) -> anyhow::Result<()> {
     let module = Arc::new(sphere()?);
     let max = Bidegree::n_s(50, 25);
     //prepping out-file containing our data
-    let file = File::create("hopf5.txt").expect("Failed to create log file");
+    let file = File::create(format!("hopf{n}.txt")).expect("Failed to create log file");
     let mut writer = BufWriter::new(file);
 
     let min_degree = Bidegree::s_t(0, 2 * n - 1);
@@ -102,9 +102,9 @@ fn hopf(n: i32) -> anyhow::Result<()> {
     hom.extend_step_raw(min_degree, Some(t.to_vec()));
     hom.extend_all();
 
-    for n in 0..=max.n() - 1 {
+    for stem in (2*n-1)..max.n() {
         for s in 0..=max.s() - 1 {
-            let source = Bidegree::n_s(n, s);
+            let source = Bidegree::n_s(stem, s);
             let target = source - suspension_shift;
             let source_num_gens = res_b.number_of_gens_in_bidegree(source);
             let target_num_gens = new.number_of_gens_in_bidegree(target);
@@ -112,7 +112,7 @@ fn hopf(n: i32) -> anyhow::Result<()> {
 
             let m = format!(" - {m:?}");
             if source_num_gens != 0 || target_num_gens != 0 {
-                writeln!(writer, "{n} {s}: {source_num_gens} {target_num_gens} {m}")
+                writeln!(writer, "{stem} {s}: {source_num_gens} {target_num_gens} {m}", stem=stem-(2*n-1))
                     .expect("Failed to write to file");
             }
         }
