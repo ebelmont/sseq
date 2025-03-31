@@ -97,10 +97,8 @@ fn main() -> anyhow::Result<()> {
      */
 
 
-
-    let th1 = query::raw("th1", str::parse::<std::num::NonZeroI32>).get();
-
     let prod_max_t : i32 = query::raw("Max internal degree (prod_max_t)", str::parse);
+    let th1 = query::raw("th1", str::parse::<std::num::NonZeroI32>).get();
 
     /*
      * We need res1 up to degree (s,t) = (s1+s2, th3). Compute the maximum up front.
