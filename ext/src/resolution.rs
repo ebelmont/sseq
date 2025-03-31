@@ -106,8 +106,8 @@ where
 {
     pub fn augmented_loops(res: &Self) -> Self {
         // Clone differentials and apply loops on each clone.
-        let differentials_cloned: OnceVec<_> =
-            res.differentials.iter().map(|d| d.loops()).collect();
+        let differentials_cloned: OnceVec<Arc<MuFreeModuleHomomorphism<false, MuFreeModule<false, CC::Algebra>>>> =
+            res.differentials.iter().map(|d| Arc::new(d.loops())).collect();
 
         Self {
             name: res.name.clone(),
