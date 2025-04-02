@@ -89,7 +89,7 @@ fn hopf(n: i32) -> anyhow::Result<()> {
     //augment the target chain complex since sseq doesn't allow maps which decrease Adams
     //filtration
     let new: Arc<UnstableResolution<FiniteChainComplex<_>>> =
-        Arc::new(UnstableResolution::augmented(&res_a));
+        Arc::new(UnstableResolution::augmented_loops(&res_a));
 
     let suspension_shift = Bidegree::s_t(0, -1);
     let hom = UnstableResolutionHomomorphism::new(

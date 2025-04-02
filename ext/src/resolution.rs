@@ -100,13 +100,13 @@ where
     pub load_quasi_inverse: bool,
 }
 
-impl<A, CC: ChainComplex<Algebra = A, Module = MuFreeModule<false, A>>> MuResolution<false, CC>
+impl<A, CC: ChainComplex<Algebra = A>> MuResolution<true, CC>
 where
     A: UnstableAlgebra,
 {
     pub fn augmented_loops(res: &Self) -> Self {
         // Clone differentials and apply loops on each clone.
-        let differentials_cloned: OnceVec<Arc<MuFreeModuleHomomorphism<false, MuFreeModule<false, CC::Algebra>>>> =
+        let differentials_cloned: OnceVec<Arc<MuFreeModuleHomomorphism<true, MuFreeModule<true, CC::Algebra>>>> =
             res.differentials.iter().map(|d| Arc::new(d.loops())).collect();
 
         Self {
