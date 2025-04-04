@@ -25,7 +25,7 @@ where
 {
     source: Arc<MuFreeModule<U, M::Algebra>>,
     target: Arc<M>,
-    outputs: OnceBiVec<Vec<FpVector>>, // degree --> input_idx --> output
+    pub outputs: OnceBiVec<Vec<FpVector>>, // degree --> input_idx --> output
     pub images: OnceBiVec<Option<Subspace>>,
     pub kernels: OnceBiVec<Option<Subspace>>,
     pub quasi_inverses: OnceBiVec<Option<QuasiInverse>>,
@@ -274,31 +274,46 @@ where
     {
         // Create a new instance with copied data
         let mut result = Self {
-            degree_shift: self.degree_shift.clone(),
+            degree_shift: self.degree_shift,
             source: self.source.clone(),
             target: self.target.clone(),
             outputs: self.outputs.clone(),
             images: self.images.clone(),
             kernels: self.kernels.clone(),
             quasi_inverses: self.quasi_inverses.clone(),
-            min_degree: self.min_degree.clone(),
+            min_degree: self.min_degree,
         };
 
         // Convert the target into an Arc<dyn Any + Send + Sync> so that we can downcast.
+        let source_any: Arc<dyn Any + Send + Sync> = self.source.clone();
         let target_any: Arc<dyn Any + Send + Sync> = self.target.clone();
-        // Downcast to the expected concrete type. This requires that the target is actually
+        // Downcast to the expected concrete type. This requires that the source is actually
         // a MuFreeModule<true, M::Algebra>.
+        let source_freemodule = Arc::downcast::<MuFreeModule<true, A>>(source_any)
+            .expect("Source is not a MuFreeModule<true, _>");
         let target_freemodule = Arc::downcast::<MuFreeModule<true, A>>(target_any)
             .expect("Target is not a MuFreeModule<true, _>");
-        // Now that we have the target as a MuFreeModule<true, M::Algebra>, we can safely call
+        // Now that we have the source as a MuFreeModule<true, M::Algebra>, we can safely call
         // its methods.
-        for deg in target_freemodule.min_degree()..target_freemodule.max_generator_degree().unwrap()
+
+        // Handle edge case for 0th homological degree where target_freemodule is zero
+        let mut is_zero = true;
+        for i in target_freemodule.min_degree()..target_freemodule.num_gens.len() {
+            if target_freemodule.num_gens[i] > 0 {
+                is_zero = false;
+                break;
+            }
+        }
+        if is_zero {
+            return result;
+        }
+        for deg in source_freemodule.min_degree()..source_freemodule.max_generator_degree().unwrap()
         {
             // Get mutable access to outputs for degree `deg`
             if let Some(out_vec) = result.outputs.data.get_mut(deg as usize) {
                 for idx in 0..out_vec.len() {
-                    let opgen = target_freemodule.index_to_op_gen(deg, idx);
-                    if opgen.looped(target_freemodule.algebra()) {
+                    let opgen = source_freemodule.index_to_op_gen(deg, idx);
+                    if opgen.looped(source_freemodule.algebra()) {
                         // Modify the FpVector entry at index `idx`
                         out_vec[idx].set_entry(idx, 0);
                     }

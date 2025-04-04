@@ -45,14 +45,14 @@ pub type UnstableFreeModule<A> = MuFreeModule<true, A>;
 pub struct MuFreeModule<const U: bool, A: MuAlgebra<U>> {
     algebra: Arc<A>,
     name: String,
-    min_degree: i32,
-    gen_names: OnceBiVec<Vec<String>>,
+    pub min_degree: i32,
+    pub gen_names: OnceBiVec<Vec<String>>,
     /// degree -> internal index of first generator in degree
-    gen_deg_idx_to_internal_idx: OnceBiVec<usize>,
-    num_gens: OnceBiVec<usize>,
-    basis_element_to_opgen: OnceBiVec<OnceVec<OperationGeneratorPair>>,
+    pub gen_deg_idx_to_internal_idx: OnceBiVec<usize>,
+    pub num_gens: OnceBiVec<usize>,
+    pub basis_element_to_opgen: OnceBiVec<OnceVec<OperationGeneratorPair>>,
     /// degree -> internal_gen_idx -> the offset of the generator in degree
-    generator_to_index: OnceBiVec<OnceVec<usize>>,
+    pub generator_to_index: OnceBiVec<OnceVec<usize>>,
 }
 
 impl<const U: bool, A: MuAlgebra<U>> std::fmt::Display for MuFreeModule<U, A> {
