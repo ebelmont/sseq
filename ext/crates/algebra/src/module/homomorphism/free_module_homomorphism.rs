@@ -25,7 +25,7 @@ where
 {
     source: Arc<MuFreeModule<U, M::Algebra>>,
     target: Arc<M>,
-    outputs: OnceBiVec<Vec<FpVector>>, // degree --> input_idx --> output
+    pub outputs: OnceBiVec<Vec<FpVector>>, // degree --> input_idx --> output
     pub images: OnceBiVec<Option<Subspace>>,
     pub kernels: OnceBiVec<Option<Subspace>>,
     pub quasi_inverses: OnceBiVec<Option<QuasiInverse>>,
@@ -274,14 +274,14 @@ where
     {
         // Create a new instance with copied data
         let mut result = Self {
-            degree_shift: self.degree_shift.clone(),
+            degree_shift: self.degree_shift,
             source: self.source.clone(),
             target: self.target.clone(),
             outputs: self.outputs.clone(),
             images: self.images.clone(),
             kernels: self.kernels.clone(),
             quasi_inverses: self.quasi_inverses.clone(),
-            min_degree: self.min_degree.clone(),
+            min_degree: self.min_degree,
         };
 
         // Convert the target into an Arc<dyn Any + Send + Sync> so that we can downcast.
@@ -292,10 +292,35 @@ where
             .expect("Target is not a MuFreeModule<true, _>");
         // Now that we have the target as a MuFreeModule<true, M::Algebra>, we can safely call
         // its methods.
+
+        println!("[free_module_homomorphism] source_freemodule = {:?}", self.source.gen_names());
+        println!("[free_module_homomorphism] target_freemodule = {:?}", target_freemodule.gen_names());
+        let mut is_zero = true;
+        for i in target_freemodule.min_degree()..target_freemodule.num_gens.len() {
+            if target_freemodule.num_gens[i] > 0 {
+                is_zero = false;
+                break;
+            }
+        }
+        if is_zero {
+            return result;
+        }
         for deg in target_freemodule.min_degree()..target_freemodule.max_generator_degree().unwrap()
         {
             // Get mutable access to outputs for degree `deg`
+            println!("[free_module_homomorphism] deg = {deg}");
+            for i in result.min_degree()..result.outputs.len() {
+                for j in 0..result.outputs[i].len(){
+                    print!("[");
+                    for k in 0..result.outputs[i][j].len(){
+                        print!("{},",result.outputs[i][j].entry(k));
+                    }
+                    println!("]");
+                }
+            }
+
             if let Some(out_vec) = result.outputs.data.get_mut(deg as usize) {
+                println!("out_vec = {out_vec:?}");
                 for idx in 0..out_vec.len() {
                     let opgen = target_freemodule.index_to_op_gen(deg, idx);
                     if opgen.looped(target_freemodule.algebra()) {

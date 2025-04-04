@@ -106,6 +106,22 @@ where
 {
     pub fn augmented_loops(res: &Self) -> Self {
         // Clone differentials and apply loops on each clone.
+        for i in 0..res.modules.len(){
+            println!("rank(i={i}) = {:?}", res.modules[i].gen_names);
+        }
+        for (deg, diff) in res.differentials.iter().enumerate() {
+            println!("Differential at homological degree {}: len {}", deg, diff.outputs.len());
+            for i in res.min_degree()..diff.outputs.len() {
+                for j in 0..diff.outputs[i].len(){
+                    print!("[");
+                    for k in 0..diff.outputs[i][j].len(){
+                        print!("{},", diff.outputs[i][j].entry(k));
+                    }
+                    println!("]");
+                }
+            }
+        }
+
         let differentials_cloned: OnceVec<Arc<MuFreeModuleHomomorphism<true, MuFreeModule<true, CC::Algebra>>>> =
             res.differentials.iter().map(|d| Arc::new(d.loops())).collect();
 
