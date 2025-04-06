@@ -22,17 +22,49 @@ impl OperationGeneratorPair {
     /// down
     pub fn looped<A: MuAlgebra<true>>(&self, algebra: std::sync::Arc<A>) -> bool {
         // Construct the looped free module with the given generator degree.
-        let loops =
-            MuFreeModule::<true, A>::new(algebra, "loops".to_string(), self.generator_degree - 1);
+        let excess = algebra.dimension_unstable(self.operation_degree, self.generator_degree - 1);
 
-        // Compute the degree as the sum of generator_degree and operation_degree.
         let deg = self.generator_degree + self.operation_degree;
 
+        let loops = MuFreeModule::<true, A>::new(
+            algebra.clone(),
+            "loops".to_string(),
+            self.generator_degree - 1,
+        );
+
+        loops.compute_basis(deg + 1);
+        for d in loops.min_degree()..(deg + 1) {
+            if loops.dimension(d) > 0 {
+                for idx in 0..(loops.dimension(d)) {
+                    println!(
+                        "({:?}, {:?}) : {:?}",
+                        deg,
+                        idx,
+                        loops.basis_element_to_string(d, idx)
+                    );
+                }
+            }
+        }
+
+        // Compute the degree as the sum of generator_degree and operation_degree.
+
         // Compute the dimensions at the given degree.
-        loops.compute_basis(deg);
 
         // Return whether operation_index does not exceed the down dimension.
-        self.operation_index <= loops.dimension(deg)
+        if self.operation_index >= excess {
+            println!(
+                "looped {:?} x_({:?}, {:?}) with op index {:?} and loops dim {:?} and deg {:?}",
+                loops
+                    .algebra()
+                    .basis_element_to_string(self.operation_degree, self.operation_index),
+                self.generator_degree,
+                self.generator_index,
+                self.operation_index,
+                loops.dimension(deg),
+                deg
+            );
+        }
+        self.operation_index >= excess
     }
 }
 pub type FreeModule<A> = MuFreeModule<false, A>;
@@ -367,7 +399,11 @@ impl<const U: bool, A: MuAlgebra<U>> MuFreeModule<U, A> {
         assert!(degree >= self.min_degree);
         println!("index_to_op_gen {} {}", degree, index);
         for i in self.min_degree..self.basis_element_to_opgen.len() {
-            println!("[free_module] min_degree = {}, i={i}, len = {}", self.min_degree, self.basis_element_to_opgen[i].len());
+            println!(
+                "[free_module] min_degree = {}, i={i}, len = {}",
+                self.min_degree,
+                self.basis_element_to_opgen[i].len()
+            );
         }
         &self.basis_element_to_opgen[degree][index]
     }
