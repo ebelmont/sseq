@@ -307,8 +307,9 @@ where
         if is_zero {
             return result;
         }
-        for deg in source_freemodule.min_degree()..source_freemodule.max_generator_degree().unwrap()
+        for gen in source_freemodule.iter_gens(source_freemodule.max_generator_degree().unwrap())
         {
+            let deg = gen.0;
             // Get mutable access to outputs for degree `deg`
             if let Some(out_vec) = result.outputs.data.get_mut(deg as usize) {
                 for idx in 0..out_vec.len() {
