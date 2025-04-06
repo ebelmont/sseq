@@ -285,12 +285,15 @@ where
         };
 
         // Convert the target into an Arc<dyn Any + Send + Sync> so that we can downcast.
+        let source_any: Arc<dyn Any + Send + Sync> = self.source.clone();
         let target_any: Arc<dyn Any + Send + Sync> = self.target.clone();
-        // Downcast to the expected concrete type. This requires that the target is actually
+        // Downcast to the expected concrete type. This requires that the source is actually
         // a MuFreeModule<true, M::Algebra>.
+        let source_freemodule = Arc::downcast::<MuFreeModule<true, A>>(source_any)
+            .expect("Source is not a MuFreeModule<true, _>");
         let target_freemodule = Arc::downcast::<MuFreeModule<true, A>>(target_any)
             .expect("Target is not a MuFreeModule<true, _>");
-        // Now that we have the target as a MuFreeModule<true, M::Algebra>, we can safely call
+        // Now that we have the source as a MuFreeModule<true, M::Algebra>, we can safely call
         // its methods.
 
         println!("[free_module_homomorphism] source_freemodule = {:?}", self.source.gen_names());
@@ -305,13 +308,13 @@ where
         if is_zero {
             return result;
         }
-        for deg in target_freemodule.min_degree()..target_freemodule.max_generator_degree().unwrap()
+        for deg in source_freemodule.min_degree()..source_freemodule.max_generator_degree().unwrap()
         {
             // Get mutable access to outputs for degree `deg`
             println!("[free_module_homomorphism] deg = {deg}");
             for i in result.min_degree()..result.outputs.len() {
                 for j in 0..result.outputs[i].len(){
-                    print!("[");
+                    print!("[free_module_homomorphism] result.outputs[{i}][{j}] = [");
                     for k in 0..result.outputs[i][j].len(){
                         print!("{},",result.outputs[i][j].entry(k));
                     }
@@ -322,8 +325,8 @@ where
             if let Some(out_vec) = result.outputs.data.get_mut(deg as usize) {
                 println!("out_vec = {out_vec:?}");
                 for idx in 0..out_vec.len() {
-                    let opgen = target_freemodule.index_to_op_gen(deg, idx);
-                    if opgen.looped(target_freemodule.algebra()) {
+                    let opgen = source_freemodule.index_to_op_gen(deg, idx);
+                    if opgen.looped(source_freemodule.algebra()) {
                         // Modify the FpVector entry at index `idx`
                         out_vec[idx].set_entry(idx, 0);
                     }
