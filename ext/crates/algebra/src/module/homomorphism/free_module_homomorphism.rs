@@ -297,6 +297,9 @@ where
         // its methods.
 
         println!("[free_module_homomorphism] source_freemodule = {:?}", self.source.gen_names());
+        for j in 0..source_freemodule.basis_element_to_opgen.len() - source_freemodule.min_degree {
+            println!("[free_module_homomorphism] source_freemodule (degree {}) = {:?}", source_freemodule.min_degree+j, source_freemodule.basis_element_to_opgen[source_freemodule.min_degree+j]);
+        }
         println!("[free_module_homomorphism] target_freemodule = {:?}", target_freemodule.gen_names());
         let mut is_zero = true;
         for i in target_freemodule.min_degree()..target_freemodule.num_gens.len() {
@@ -312,7 +315,7 @@ where
         {
             let deg = gen.0;
             // Get mutable access to outputs for degree `deg`
-            println!("[free_module_homomorphism] deg = {deg}");
+            println!("[free_module_homomorphism] gen = {gen:?}");
             for i in result.min_degree()..result.outputs.len() {
                 for j in 0..result.outputs[i].len(){
                     print!("[free_module_homomorphism] result.outputs[{i}][{j}] = [");
@@ -323,15 +326,45 @@ where
                 }
             }
 
-            if let Some(out_vec) = result.outputs.data.get_mut(deg as usize) {
-                println!("out_vec = {out_vec:?}");
+            let min_degree = result.min_degree();
+            for i in 0..result.outputs.len(){
+                println!("[free_module_homomorphism] result.outputs.data.get_mut({i}) = {:?}", result.outputs.data.get_mut(i as usize));
+            }
+            if let Some(out_vec) = result.outputs.data.get_mut((deg-min_degree) as usize) {
+                println!("out_vec = {out_vec:?} for deg = {}", deg);
                 for idx in 0..out_vec.len() {
-                    let opgen = source_freemodule.index_to_op_gen(deg, idx);
+                    let opgen = target_freemodule.index_to_op_gen(deg, idx);
+                    println!("[free_module_homomorphism] opgen = {opgen:?}");
+                    println!("[free_module_homomorphism] modifying differential at deg={deg}, idx={idx}");
                     if opgen.looped(source_freemodule.algebra()) {
                         // Modify the FpVector entry at index `idx`
+                        println!("[free_module_homomorphism] out_vec (before) = {:?}", out_vec);
+                        for i in 0..out_vec.len(){
+                            print!("{},", out_vec[i]);
+                        }
+                        println!();
+                        println!("idx = {idx}");
                         out_vec[idx].set_entry(idx, 0);
+                        for i in 0..out_vec.len(){
+                            print!("{},", out_vec[i]);
+                        }
+                        println!("[free_module_homomorphism] out_vec (after) = {:?}", out_vec);
+                    }
+
+                }
+
+                println!("[free_module_homomorphism] printing new result");
+                let result_outputs_cloned = result.outputs.clone();
+                for i in min_degree..result_outputs_cloned.len() {
+                    for j in 0..result_outputs_cloned[i].len(){
+                        print!("[free_module_homomorphism] result.outputs[{i}][{j}] = [");
+                        for k in 0..result_outputs_cloned[i][j].len(){
+                            print!("{},",result_outputs_cloned[i][j].entry(k));
+                        }
+                        println!("]");
                     }
                 }
+
             }
         }
         result

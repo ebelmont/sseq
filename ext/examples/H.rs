@@ -35,7 +35,7 @@ use std::io::Write;
 use std::{path::PathBuf, sync::Arc};
 
 fn main() -> anyhow::Result<()> {
-    hopf(3)
+    hopf(2)
 }
 
 fn hopf(n: i32) -> anyhow::Result<()> {
@@ -87,6 +87,15 @@ fn hopf(n: i32) -> anyhow::Result<()> {
         &[FpVector::from_slice(module.prime(), top.as_slice())],
     );
 
+
+    println!("H res_a = ");
+    for b in res_a.iter_stem() {
+        for i in 0..res_a.number_of_gens_in_bidegree(b) {
+            let gen = BidegreeGenerator::new(b, i);
+            let cocycle = res_a.cocycle_string(gen, true);
+            println!("d x_{gen:#} = {cocycle}");
+        }
+    }
     //augment the target chain complex since sseq doesn't allow maps which decrease Adams
     //filtration
     let new: Arc<UnstableResolution<FiniteChainComplex<_>>> =
@@ -129,6 +138,7 @@ fn sphere() -> anyhow::Result<SteenrodModule> {
         "p": 2,
         "type": "finite dimensional module",
         "gens": { "x0": 0 },
+        "algebra": ["adem"],
         "actions": []
     }
     "#;
