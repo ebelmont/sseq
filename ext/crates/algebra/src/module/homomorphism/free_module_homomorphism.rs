@@ -308,8 +308,9 @@ where
         if is_zero {
             return result;
         }
-        for deg in source_freemodule.min_degree()..source_freemodule.max_generator_degree().unwrap()
+        for gen in source_freemodule.iter_gens(source_freemodule.max_generator_degree().unwrap())
         {
+            let deg = gen.0;
             // Get mutable access to outputs for degree `deg`
             println!("[free_module_homomorphism] deg = {deg}");
             for i in result.min_degree()..result.outputs.len() {
