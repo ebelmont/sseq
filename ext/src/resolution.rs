@@ -113,10 +113,10 @@ where
             name: res.name.clone(),
             lock: Mutex::new(()),                      // Create a new lock
             complex: Arc::clone(&res.complex),         // Share the underlying complex
-            modules: res.modules.clone(),              // Clone OnceVec
+            modules: res.modules.pop_front(),              // Clone OnceVec
             zero_module: Arc::clone(&res.zero_module), // Share the zero module
-            chain_maps: res.chain_maps.clone(),        // Clone OnceVec
-            differentials: differentials_cloned,       // Use cloned differentials
+            chain_maps: res.chain_maps.pop_front(),        // Clone OnceVec
+            differentials: differentials_cloned.pop_front(),       // Use cloned differentials
             kernels: DashMap::new(),                   // Create new DashMap
             save_dir: res.save_dir.clone(),
             should_save: res.should_save,

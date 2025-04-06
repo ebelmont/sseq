@@ -127,6 +127,7 @@ fn sphere() -> anyhow::Result<SteenrodModule> {
         "p": 2,
         "type": "finite dimensional module",
         "gens": { "x0": 0 },
+        "algebra": ["adem"],
         "actions": []
     }
     "#;

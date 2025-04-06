@@ -311,9 +311,10 @@ where
         {
             let deg = gen.0;
             // Get mutable access to outputs for degree `deg`
-            if let Some(out_vec) = result.outputs.data.get_mut(deg as usize) {
+            let min_degree = result.min_degree();
+            if let Some(out_vec) = result.outputs.data.get_mut((deg-min_degree) as usize) {
                 for idx in 0..out_vec.len() {
-                    let opgen = source_freemodule.index_to_op_gen(deg, idx);
+                    let opgen = target_freemodule.index_to_op_gen(deg, idx);
                     if opgen.looped(source_freemodule.algebra()) {
                         // Modify the FpVector entry at index `idx`
                         out_vec[idx].set_entry(idx, 0);

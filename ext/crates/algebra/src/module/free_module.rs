@@ -21,18 +21,11 @@ impl OperationGeneratorPair {
     /// Checks if an op_gen pair in a free unstable module gets killed when that module is looped
     /// down
     pub fn looped<A: MuAlgebra<true>>(&self, algebra: std::sync::Arc<A>) -> bool {
-        // Construct the looped free module with the given generator degree.
-        let loops =
-            MuFreeModule::<true, A>::new(algebra, "loops".to_string(), self.generator_degree - 1);
+        // Compute the excess
+        let excess = algebra.dimension_unstable(self.operation_degree, self.generator_degree - 1);
 
-        // Compute the degree as the sum of generator_degree and operation_degree.
-        let deg = self.generator_degree + self.operation_degree;
-
-        // Compute the dimensions at the given degree.
-        loops.compute_basis(deg);
-
-        // Return whether operation_index does not exceed the down dimension.
-        self.operation_index <= loops.dimension(deg)
+        // Return whether operation_index exceeds the excess.
+        self.operation_index >= excess
     }
 }
 pub type FreeModule<A> = MuFreeModule<false, A>;
