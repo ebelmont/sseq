@@ -67,7 +67,7 @@ fn hopf(n: i32) -> anyhow::Result<()> {
             )))),
             None,
         )?);
-    let shift = Bidegree::s_t(0, 1);
+    let shift = Bidegree::s_t(0, 0);
     res_a.compute_through_stem(max + shift);
     res_b.compute_through_stem(max);
     //Prepare the vector representation of Sq^n x_{n, 0} in F(n)
@@ -100,7 +100,7 @@ fn hopf(n: i32) -> anyhow::Result<()> {
     let new: Arc<UnstableResolution<FiniteChainComplex<_>>> =
         Arc::new(UnstableResolution::augmented_loops(&res_a));
 
-    let suspension_shift = Bidegree::s_t(0, -1);
+    let suspension_shift = Bidegree::s_t(0, 0);
     let hom = UnstableResolutionHomomorphism::new(
         String::from("hopf"),
         Arc::clone(&res_b),

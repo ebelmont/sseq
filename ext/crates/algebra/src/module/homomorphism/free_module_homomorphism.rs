@@ -332,13 +332,19 @@ where
         // Now that we have the target as a MuFreeModule<true, M::Algebra>, we can safely call
         // its methods.
         let min_degree = result.min_degree();
+        println!("[free_module_homomorphism] source_freemodule = {:?}", source_freemodule.gen_names());
+        println!("[free_module_homomorphism] new_source_module = {:?}", new_source_module.gen_names());
+        println!("[free_module_homomorphism] target_freemodule = {:?}", target_freemodule.gen_names());
+        println!("[free_module_homomorphism] new_target_module = {:?}", new_target_module.gen_names());
+        println!("[free_module_homomorphism] min_degree = {min_degree}");
 
         for degree in self.source.min_degree()..self.source.max_generator_degree().unwrap() {
             let numgens = self.source.number_of_gens_in_degree(degree);
             let dimension = self.target.dimension(degree);
             let mut outputs = vec![FpVector::new(p, dimension); numgens];
             // Get mutable access to outputs for degree `deg`
-            if let Some(out_vec) = old_outputs.data.get((degree - min_degree) as usize) {
+            if let Some(out_vec) = old_outputs.data.get((degree - min_degree - 1) as usize) {
+                //print!("[free_module_homomorphism] degree={degree}, min_degree={min_degree}, out_vec = [");
                 if out_vec.is_empty() {
                     continue;
                 }
@@ -363,7 +369,7 @@ where
                         }
                     }
                 }
-                result.add_generators_from_rows(degree, outputs);
+                result.add_generators_from_rows_ooo(degree, outputs);
             }
         }
         result
