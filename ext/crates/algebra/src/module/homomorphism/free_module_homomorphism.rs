@@ -274,50 +274,45 @@ where
     {
         // Create a new instance with copied data
         let mut result = Self {
-            degree_shift: self.degree_shift,
+            degree_shift: self.degree_shift.clone(),
             source: self.source.clone(),
             target: self.target.clone(),
             outputs: self.outputs.clone(),
-            images: self.images.clone(),
-            kernels: self.kernels.clone(),
-            quasi_inverses: self.quasi_inverses.clone(),
-            min_degree: self.min_degree,
+            images: OnceBiVec::new(self.min_degree),
+            kernels: OnceBiVec::new(self.min_degree),
+            quasi_inverses: OnceBiVec::new(self.min_degree),
+            min_degree: self.min_degree.clone(),
         };
 
-        // Convert the target into an Arc<dyn Any + Send + Sync> so that we can downcast.
         let source_any: Arc<dyn Any + Send + Sync> = self.source.clone();
         let target_any: Arc<dyn Any + Send + Sync> = self.target.clone();
         // Downcast to the expected concrete type. This requires that the source is actually
         // a MuFreeModule<true, M::Algebra>.
         let source_freemodule = Arc::downcast::<MuFreeModule<true, A>>(source_any)
             .expect("Source is not a MuFreeModule<true, _>");
+        // Downcast to the expected concrete type. This requires that the target is actually
+        // a MuFreeModule<true, M::Algebra>.
         let target_freemodule = Arc::downcast::<MuFreeModule<true, A>>(target_any)
             .expect("Target is not a MuFreeModule<true, _>");
-        // Now that we have the source as a MuFreeModule<true, M::Algebra>, we can safely call
+        // Now that we have the target as a MuFreeModule<true, M::Algebra>, we can safely call
         // its methods.
-
-        // Handle edge case for 0th homological degree where target_freemodule is zero
-        let mut is_zero = true;
-        for i in target_freemodule.min_degree()..target_freemodule.num_gens.len() {
-            if target_freemodule.num_gens[i] > 0 {
-                is_zero = false;
-                break;
-            }
-        }
-        if is_zero {
-            return result;
-        }
-        for gen in source_freemodule.iter_gens(source_freemodule.max_generator_degree().unwrap())
+        let min_degree = result.min_degree();
+        let n = (min_degree + 1) / 2;
+        for (i, gen) in source_freemodule
+            .iter_gens(source_freemodule.max_generator_degree().unwrap())
+            .enumerate()
         {
             let deg = gen.0;
             // Get mutable access to outputs for degree `deg`
-            let min_degree = result.min_degree();
-            if let Some(out_vec) = result.outputs.data.get_mut((deg-min_degree) as usize) {
-                for idx in 0..out_vec.len() {
+            if let Some(out_vec) = result.outputs.data.get_mut((deg - min_degree) as usize) {
+                if out_vec.is_empty() {
+                    continue;
+                }
+                for idx in 0..out_vec[0].len() {
                     let opgen = target_freemodule.index_to_op_gen(deg, idx);
                     if opgen.looped(source_freemodule.algebra()) {
                         // Modify the FpVector entry at index `idx`
-                        out_vec[idx].set_entry(idx, 0);
+                        out_vec[0].set_entry(idx, 0);
                     }
                 }
             }
