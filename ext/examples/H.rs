@@ -102,7 +102,7 @@ fn hopf(n: i32) -> anyhow::Result<()> {
     hom.extend_step_raw(min_degree, Some(t.to_vec()));
     hom.extend_all();
 
-    for stem in (2*n-1)..max.n() {
+    for stem in (2 * n - 1)..max.n() {
         for s in 0..=max.s() - 1 {
             let source = Bidegree::n_s(stem, s);
             let target = source - suspension_shift;
@@ -112,8 +112,12 @@ fn hopf(n: i32) -> anyhow::Result<()> {
 
             let m = format!(" - {m:?}");
             if source_num_gens != 0 || target_num_gens != 0 {
-                writeln!(writer, "{stem} {s}: {source_num_gens} {target_num_gens} {m}", stem=stem-(2*n-1))
-                    .expect("Failed to write to file");
+                writeln!(
+                    writer,
+                    "{stem} {s}: {source_num_gens} {target_num_gens} {m}",
+                    stem = stem - (2 * n - 1)
+                )
+                .expect("Failed to write to file");
             }
         }
     }
