@@ -129,7 +129,7 @@ where
         }
         let modules: OnceVec<Arc<MuFreeModule<true, CC::Algebra>>> = OnceVec::new();
         for module in res.modules.pop_front().iter() {
-            let new: &Arc<MuFreeModule<true, CC::Algebra>> = Arc::clone(MuFreeModule::new(
+            let new = Arc::new(MuFreeModule::new(
                 module.algebra.clone(),
                 module.name.clone(),
                 module.min_degree() - 1,
@@ -142,7 +142,7 @@ where
                 }
                 new.add_generators(deg - 1, module.number_of_gens_in_degree(deg), Some(names));
             }
-            modules.push(Arc::clone(&new));
+            modules.push(new);
         }
 
         let differentials_cloned: OnceVec<
@@ -157,7 +157,7 @@ where
             name: res.name.clone(),
             lock: Mutex::new(()),                            // Create a new lock
             complex: Arc::clone(&res.complex),               // Share the underlying complex
-            modules: modules,                                // Clone OnceVec
+            modules: modules.pop_front(),                    // Clone OnceVec
             zero_module: Arc::clone(&res.zero_module),       // Share the zero module
             chain_maps: res.chain_maps.pop_front(),          // Clone OnceVec
             differentials: differentials_cloned.pop_front(), // Use cloned differentials
