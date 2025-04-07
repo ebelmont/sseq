@@ -20,7 +20,9 @@ use fp::{
     vector::{FpVector, Slice, SliceMut},
 };
 use itertools::Itertools;
+use once::OnceBiVec;
 use once::OnceVec;
+
 use sseq::coordinates::Bidegree;
 
 use crate::{
@@ -106,34 +108,60 @@ where
 {
     pub fn augmented_loops(res: &Self) -> Self {
         // Clone differentials and apply loops on each clone.
-        for i in 0..res.modules.len(){
+        for i in 0..res.modules.len() {
             println!("rank(i={i}) = {:?}", res.modules[i].gen_names);
         }
         for (deg, diff) in res.differentials.iter().enumerate() {
-            println!("Differential at homological degree {}: len {}", deg, diff.outputs.len());
+            println!(
+                "Differential at homological degree {}: len {}",
+                deg,
+                diff.outputs.len()
+            );
             for i in res.min_degree()..diff.outputs.len() {
-                for j in 0..diff.outputs[i].len(){
+                for j in 0..diff.outputs[i].len() {
                     print!("[");
-                    for k in 0..diff.outputs[i][j].len(){
+                    for k in 0..diff.outputs[i][j].len() {
                         print!("{},", diff.outputs[i][j].entry(k));
                     }
                     println!("]");
                 }
             }
         }
+        let modules: OnceBiVec<MuFreeModule<true, CC::Algebra>> = OnceBiVec::new(0);
+        for module in res.modules.iter() {
+            let new: MuFreeModule<true, CC::Algebra> = MuFreeModule::new(
+                module.algebra.clone(),
+                module.name.clone(),
+                module.min_degree() - 1,
+            );
+            for deg in module.min_degree()..(module.max_computed_degree()) {
+                let mut names = Vec::new();
+                for gen in 0..module.number_of_gens_in_degree(deg) {
+                    let name = format!("x_({:?}, {:?})", deg - 1, gen);
+                    names.push(name)
+                }
+                new.add_generators(deg - 1, module.number_of_gens_in_degree(deg), Some(names));
+            }
+            modules.push(new);
+        }
 
-        let differentials_cloned: OnceVec<Arc<MuFreeModuleHomomorphism<true, MuFreeModule<true, CC::Algebra>>>> =
-            res.differentials.iter().map(|d| Arc::new(d.loops())).collect();
+        let differentials_cloned: OnceVec<
+            Arc<MuFreeModuleHomomorphism<true, MuFreeModule<true, CC::Algebra>>>,
+        > = res
+            .differentials
+            .iter()
+            .map(|d| Arc::new(d.loops()))
+            .collect();
 
         Self {
             name: res.name.clone(),
-            lock: Mutex::new(()),                      // Create a new lock
-            complex: Arc::clone(&res.complex),         // Share the underlying complex
-            modules: res.modules.pop_front(),              // Clone OnceVec
-            zero_module: Arc::clone(&res.zero_module), // Share the zero module
-            chain_maps: res.chain_maps.pop_front(),        // Clone OnceVec
-            differentials: differentials_cloned.pop_front(),       // Use cloned differentials
-            kernels: DashMap::new(),                   // Create new DashMap
+            lock: Mutex::new(()),                            // Create a new lock
+            complex: Arc::clone(&res.complex),               // Share the underlying complex
+            modules: res.modules.pop_front(),                // Clone OnceVec
+            zero_module: Arc::clone(&res.zero_module),       // Share the zero module
+            chain_maps: res.chain_maps.pop_front(),          // Clone OnceVec
+            differentials: differentials_cloned.pop_front(), // Use cloned differentials
+            kernels: DashMap::new(),                         // Create new DashMap
             save_dir: res.save_dir.clone(),
             should_save: res.should_save,
             load_quasi_inverse: res.load_quasi_inverse,
