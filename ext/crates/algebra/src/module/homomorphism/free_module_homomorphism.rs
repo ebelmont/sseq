@@ -277,64 +277,68 @@ where
             degree_shift: self.degree_shift.clone(),
             source: self.source.clone(),
             target: self.target.clone(),
-            outputs: OnceBiVec::new(self.min_degree),
-            images: OnceBiVec::new(self.min_degree),
-            kernels: OnceBiVec::new(self.min_degree),
-            quasi_inverses: OnceBiVec::new(self.min_degree),
-            min_degree: self.min_degree.clone(),
+            outputs: OnceBiVec::new(self.min_degree - 1),
+            images: OnceBiVec::new(self.min_degree - 1),
+            kernels: OnceBiVec::new(self.min_degree - 1),
+            quasi_inverses: OnceBiVec::new(self.min_degree - 1),
+            min_degree: self.min_degree.clone() - 1,
         };
+        let old_outputs = self.outputs.clone();
         let p = self.source.prime();
         let source_any: Arc<dyn Any + Send + Sync> = self.source.clone();
         let target_any: Arc<dyn Any + Send + Sync> = self.target.clone();
         // Downcast to the expected concrete type. This requires that the source is actually
         // a MuFreeModule<true, M::Algebra>.
-        let module = Arc::downcast::<MuFreeModule<true, A>>(source_any)
+        let source_freemodule = Arc::downcast::<MuFreeModule<true, A>>(source_any)
             .expect("Source is not a MuFreeModule<true, _>");
-        let new_source = Arc::new(MuFreeModule::new(
-            module.algebra.clone(),
-            module.name.clone(),
-            module.min_degree() - 1,
+        let new_source_module = Arc::new(MuFreeModule::new(
+            source_freemodule.algebra.clone(),
+            source_freemodule.name.clone(),
+            source_freemodule.min_degree() - 1,
         ));
-        for deg in module.min_degree()..(module.max_computed_degree()) {
+        for deg in source_freemodule.min_degree()..(source_freemodule.max_computed_degree()) {
             let mut names = Vec::new();
-            for gen in 0..module.number_of_gens_in_degree(deg) {
+            for gen in 0..source_freemodule.number_of_gens_in_degree(deg) {
                 let name = format!("x_({:?}, {:?})", deg - 1, gen);
                 names.push(name)
             }
-            new_source.add_generators(deg - 1, module.number_of_gens_in_degree(deg), Some(names));
+            new_source_module.add_generators(
+                deg - 1,
+                source_freemodule.number_of_gens_in_degree(deg),
+                Some(names),
+            );
         }
         // Downcast to the expected concrete type. This requires that the target is actually
         // a MuFreeModule<true, M::Algebra>.
-        let target_module = Arc::downcast::<MuFreeModule<true, A>>(target_any)
+        let target_freemodule = Arc::downcast::<MuFreeModule<true, A>>(target_any)
             .expect("Target is not a MuFreeModule<true, _>");
-        let new_target = Arc::new(MuFreeModule::new(
-            target_module.algebra.clone(),
-            target_module.name.clone(),
-            target_module.min_degree() - 1,
+        let new_target_module = Arc::new(MuFreeModule::new(
+            target_freemodule.algebra.clone(),
+            target_freemodule.name.clone(),
+            target_freemodule.min_degree() - 1,
         ));
-        for deg in target_module.min_degree()..(module.max_computed_degree()) {
+        for deg in target_freemodule.min_degree()..(target_freemodule.max_computed_degree()) {
             let mut names = Vec::new();
-            for gen in 0..target_module.number_of_gens_in_degree(deg) {
+            for gen in 0..target_freemodule.number_of_gens_in_degree(deg) {
                 let name = format!("x_({:?}, {:?})", deg - 1, gen);
                 names.push(name)
             }
-            new_target.add_generators(
+            new_target_module.add_generators(
                 deg - 1,
-                target_module.number_of_gens_in_degree(deg),
+                target_freemodule.number_of_gens_in_degree(deg),
                 Some(names),
             );
         }
         // Now that we have the target as a MuFreeModule<true, M::Algebra>, we can safely call
         // its methods.
         let min_degree = result.min_degree();
-        let n = (min_degree + 1) / 2;
 
         for degree in self.source.min_degree()..self.source.max_generator_degree().unwrap() {
             let numgens = self.source.number_of_gens_in_degree(degree);
             let dimension = self.target.dimension(degree);
             let mut outputs = vec![FpVector::new(p, dimension); numgens];
             // Get mutable access to outputs for degree `deg`
-            if let Some(out_vec) = result.outputs.data.get_mut((degree - min_degree) as usize) {
+            if let Some(out_vec) = old_outputs.data.get((degree - min_degree) as usize) {
                 if out_vec.is_empty() {
                     continue;
                 }

@@ -259,8 +259,6 @@ impl<const U: bool, A: MuAlgebra<U>> MuFreeModule<U, A> {
         // We need to acquire the lock because changing num_gens modifies the behaviour of
         // extend_table_entries, and the two cannot happen concurrently.
         let _lock = self.basis_element_to_opgen.lock();
-        print!("degree: {:?}", degree);
-        print!("min: {:?}", self.min_degree());
         assert!(degree >= self.min_degree);
 
         // println!("add_gens == degree : {}, num_gens : {}", degree, num_gens);
@@ -360,14 +358,6 @@ impl<const U: bool, A: MuAlgebra<U>> MuFreeModule<U, A> {
 
     pub fn index_to_op_gen(&self, degree: i32, index: usize) -> &OperationGeneratorPair {
         assert!(degree >= self.min_degree);
-        println!("index_to_op_gen {} {}", degree, index);
-        for i in self.min_degree..self.basis_element_to_opgen.len() {
-            println!(
-                "[free_module] min_degree = {}, i={i}, len = {}",
-                self.min_degree,
-                self.basis_element_to_opgen[i].len()
-            );
-        }
         &self.basis_element_to_opgen[degree][index]
     }
 
