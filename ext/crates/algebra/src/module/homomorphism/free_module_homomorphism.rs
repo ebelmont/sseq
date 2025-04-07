@@ -277,53 +277,89 @@ where
             degree_shift: self.degree_shift.clone(),
             source: self.source.clone(),
             target: self.target.clone(),
-            outputs: self.outputs.clone(),
+            outputs: OnceBiVec::new(self.min_degree),
             images: OnceBiVec::new(self.min_degree),
             kernels: OnceBiVec::new(self.min_degree),
             quasi_inverses: OnceBiVec::new(self.min_degree),
             min_degree: self.min_degree.clone(),
         };
-
+        let p = self.source.prime();
         let source_any: Arc<dyn Any + Send + Sync> = self.source.clone();
         let target_any: Arc<dyn Any + Send + Sync> = self.target.clone();
         // Downcast to the expected concrete type. This requires that the source is actually
         // a MuFreeModule<true, M::Algebra>.
-        let source_freemodule = Arc::downcast::<MuFreeModule<true, A>>(source_any)
+        let module = Arc::downcast::<MuFreeModule<true, A>>(source_any)
             .expect("Source is not a MuFreeModule<true, _>");
+        let new_source = Arc::new(MuFreeModule::new(
+            module.algebra.clone(),
+            module.name.clone(),
+            module.min_degree() - 1,
+        ));
+        for deg in module.min_degree()..(module.max_computed_degree()) {
+            let mut names = Vec::new();
+            for gen in 0..module.number_of_gens_in_degree(deg) {
+                let name = format!("x_({:?}, {:?})", deg - 1, gen);
+                names.push(name)
+            }
+            new_source.add_generators(deg - 1, module.number_of_gens_in_degree(deg), Some(names));
+        }
         // Downcast to the expected concrete type. This requires that the target is actually
         // a MuFreeModule<true, M::Algebra>.
-        let target_freemodule = Arc::downcast::<MuFreeModule<true, A>>(target_any)
+        let target_module = Arc::downcast::<MuFreeModule<true, A>>(target_any)
             .expect("Target is not a MuFreeModule<true, _>");
+        let new_target = Arc::new(MuFreeModule::new(
+            target_module.algebra.clone(),
+            target_module.name.clone(),
+            target_module.min_degree() - 1,
+        ));
+        for deg in target_module.min_degree()..(module.max_computed_degree()) {
+            let mut names = Vec::new();
+            for gen in 0..target_module.number_of_gens_in_degree(deg) {
+                let name = format!("x_({:?}, {:?})", deg - 1, gen);
+                names.push(name)
+            }
+            new_target.add_generators(
+                deg - 1,
+                target_module.number_of_gens_in_degree(deg),
+                Some(names),
+            );
+        }
         // Now that we have the target as a MuFreeModule<true, M::Algebra>, we can safely call
         // its methods.
         let min_degree = result.min_degree();
         let n = (min_degree + 1) / 2;
-        for (i, gen) in source_freemodule
-            .iter_gens(source_freemodule.max_generator_degree().unwrap())
-            .enumerate()
-        {
-            let deg = gen.0;
+
+        for degree in self.source.min_degree()..self.source.max_generator_degree().unwrap() {
+            let numgens = self.source.number_of_gens_in_degree(degree);
+            let dimension = self.target.dimension(degree);
+            let mut outputs = vec![FpVector::new(p, dimension); numgens];
             // Get mutable access to outputs for degree `deg`
-            if let Some(out_vec) = result.outputs.data.get_mut((deg - min_degree) as usize) {
+            if let Some(out_vec) = result.outputs.data.get_mut((degree - min_degree) as usize) {
                 if out_vec.is_empty() {
                     continue;
                 }
-                for idx in 0..out_vec[0].len() {
-                    let opgen = target_freemodule.index_to_op_gen(deg, idx);
-                    if opgen.looped(source_freemodule.algebra()) {
-                        // Modify the FpVector entry at index `idx`
-                        println!(
-                            "looped {:?} x_({:?}, {:?})",
-                            target_freemodule.algebra().basis_element_to_string(
-                                opgen.operation_degree,
-                                opgen.operation_index
-                            ),
-                            opgen.generator_degree,
-                            opgen.generator_index
-                        );
-                        out_vec[0].set_entry(idx, 0);
+                for num_gen in 0..source_freemodule.number_of_gens_in_degree(degree) {
+                    let mut skipped = 0;
+                    for idx in 0..out_vec[num_gen].len() {
+                        let opgen = target_freemodule.index_to_op_gen(degree, idx);
+                        if opgen.looped(source_freemodule.algebra()) {
+                            // Modify the FpVector entry at index `idx`
+                            println!(
+                                "looped {:?} x_({:?}, {:?})",
+                                target_freemodule.algebra().basis_element_to_string(
+                                    opgen.operation_degree,
+                                    opgen.operation_index
+                                ),
+                                opgen.generator_degree,
+                                opgen.generator_index
+                            );
+                            skipped += 1;
+                        } else {
+                            outputs[num_gen].set_entry(idx - skipped, out_vec[num_gen].entry(idx));
+                        }
                     }
                 }
+                result.add_generators_from_rows(degree, outputs);
             }
         }
         result

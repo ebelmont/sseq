@@ -155,13 +155,13 @@ where
 
         Self {
             name: res.name.clone(),
-            lock: Mutex::new(()),                            // Create a new lock
-            complex: Arc::clone(&res.complex),               // Share the underlying complex
-            modules: modules.pop_front(),                    // Clone OnceVec
-            zero_module: Arc::clone(&res.zero_module),       // Share the zero module
-            chain_maps: res.chain_maps.pop_front(),          // Clone OnceVec
+            lock: Mutex::new(()),              // Create a new lock
+            complex: Arc::clone(&res.complex), // Share the underlying complex
+            modules,
+            zero_module: Arc::clone(&res.zero_module), // Share the zero module
+            chain_maps: res.chain_maps.pop_front(),    // Clone OnceVec
             differentials: differentials_cloned.pop_front(), // Use cloned differentials
-            kernels: DashMap::new(),                         // Create new DashMap
+            kernels: DashMap::new(),                   // Create new DashMap
             save_dir: res.save_dir.clone(),
             should_save: res.should_save,
             load_quasi_inverse: res.load_quasi_inverse,
