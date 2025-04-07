@@ -42,7 +42,7 @@ fn hopf(n: i32) -> anyhow::Result<()> {
     //let's think about the sphere
     let module = Arc::new(sphere()?);
     //let max = Bidegree::n_s(50, 25);
-    let max = Bidegree::n_s(10, 5);
+    let max = Bidegree::n_s(20, 10);
     //prepping out-file containing our data
     let file = File::create(format!("hopf{n}.txt")).expect("Failed to create log file");
     let mut writer = BufWriter::new(file);
@@ -87,7 +87,6 @@ fn hopf(n: i32) -> anyhow::Result<()> {
         &[FpVector::from_slice(module.prime(), top.as_slice())],
     );
 
-
     println!("H res_a = ");
     for b in res_a.iter_stem() {
         for i in 0..res_a.number_of_gens_in_bidegree(b) {
@@ -112,19 +111,27 @@ fn hopf(n: i32) -> anyhow::Result<()> {
     hom.extend_step_raw(min_degree, Some(t.to_vec()));
     hom.extend_all();
 
-    for stem in (2*n-1)..max.n() {
+    for stem in (2 * n - 1)..max.n() {
         for s in 0..=max.s() - 1 {
             let source = Bidegree::n_s(stem, s);
             let target = source - suspension_shift;
             let source_num_gens = res_b.number_of_gens_in_bidegree(source);
             let target_num_gens = new.number_of_gens_in_bidegree(target);
-            println!("source: ({}, {}), source_num_gens = {source_num_gens}", source.n() - (2*n-1), source.s());
+            println!(
+                "source: ({}, {}), source_num_gens = {source_num_gens}",
+                source.n() - (2 * n - 1),
+                source.s()
+            );
             let m = hom.get_map(target.s()).hom_k(target.t());
 
             let m = format!(" - {m:?}");
             if source_num_gens != 0 || target_num_gens != 0 {
-                writeln!(writer, "{stem} {s}: {source_num_gens} {target_num_gens} {m}", stem=stem-(2*n-1))
-                    .expect("Failed to write to file");
+                writeln!(
+                    writer,
+                    "{stem} {s}: {source_num_gens} {target_num_gens} {m}",
+                    stem = stem - (2 * n - 1)
+                )
+                .expect("Failed to write to file");
             }
         }
     }
