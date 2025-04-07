@@ -338,7 +338,7 @@ where
             let dimension = self.target.dimension(degree);
             let mut outputs = vec![FpVector::new(p, dimension); numgens];
             // Get mutable access to outputs for degree `deg`
-            if let Some(out_vec) = old_outputs.data.get((degree - min_degree) as usize) {
+            if let Some(out_vec) = old_outputs.data.get((degree - min_degree - 1) as usize) {
                 if out_vec.is_empty() {
                     continue;
                 }
@@ -354,7 +354,7 @@ where
                         }
                     }
                 }
-                result.add_generators_from_rows(degree, outputs);
+                result.add_generators_from_rows_ooo(degree, outputs);
             }
         }
         result
