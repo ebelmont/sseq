@@ -36,8 +36,8 @@ pub type UnstableFreeModule<A> = MuFreeModule<true, A>;
 /// A free module is uniquely determined by its list of generators. The generators are listed in
 /// increasing degrees, and the index in this list is the internal index.
 pub struct MuFreeModule<const U: bool, A: MuAlgebra<U>> {
-    algebra: Arc<A>,
-    name: String,
+    pub algebra: Arc<A>,
+    pub name: String,
     pub min_degree: i32,
     pub gen_names: OnceBiVec<Vec<String>>,
     /// degree -> internal index of first generator in degree
