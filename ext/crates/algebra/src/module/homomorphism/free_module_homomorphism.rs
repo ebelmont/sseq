@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use crate::module::ZeroModule;
 
 use crate::{
     algebra::MuAlgebra,
@@ -14,6 +15,7 @@ use fp::{
     vector::{FpVector, Slice, SliceMut},
 };
 use once::OnceBiVec;
+use once::OnceVec;
 use std::any::Any;
 
 pub type FreeModuleHomomorphism<M> = MuFreeModuleHomomorphism<false, M>;
@@ -23,8 +25,8 @@ pub struct MuFreeModuleHomomorphism<const U: bool, M: Module>
 where
     M::Algebra: MuAlgebra<U>,
 {
-    source: Arc<MuFreeModule<U, M::Algebra>>,
-    target: Arc<M>,
+    pub source: Arc<MuFreeModule<U, M::Algebra>>,
+    pub target: Arc<M>,
     pub outputs: OnceBiVec<Vec<FpVector>>, // degree --> input_idx --> output
     pub images: OnceBiVec<Option<Subspace>>,
     pub kernels: OnceBiVec<Option<Subspace>>,
@@ -268,15 +270,28 @@ where
     A: MuAlgebra<U>,
 {
     // Restrict the method further so that M::Algebra must implement UnstableAlgebra.
-    pub fn loops(&self) -> Self
+    pub fn loops(&self, i: usize, zero_module: Arc<MuFreeModule<U,A>>, modules: OnceVec<Arc<MuFreeModule<U, A>>>) -> Self
     where
         A: UnstableAlgebra,
     {
         // Create a new instance with copied data
+        let first = &modules[0 as usize];
+        if i == 0 {
+            return Self {
+                degree_shift: self.degree_shift.clone(),
+                source: Arc::clone(first),
+                target: zero_module,
+                outputs: OnceBiVec::new(self.min_degree - 1),
+                images: OnceBiVec::new(self.min_degree - 1),
+                kernels: OnceBiVec::new(self.min_degree - 1),
+                quasi_inverses: OnceBiVec::new(self.min_degree - 1),
+                min_degree: self.min_degree.clone() - 1,
+            }
+        }
         let mut result = Self {
             degree_shift: self.degree_shift.clone(),
-            source: self.source.clone(),
-            target: self.target.clone(),
+            source: modules[i].clone(),
+            target: modules[i-1].clone(),
             outputs: OnceBiVec::new(self.min_degree - 1),
             images: OnceBiVec::new(self.min_degree - 1),
             kernels: OnceBiVec::new(self.min_degree - 1),
@@ -296,7 +311,7 @@ where
             source_freemodule.name.clone(),
             source_freemodule.min_degree() - 1,
         ));
-        for deg in source_freemodule.min_degree()..(source_freemodule.max_computed_degree()) {
+        for deg in source_freemodule.min_degree()..(source_freemodule.max_computed_degree()+1) {
             let mut names = Vec::new();
             for gen in 0..source_freemodule.number_of_gens_in_degree(deg) {
                 let name = format!("x_({:?}, {:?})", deg - 1, gen);
@@ -308,6 +323,10 @@ where
                 Some(names),
             );
         }
+        new_source_module.compute_basis(new_source_module.max_computed_degree());
+        //result.source = new_source_module.clone();
+
+
         // Downcast to the expected concrete type. This requires that the target is actually
         // a MuFreeModule<true, M::Algebra>.
         let target_freemodule = Arc::downcast::<MuFreeModule<true, A>>(target_any)
@@ -317,7 +336,7 @@ where
             target_freemodule.name.clone(),
             target_freemodule.min_degree() - 1,
         ));
-        for deg in target_freemodule.min_degree()..(target_freemodule.max_computed_degree()) {
+        for deg in target_freemodule.min_degree()..(target_freemodule.max_computed_degree()+1) {
             let mut names = Vec::new();
             for gen in 0..target_freemodule.number_of_gens_in_degree(deg) {
                 let name = format!("x_({:?}, {:?})", deg - 1, gen);
@@ -329,20 +348,29 @@ where
                 Some(names),
             );
         }
+        new_target_module.compute_basis(self.source.max_generator_degree().unwrap());
+        //result.target = new_target_module.clone();
+
         // Now that we have the target as a MuFreeModule<true, M::Algebra>, we can safely call
         // its methods.
         let min_degree = result.min_degree();
 
         for degree in min_degree..self.source.max_generator_degree().unwrap() {
             let numgens = self.source.number_of_gens_in_degree(degree+1);
-            let dimension = self.target.dimension(degree+1);
-            let mut out_vec_new = vec![FpVector::new(p, dimension); numgens];
             // Get mutable access to outputs for degree `deg`
             if let Some(out_vec) = old_outputs.data.get((degree - min_degree) as usize) {
-                if out_vec.is_empty() {
+                let mut is_empty = true;
+                for i in 0..out_vec.len() {
+                    if !out_vec[i].is_empty() {
+                        is_empty = false;
+                    }
+                }
+                if out_vec.is_empty() || is_empty {
                     result.add_generators_from_rows(degree, out_vec.clone());
                     continue;
                 }
+                let dimension = new_target_module.dimension(degree);
+                let mut out_vec_new = vec![FpVector::new(p, dimension); numgens];
                 for num_gen in 0..source_freemodule.number_of_gens_in_degree(degree+1) {
                     let mut skipped = 0;
                     for idx in 0..out_vec[num_gen].len() {
