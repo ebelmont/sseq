@@ -41,8 +41,8 @@ fn main() -> anyhow::Result<()> {
 fn hopf(n: i32) -> anyhow::Result<()> {
     //let's think about the sphere
     let module = Arc::new(sphere()?);
-    //let max = Bidegree::n_s(50, 25);
     let max = Bidegree::n_s(50, 25);
+    //let max = Bidegree::n_s(6, 3);
     //prepping out-file containing our data
     let file = File::create(format!("hopf{n}.txt")).expect("Failed to create log file");
     let mut writer = BufWriter::new(file);

@@ -148,6 +148,7 @@ where
     }
 
     pub fn output(&self, generator_degree: i32, generator_index: usize) -> &FpVector {
+        println!("[free_module_homomorphism] generator_degree = {generator_degree}, generator_index = {generator_index}, num gens in degree = {}", self.source.number_of_gens_in_degree(generator_degree));
         assert!(
             generator_degree >= self.min_degree(),
             "generator_degree {} less than min degree {}",
@@ -307,7 +308,7 @@ where
             source_freemodule.name.clone(),
             source_freemodule.min_degree() - 1,
         ));
-        for deg in source_freemodule.min_degree()..(source_freemodule.max_computed_degree()) {
+        for deg in source_freemodule.min_degree()..(source_freemodule.max_computed_degree()+1) {
             let mut names = Vec::new();
             for gen in 0..source_freemodule.number_of_gens_in_degree(deg) {
                 let name = format!("x_({:?}, {:?})", deg - 1, gen);
@@ -319,6 +320,9 @@ where
                 Some(names),
             );
         }
+        new_source_module.compute_basis(new_source_module.max_computed_degree()-1);
+
+
         // Downcast to the expected concrete type. This requires that the target is actually
         // a MuFreeModule<true, M::Algebra>.
         let target_freemodule = Arc::downcast::<MuFreeModule<true, A>>(target_any)
@@ -328,7 +332,7 @@ where
             target_freemodule.name.clone(),
             target_freemodule.min_degree() - 1,
         ));
-        for deg in target_freemodule.min_degree()..(target_freemodule.max_computed_degree()) {
+        for deg in target_freemodule.min_degree()..(target_freemodule.max_computed_degree()+1) {
             let mut names = Vec::new();
             for gen in 0..target_freemodule.number_of_gens_in_degree(deg) {
                 let name = format!("x_({:?}, {:?})", deg - 1, gen);
@@ -340,6 +344,8 @@ where
                 Some(names),
             );
         }
+        new_target_module.compute_basis(self.source.max_generator_degree().unwrap()-1);
+
         // Now that we have the target as a MuFreeModule<true, M::Algebra>, we can safely call
         // its methods.
         let min_degree = result.min_degree();
@@ -353,19 +359,24 @@ where
         for degree in min_degree..self.source.max_generator_degree().unwrap() {
             println!("[free_module_homomorphism] degree = {degree}");
             let numgens = self.source.number_of_gens_in_degree(degree+1);
-            let dimension = self.target.dimension(degree+1);
-            let mut out_vec_new = vec![FpVector::new(p, dimension); numgens];
             // Get mutable access to outputs for degree `deg`
             if let Some(out_vec) = old_outputs.data.get((degree - min_degree) as usize) {
-                /*print!("[free_module_homomorphism] degree={degree}, min_degree={min_degree}, out_vec = [");
+                print!("[free_module_homomorphism] degree={degree}, min_degree={min_degree}, out_vec = [");
+                let mut is_empty = true;
                 for i in 0..out_vec.len() {
                     print!("{},", out_vec[i]);
+                    if !out_vec[i].is_empty() {
+                        is_empty = false;
+                    }
                 }
-                println!("]");*/
-                if out_vec.is_empty() {
+                println!("], empty = {}, is_empty = {}, out_vec.len() = {}", out_vec.is_empty(), is_empty, out_vec.len());
+                if out_vec.is_empty() || is_empty {
                     result.add_generators_from_rows(degree, out_vec.clone());
                     continue;
                 }
+                println!("[free_module_homomorphism] degree = {degree}, min_degree = {}", new_target_module.min_degree);
+                let dimension = new_target_module.dimension(degree);
+                let mut out_vec_new = vec![FpVector::new(p, dimension); numgens];
                 for num_gen in 0..source_freemodule.number_of_gens_in_degree(degree+1) {
                     let mut skipped = 0;
                     for idx in 0..out_vec[num_gen].len() {
