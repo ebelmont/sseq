@@ -138,12 +138,11 @@ where
     fn cocycle_string(&self, gen: BidegreeGenerator, compact: bool) -> String {
         let d = self.differential(gen.s());
         let target = d.target();
-        println!("cocycle_string gen.t() = {}, gen.idx = {}, d.outputs.len() = {}", gen.t(), gen.idx(), d.outputs.len());
-        for i in 2..d.outputs.len() {
+        /*for i in 2..d.outputs.len() {
             for j in 0..d.outputs[i].len() {
                 println!("[mod.rs] d.outputs[{i}][{j}] = {}", d.outputs[i][j]);
             }
-        }
+        }*/
         if gen.t() < d.outputs.len() {
             let result_vector = d.output(gen.t(), gen.idx());
 
