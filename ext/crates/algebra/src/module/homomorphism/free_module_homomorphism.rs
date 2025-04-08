@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use crate::module::ZeroModule;
 
 use crate::{
     algebra::MuAlgebra,
@@ -14,6 +15,7 @@ use fp::{
     vector::{FpVector, Slice, SliceMut},
 };
 use once::OnceBiVec;
+use once::OnceVec;
 use std::any::Any;
 
 pub type FreeModuleHomomorphism<M> = MuFreeModuleHomomorphism<false, M>;
@@ -24,7 +26,7 @@ where
     M::Algebra: MuAlgebra<U>,
 {
     pub source: Arc<MuFreeModule<U, M::Algebra>>,
-    target: Arc<M>,
+    pub target: Arc<M>,
     pub outputs: OnceBiVec<Vec<FpVector>>, // degree --> input_idx --> output
     pub images: OnceBiVec<Option<Subspace>>,
     pub kernels: OnceBiVec<Option<Subspace>>,
@@ -268,15 +270,29 @@ where
     A: MuAlgebra<U>,
 {
     // Restrict the method further so that M::Algebra must implement UnstableAlgebra.
-    pub fn loops(&self) -> Self
+    pub fn loops(&self, i: usize, zero_module: Arc<MuFreeModule<U,A>>, modules: OnceVec<Arc<MuFreeModule<U, A>>>) -> Self
     where
         A: UnstableAlgebra,
     {
+        println!("[free_module_homomorphism] i={i}");
         // Create a new instance with copied data
+        let first = &modules[0 as usize];
+        if i == 0 {
+            return Self {
+                degree_shift: self.degree_shift.clone(),
+                source: Arc::clone(first),
+                target: zero_module,
+                outputs: OnceBiVec::new(self.min_degree - 1),
+                images: OnceBiVec::new(self.min_degree - 1),
+                kernels: OnceBiVec::new(self.min_degree - 1),
+                quasi_inverses: OnceBiVec::new(self.min_degree - 1),
+                min_degree: self.min_degree.clone() - 1,
+            }
+        }
         let mut result = Self {
             degree_shift: self.degree_shift.clone(),
-            source: self.source.clone(),
-            target: self.target.clone(),
+            source: modules[i].clone(),
+            target: modules[i-1].clone(),
             outputs: OnceBiVec::new(self.min_degree - 1),
             images: OnceBiVec::new(self.min_degree - 1),
             kernels: OnceBiVec::new(self.min_degree - 1),
@@ -320,7 +336,7 @@ where
             );
         }
         new_source_module.compute_basis(new_source_module.max_computed_degree());
-        result.source = new_source_module.clone();
+        //result.source = new_source_module.clone();
 
 
         // Downcast to the expected concrete type. This requires that the target is actually
@@ -345,7 +361,7 @@ where
             );
         }
         new_target_module.compute_basis(self.source.max_generator_degree().unwrap());
-        result.target = new_target_module.clone();
+        //result.target = new_target_module.clone();
 
         // Now that we have the target as a MuFreeModule<true, M::Algebra>, we can safely call
         // its methods.

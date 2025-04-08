@@ -146,12 +146,19 @@ where
             modules.push(new);
         }
 
+        for (i,d) in res.differentials.iter().enumerate() {
+            println!("[resolution.rs] d.source({i}) = {:?}", d.source.gen_names);
+        }
+        println!("[resolution] modules.len() = {}, differentials len = {}", modules.len(), res.differentials.len());
+
         let differentials_cloned: OnceVec<
             Arc<MuFreeModuleHomomorphism<true, MuFreeModule<true, CC::Algebra>>>,
         > = res
             .differentials
+            .pop_front()
             .iter()
-            .map(|d| Arc::new(d.loops()))
+            .enumerate()
+            .map(|(i,d)| Arc::new(d.loops(i, Arc::clone(&res.zero_module), modules.clone())))
             .collect();
 
         Self {
@@ -161,7 +168,7 @@ where
             modules,
             zero_module: Arc::clone(&res.zero_module), // Share the zero module
             chain_maps: res.chain_maps.pop_front(),    // Clone OnceVec
-            differentials: differentials_cloned.pop_front(), // Use cloned differentials
+            differentials: differentials_cloned, // Use cloned differentials
             kernels: DashMap::new(),                   // Create new DashMap
             save_dir: res.save_dir.clone(),
             should_save: res.should_save,

@@ -209,6 +209,7 @@ where
         assert!(self.target.has_computed_bidegree(output));
         assert!(self.source.has_computed_bidegree(input));
         assert!(input.s() >= self.shift.s());
+        println!("[resolution_homomorphism] s = {}, t= {}", input.s(), input.t());
 
         let f_cur = self.get_map_ensure_length(input.s());
         if input.t() < f_cur.next_degree() {
@@ -268,6 +269,15 @@ where
         let d_source = self.source.differential(input.s());
         let d_target = self.target.differential(output.s());
         let f_prev = self.get_map(input.s() - 1);
+
+        for deg in f_cur.target.min_degree()..f_cur.target.max_generator_degree().unwrap() {
+            println!("[resolution_homomorphism] f_cur dimension({deg}) = {}", f_cur.target.dimension(deg));
+        }
+        println!("[resolution_homomorphism] f_cur max deg = {}", f_cur.target.max_computed_degree());
+        for deg in d_target.source().min_degree()..d_target.source().max_generator_degree().unwrap() {
+            println!("[resolution_homomorphism] d_target.source() dimension({deg}) = {}", d_target.source().dimension(deg));
+        }
+        println!("[resolution_homomorphism] d.source() max deg = {}", d_target.source().max_computed_degree());
         assert!(Arc::ptr_eq(&d_source.source(), &f_cur.source()));
         assert!(Arc::ptr_eq(&d_source.target(), &f_prev.source()));
         assert!(Arc::ptr_eq(&d_target.source(), &f_cur.target()));
