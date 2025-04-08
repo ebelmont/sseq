@@ -284,6 +284,17 @@ where
             min_degree: self.min_degree.clone() - 1,
         };
         let old_outputs = self.outputs.clone();
+        for i in old_outputs.min_degree()..old_outputs.len() {
+            for j in 0..old_outputs[i].len() {
+                print!("[free_module_homomorphism] old_outputs[{i}][{j}] = [");
+                for k in 0..old_outputs[i][j].len() {
+                    print!("{},", old_outputs[i][j].entry(k));
+                }
+                println!("]");
+            }
+        }
+
+
         let p = self.source.prime();
         let source_any: Arc<dyn Any + Send + Sync> = self.source.clone();
         let target_any: Arc<dyn Any + Send + Sync> = self.target.clone();
@@ -338,20 +349,27 @@ where
         println!("[free_module_homomorphism] new_target_module = {:?}", new_target_module.gen_names());
         println!("[free_module_homomorphism] min_degree = {min_degree}");
 
-        for degree in self.source.min_degree()..self.source.max_generator_degree().unwrap() {
-            let numgens = self.source.number_of_gens_in_degree(degree);
-            let dimension = self.target.dimension(degree);
-            let mut outputs = vec![FpVector::new(p, dimension); numgens];
+        println!("[free_module_homomorphism] source min_degree = {}", self.source.min_degree);
+        for degree in min_degree..self.source.max_generator_degree().unwrap() {
+            println!("[free_module_homomorphism] degree = {degree}");
+            let numgens = self.source.number_of_gens_in_degree(degree+1);
+            let dimension = self.target.dimension(degree+1);
+            let mut out_vec_new = vec![FpVector::new(p, dimension); numgens];
             // Get mutable access to outputs for degree `deg`
-            if let Some(out_vec) = old_outputs.data.get((degree - min_degree - 1) as usize) {
-                //print!("[free_module_homomorphism] degree={degree}, min_degree={min_degree}, out_vec = [");
+            if let Some(out_vec) = old_outputs.data.get((degree - min_degree) as usize) {
+                /*print!("[free_module_homomorphism] degree={degree}, min_degree={min_degree}, out_vec = [");
+                for i in 0..out_vec.len() {
+                    print!("{},", out_vec[i]);
+                }
+                println!("]");*/
                 if out_vec.is_empty() {
+                    result.add_generators_from_rows(degree, out_vec.clone());
                     continue;
                 }
-                for num_gen in 0..source_freemodule.number_of_gens_in_degree(degree) {
+                for num_gen in 0..source_freemodule.number_of_gens_in_degree(degree+1) {
                     let mut skipped = 0;
                     for idx in 0..out_vec[num_gen].len() {
-                        let opgen = target_freemodule.index_to_op_gen(degree, idx);
+                        let opgen = target_freemodule.index_to_op_gen(degree+1, idx);
                         if opgen.looped(source_freemodule.algebra()) {
                             // Modify the FpVector entry at index `idx`
                             println!(
@@ -365,11 +383,24 @@ where
                             );
                             skipped += 1;
                         } else {
-                            outputs[num_gen].set_entry(idx - skipped, out_vec[num_gen].entry(idx));
+                            println!("[free_module_homomorphism] setting out_vec_new[{num_gen}] for degree={degree}");
+                            out_vec_new[num_gen].set_entry(idx - skipped, out_vec[num_gen].entry(idx));
                         }
                     }
                 }
-                result.add_generators_from_rows_ooo(degree, outputs);
+                result.add_generators_from_rows(degree, out_vec_new);
+            }
+            else {
+                result.add_generators_from_rows(degree, vec![]);
+            }
+        }
+        for i in result.outputs.min_degree()..result.outputs.len() {
+            for j in 0..result.outputs[i].len() {
+                print!("[free_module_homomorphism] result.outputs[{i}][{j}] = [");
+                for k in 0..result.outputs[i][j].len() {
+                    print!("{},", result.outputs[i][j].entry(k));
+                }
+                println!("]");
             }
         }
         result
