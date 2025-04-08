@@ -333,28 +333,32 @@ where
         // its methods.
         let min_degree = result.min_degree();
 
-        for degree in self.source.min_degree()..self.source.max_generator_degree().unwrap() {
-            let numgens = self.source.number_of_gens_in_degree(degree);
-            let dimension = self.target.dimension(degree);
-            let mut outputs = vec![FpVector::new(p, dimension); numgens];
+        for degree in min_degree..self.source.max_generator_degree().unwrap() {
+            let numgens = self.source.number_of_gens_in_degree(degree+1);
+            let dimension = self.target.dimension(degree+1);
+            let mut out_vec_new = vec![FpVector::new(p, dimension); numgens];
             // Get mutable access to outputs for degree `deg`
-            if let Some(out_vec) = old_outputs.data.get((degree - min_degree - 1) as usize) {
+            if let Some(out_vec) = old_outputs.data.get((degree - min_degree) as usize) {
                 if out_vec.is_empty() {
+                    result.add_generators_from_rows(degree, out_vec.clone());
                     continue;
                 }
-                for num_gen in 0..source_freemodule.number_of_gens_in_degree(degree) {
+                for num_gen in 0..source_freemodule.number_of_gens_in_degree(degree+1) {
                     let mut skipped = 0;
                     for idx in 0..out_vec[num_gen].len() {
-                        let opgen = target_freemodule.index_to_op_gen(degree, idx);
+                        let opgen = target_freemodule.index_to_op_gen(degree+1, idx);
                         if opgen.looped(source_freemodule.algebra()) {
                             // Modify the FpVector entry at index `idx`
                             skipped += 1;
                         } else {
-                            outputs[num_gen].set_entry(idx - skipped, out_vec[num_gen].entry(idx));
+                            out_vec_new[num_gen].set_entry(idx - skipped, out_vec[num_gen].entry(idx));
                         }
                     }
                 }
-                result.add_generators_from_rows_ooo(degree, outputs);
+                result.add_generators_from_rows(degree, out_vec_new);
+            }
+            else {
+                result.add_generators_from_rows(degree, vec![]);
             }
         }
         result

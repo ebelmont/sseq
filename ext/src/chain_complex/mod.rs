@@ -138,10 +138,15 @@ where
     fn cocycle_string(&self, gen: BidegreeGenerator, compact: bool) -> String {
         let d = self.differential(gen.s());
         let target = d.target();
-        let result_vector = d.output(gen.t(), gen.idx());
+        if gen.t() < d.outputs.len() {
+            let result_vector = d.output(gen.t(), gen.idx());
 
-        BidegreeElement::new(gen.degree(), result_vector.clone())
-            .to_string_module(&*target, compact)
+            BidegreeElement::new(gen.degree(), result_vector.clone())
+                .to_string_module(&*target, compact)
+        }
+        else {
+            "OOB".to_string()
+        }
     }
 }
 
