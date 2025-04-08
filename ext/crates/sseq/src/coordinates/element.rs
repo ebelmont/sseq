@@ -90,9 +90,6 @@ impl BidegreeElement {
                 } else {
                     String::new()
                 };
-                if self.s() == 0 {
-                    return "degree zero".to_string();
-                }
                 let gen = BidegreeGenerator::s_t(
                     self.s() - 1,
                     opgen.generator_degree,

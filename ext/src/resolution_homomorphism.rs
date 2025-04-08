@@ -173,6 +173,7 @@ where
     /// [`MuResolutionHomomorphism::extend_step_raw`] can be called with `extra_images = None`.
     pub fn extend_profile<AUX: Sync>(&self, max: BidegreeRange<AUX>) {
         self.get_map_ensure_length(max.s() - 1);
+        println!("[resolution_homomorphism] {} {}", self.shift.s(), self.get_map_ensure_length(self.shift.s()).min_degree());
 
         sseq::coordinates::iter_s_t(
             &|b| self.extend_step_raw(b, None),

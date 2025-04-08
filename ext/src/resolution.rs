@@ -142,6 +142,7 @@ where
                 }
                 new.add_generators(deg - 1, module.number_of_gens_in_degree(deg), Some(names));
             }
+            new.compute_basis(module.max_computed_degree()-1);
             modules.push(new);
         }
 

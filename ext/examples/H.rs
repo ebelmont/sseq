@@ -112,6 +112,9 @@ fn hopf(n: i32) -> anyhow::Result<()> {
 
     println!("H new(2) = ");
     for b in new.iter_stem() {
+        if b.s() == 0 {
+            continue;
+        }
         for i in 0..new.number_of_gens_in_bidegree(b) {
             let gen = BidegreeGenerator::new(b, i);
             let cocycle = new.cocycle_string(gen, true);

@@ -148,7 +148,6 @@ where
     }
 
     pub fn output(&self, generator_degree: i32, generator_index: usize) -> &FpVector {
-        println!("[free_module_homomorphism] generator_degree = {generator_degree}, generator_index = {generator_index}, num gens in degree = {}", self.source.number_of_gens_in_degree(generator_degree));
         assert!(
             generator_degree >= self.min_degree(),
             "generator_degree {} less than min degree {}",
