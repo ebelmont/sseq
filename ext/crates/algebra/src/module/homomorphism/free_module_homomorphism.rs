@@ -23,7 +23,7 @@ pub struct MuFreeModuleHomomorphism<const U: bool, M: Module>
 where
     M::Algebra: MuAlgebra<U>,
 {
-    source: Arc<MuFreeModule<U, M::Algebra>>,
+    pub source: Arc<MuFreeModule<U, M::Algebra>>,
     target: Arc<M>,
     pub outputs: OnceBiVec<Vec<FpVector>>, // degree --> input_idx --> output
     pub images: OnceBiVec<Option<Subspace>>,
@@ -320,7 +320,8 @@ where
                 Some(names),
             );
         }
-        new_source_module.compute_basis(new_source_module.max_computed_degree()-1);
+        new_source_module.compute_basis(new_source_module.max_computed_degree());
+        result.source = new_source_module.clone();
 
 
         // Downcast to the expected concrete type. This requires that the target is actually
@@ -344,7 +345,8 @@ where
                 Some(names),
             );
         }
-        new_target_module.compute_basis(self.source.max_generator_degree().unwrap()-1);
+        new_target_module.compute_basis(self.source.max_generator_degree().unwrap());
+        result.target = new_target_module.clone();
 
         // Now that we have the target as a MuFreeModule<true, M::Algebra>, we can safely call
         // its methods.

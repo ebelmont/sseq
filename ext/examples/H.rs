@@ -102,8 +102,18 @@ fn hopf(n: i32) -> anyhow::Result<()> {
         Arc::new(UnstableResolution::augmented_loops(&res_a));
 
     println!("H new = ");
+    for s in 0..20 {
+        for t in 2..25 {
+            println!("H new num gens in bidegree ({}, {}) = {}", s, t, new.number_of_gens_in_bidegree(Bidegree::s_t(s,t)));
+            println!("H new.differential.source num gens in bidegree ({}, {}) = {}", s, t, new.differential(s).source.number_of_gens_in_degree(t));
+        }
+    }
+
+
+    println!("H new(2) = ");
     for b in new.iter_stem() {
         println!("H new num gens in bidegree ({}, {}) = {}", b.s(), b.t(), new.number_of_gens_in_bidegree(b));
+        println!("H new.differential.source num gens in bidegree ({}, {}) = {}", b.s(), b.t(), new.differential(b.s()).source.number_of_gens_in_degree(b.t()));
         for i in 0..new.number_of_gens_in_bidegree(b) {
             let gen = BidegreeGenerator::new(b, i);
             let cocycle = new.cocycle_string(gen, true);
