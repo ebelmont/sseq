@@ -186,10 +186,15 @@ fn hopf(n: i32) -> anyhow::Result<()> {
 
             let m = format!(" - {m:?}");
             if source_num_gens != 0 || target_num_gens != 0 {
+                // H: (stem, filt, sphere) --> (stem-sphere+1, filt-1, 2(sphere)-1)
+                // The degrees (stem, s) are for the target of the H map, and we want to print
+                // source degrees. Also, sseq's stem has an offset of 2n-1 from the actual stem.
+                let realstem = stem - (2*n-1);
                 writeln!(
                     writer,
-                    "{stem} {s}: {source_num_gens} {target_num_gens} {m}",
-                    stem = stem - (2 * n - 1)
+                    "{} {}: {source_num_gens} {target_num_gens} {m}",
+                    realstem - 1 + n,
+                    s + 1
                 )
                 .expect("Failed to write to file");
             }
