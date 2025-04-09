@@ -287,9 +287,12 @@ where
                 quasi_inverses: OnceBiVec::new(self.min_degree - 1),
                 min_degree: self.min_degree.clone() - 1,
             };
-            for degree in 1..max_n+(i as i32) +1 {
+            for degree in (self.min_degree - 1)..max_n+(i as i32) +1 {
                 // I don't know why, but result.output needs to have length max_n + i, where max_n
                 // is the max stem of the resolution
+                // Starting at self.min_degree-1 is a little mysterious as well but the point is to
+                // not cause an error with push_checked, which checks that the new index in the vec
+                // (which starts at 1, since we already have 0) + min_degree = degree
                 result.add_generators_from_rows(degree, vec![]);
             }
             return result;

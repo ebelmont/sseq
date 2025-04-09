@@ -35,7 +35,7 @@ use std::io::Write;
 use std::{path::PathBuf, sync::Arc};
 
 fn main() -> anyhow::Result<()> {
-    hopf(2)
+    hopf(3)
 }
 
 fn hopf(n: i32) -> anyhow::Result<()> {
