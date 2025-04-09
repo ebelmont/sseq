@@ -35,7 +35,7 @@ use std::io::Write;
 use std::{path::PathBuf, sync::Arc};
 
 fn main() -> anyhow::Result<()> {
-    hopf(2)
+    hopf(3)
 }
 
 fn hopf(n: i32) -> anyhow::Result<()> {
@@ -171,6 +171,20 @@ fn hopf(n: i32) -> anyhow::Result<()> {
     hom.extend_step_raw(min_degree, Some(t.to_vec()));
     hom.extend_all();
 
+    for b in res_b.iter_stem() {
+        for i in 0..res_b.number_of_gens_in_bidegree(b) {
+            let gen = BidegreeGenerator::new(b, i);
+
+            if gen.s() < 15 {
+                let f_cur = hom.get_map(gen.s());
+                let vec = f_cur.output(gen.t(), i);
+                let target = new.module(gen.s());
+                let opgen = target.format_opgen(gen.t(), vec.clone());
+
+                println!("f x_{gen:#} = {opgen}");
+            }
+        }
+    }
 
     for stem in (2 * n - 1)..max.n() {
         for s in 0..=max.s() - 1 {

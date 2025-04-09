@@ -255,7 +255,37 @@ impl<const U: bool, A: MuAlgebra<U>> MuFreeModule<U, A> {
         self.num_gens[degree]
     }
 
+    pub fn format_opgen(&self, degree: i32, fp: FpVector) -> String {
+        let mut result = Vec::new();
+        // Create a vector of zeros with the same length as fpvec
+        let mut vector = vec![0; fp.len()];
 
+        // Iterate over indices and add entries from fpvec to v
+        for i in 0..fp.len() {
+            vector[i] += fp.entry(i);
+        }
+
+        // Iterate through the vector
+        for (idx, value) in vector.iter().enumerate() {
+            // Check if the current value is 1
+            if *value == 1 {
+                // Apply the basis_element_to_string function for this index
+                let basis_str = self.basis_element_to_string(degree, idx);
+
+                // Only add non-empty strings to the result
+                if !basis_str.is_empty() {
+                    result.push(basis_str);
+                }
+            }
+        }
+
+        // Join all elements with " + "
+        if result.is_empty() {
+            "".to_string() // Return "0" for empty result
+        } else {
+            result.join(" + ")
+        }
+    }
 
     pub fn add_generators(&self, degree: i32, num_gens: usize, names: Option<Vec<String>>) {
         // We need to acquire the lock because changing num_gens modifies the behaviour of
