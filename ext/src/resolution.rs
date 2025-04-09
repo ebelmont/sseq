@@ -106,7 +106,7 @@ impl<A, CC: ChainComplex<Algebra = A>> MuResolution<true, CC>
 where
     A: UnstableAlgebra,
 {
-    pub fn augmented_loops(res: &Self) -> Self {
+    pub fn augmented_loops(res: &Self, max_n: i32) -> Self {
         // Clone differentials and apply loops on each clone.
         for i in 0..res.modules.len() {
             println!("rank(i={i}) = {:?}", res.modules[i].gen_names);
@@ -158,7 +158,7 @@ where
             .pop_front()
             .iter()
             .enumerate()
-            .map(|(i,d)| Arc::new(d.loops(i, Arc::clone(&res.zero_module), modules.clone())))
+            .map(|(i,d)| Arc::new(d.loops(i, max_n, Arc::clone(&res.zero_module), modules.clone())))
             .collect();
 
         Self {
@@ -964,6 +964,10 @@ where
     }
 
     fn has_computed_bidegree(&self, b: Bidegree) -> bool {
+        //println!("[resolution] differentials.len = {}, b.s = {}, b.t = {}, differential.next_degree = {}", self.differentials.len(), b.s(), b.t(), self.differential(b.s()).next_degree());
+        if (b.s() as usize) < self.differentials.len() {
+            println!("[resolution] differentials.len = {}, b.s = {}, b.t = {}, {:?}", self.differentials.len(), b.s(), b.t(), self.differential(b.s()).next_degree());
+        }
         self.differentials.len() > b.s() as usize && self.differential(b.s()).next_degree() > b.t()
     }
 

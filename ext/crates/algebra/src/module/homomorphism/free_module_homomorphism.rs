@@ -270,7 +270,7 @@ where
     A: MuAlgebra<U>,
 {
     // Restrict the method further so that M::Algebra must implement UnstableAlgebra.
-    pub fn loops(&self, i: usize, zero_module: Arc<MuFreeModule<U,A>>, modules: OnceVec<Arc<MuFreeModule<U, A>>>) -> Self
+    pub fn loops(&self, i: usize, max_n: i32, zero_module: Arc<MuFreeModule<U,A>>, modules: OnceVec<Arc<MuFreeModule<U, A>>>) -> Self
     where
         A: UnstableAlgebra,
     {
@@ -278,7 +278,7 @@ where
         // Create a new instance with copied data
         let first = &modules[0 as usize];
         if i == 0 {
-            return Self {
+            let mut result = Self {
                 degree_shift: self.degree_shift.clone(),
                 source: Arc::clone(first),
                 target: zero_module,
@@ -287,7 +287,13 @@ where
                 kernels: OnceBiVec::new(self.min_degree - 1),
                 quasi_inverses: OnceBiVec::new(self.min_degree - 1),
                 min_degree: self.min_degree.clone() - 1,
+            };
+            for degree in 1..max_n+(i as i32) +1 {
+                // I don't know why, but result.output needs to have length max_n + i, where max_n
+                // is the max stem of the resolution
+                result.add_generators_from_rows(degree, vec![]);
             }
+            return result;
         }
         let mut result = Self {
             degree_shift: self.degree_shift.clone(),
@@ -422,6 +428,11 @@ where
                 result.add_generators_from_rows(degree, vec![]);
             }
         }
+        for degree in self.source.max_generator_degree().unwrap()..max_n+(i as i32) +1 {
+            // I don't know why, but result.output needs to have length max_n + i, where max_n
+            // is the max stem of the resolution
+            result.add_generators_from_rows(degree, vec![]);
+        }
         for i in result.outputs.min_degree()..result.outputs.len() {
             for j in 0..result.outputs[i].len() {
                 print!("[free_module_homomorphism] result.outputs[{i}][{j}] = [");
@@ -431,6 +442,14 @@ where
                 println!("]");
             }
         }
+        for i in result.outputs.min_degree()..result.outputs.len() {
+            println!("[free_module_homomorphism] result.outputs[{i}].len() = {}", result.outputs[i].len());
+        }
+        for i in self.outputs.min_degree()..self.outputs.len() {
+            println!("[free_module_homomorphism] self.outputs[{i}].len() = {}", self.outputs[i].len());
+        }
+
+
         result
     }
 }

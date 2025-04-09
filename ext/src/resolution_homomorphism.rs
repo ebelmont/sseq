@@ -206,10 +206,11 @@ where
         extra_images: Option<Vec<FpVector>>,
     ) -> Range<i32> {
         let output = input - self.shift;
+        println!("[extend_step_raw] input = {}, {}", input.s(), input.t());
+        println!("[extend_step_raw] output = {}, {}", output.s(), output.t());
         assert!(self.target.has_computed_bidegree(output));
         assert!(self.source.has_computed_bidegree(input));
         assert!(input.s() >= self.shift.s());
-        println!("[resolution_homomorphism] s = {}, t= {}", input.s(), input.t());
 
         let f_cur = self.get_map_ensure_length(input.s());
         if input.t() < f_cur.next_degree() {

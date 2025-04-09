@@ -255,6 +255,8 @@ impl<const U: bool, A: MuAlgebra<U>> MuFreeModule<U, A> {
         self.num_gens[degree]
     }
 
+
+
     pub fn add_generators(&self, degree: i32, num_gens: usize, names: Option<Vec<String>>) {
         // We need to acquire the lock because changing num_gens modifies the behaviour of
         // extend_table_entries, and the two cannot happen concurrently.
@@ -277,6 +279,8 @@ impl<const U: bool, A: MuAlgebra<U>> MuFreeModule<U, A> {
         // 1` starts.
         self.gen_deg_idx_to_internal_idx
             .push_checked(internal_gen_idx + num_gens, degree + 1);
+
+
 
         let algebra = self.algebra();
         let gen_deg = degree;

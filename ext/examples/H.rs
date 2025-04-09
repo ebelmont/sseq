@@ -41,7 +41,9 @@ fn main() -> anyhow::Result<()> {
 fn hopf(n: i32) -> anyhow::Result<()> {
     //let's think about the sphere
     let module = Arc::new(sphere()?);
-    let max = Bidegree::n_s(50, 25);
+    let max_n = 40;
+    let max_s = 25;
+    let max = Bidegree::n_s(max_n, max_s);
     //let max = Bidegree::n_s(6, 3);
     //prepping out-file containing our data
     let file = File::create(format!("hopf{n}.txt")).expect("Failed to create log file");
@@ -95,19 +97,55 @@ fn hopf(n: i32) -> anyhow::Result<()> {
             println!("d x_{gen:#} = {cocycle}");
         }
     }
+
+    println!("res_a differentials = ");
+    for s in 0..20 {
+        for i in res_a.differential(s).min_degree()..res_a.differential(s).outputs.len() {
+            if res_a.differential(s).outputs[i].len() > 0 {
+                print!("i={i}, s={s}, [");
+                for j in 0..res_a.differential(s).outputs[i].len() {
+                    print!("{},", res_a.differential(s).outputs[i][j]);
+                }
+                println!("]");
+            }
+        }
+    }
+    for s in 0..20 {
+        println!("H res_a differentials({s}) len = {}", res_a.differential(s).outputs.len());
+    }
+
     //augment the target chain complex since sseq doesn't allow maps which decrease Adams
     //filtration
 
     let new: Arc<UnstableResolution<FiniteChainComplex<_>>> =
-        Arc::new(UnstableResolution::augmented_loops(&res_a));
+        Arc::new(UnstableResolution::augmented_loops(&res_a, max_n));
 
-    println!("H new = ");
+    /*println!("H new = ");
     for s in 0..20 {
         for t in 2..25 {
             println!("H new num gens in bidegree ({}, {}) = {}", s, t, new.number_of_gens_in_bidegree(Bidegree::s_t(s,t)));
             println!("H new.differential.source num gens in bidegree ({}, {}) = {}", s, t, new.differential(s).source.number_of_gens_in_degree(t));
         }
+    }*/
+
+    println!("new differentials = ");
+    for s in 0..20 {
+        for i in new.differential(s).min_degree()..new.differential(s).outputs.len() {
+            if new.differential(s).outputs[i].len() > 0 {
+                print!("i={i}, s={s}, [");
+                for j in 0..new.differential(s).outputs[i].len() {
+                    print!("{},", new.differential(s).outputs[i][j]);
+                }
+                println!("]");
+            }
+        }
     }
+    for s in 0..20 {
+        println!("H new differentials({s}) len = {}", new.differential(s).outputs.len());
+    }
+
+    println!("[H] res_a differential next {:?}", res_a.differential(2).outputs.len());
+    println!("[H] new differential next {:?}", new.differential(1).outputs.len());
 
 
     println!("H new(2) = ");
@@ -132,6 +170,7 @@ fn hopf(n: i32) -> anyhow::Result<()> {
 
     hom.extend_step_raw(min_degree, Some(t.to_vec()));
     hom.extend_all();
+
 
     for stem in (2 * n - 1)..max.n() {
         for s in 0..=max.s() - 1 {
