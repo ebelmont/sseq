@@ -185,7 +185,7 @@ fn hopf(n: i32) -> anyhow::Result<()> {
             let m = hom.get_map(target.s()).hom_k(target.t());
 
             let m = format!(" - {m:?}");
-            if source_num_gens != 0 || target_num_gens != 0 {
+            if source_num_gens != 0 && target_num_gens != 0 {
                 // H: (stem, filt, sphere) --> (stem-sphere+1, filt-1, 2(sphere)-1)
                 // The degrees (stem, s) are for the target of the H map, and we want to print
                 // source degrees. Also, sseq's stem has an offset of 2n-1 from the actual stem.
