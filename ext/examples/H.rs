@@ -41,7 +41,10 @@ fn main() -> anyhow::Result<()> {
 fn hopf(n: i32) -> anyhow::Result<()> {
     //let's think about the sphere
     let module = Arc::new(sphere()?);
-    let max = Bidegree::n_s(50, 25);
+    let max_n = 40;
+    let max_s = 25;
+    let max = Bidegree::n_s(max_n, max_s);
+    //let max = Bidegree::n_s(6, 3);
     //prepping out-file containing our data
     let file = File::create(format!("hopf{n}.txt")).expect("Failed to create log file");
     let mut writer = BufWriter::new(file);
@@ -89,7 +92,7 @@ fn hopf(n: i32) -> anyhow::Result<()> {
     //augment the target chain complex since sseq doesn't allow maps which decrease Adams
     //filtration
     let new: Arc<UnstableResolution<FiniteChainComplex<_>>> =
-        Arc::new(UnstableResolution::augmented_loops(&res_a));
+        Arc::new(UnstableResolution::augmented_loops(&res_a, max_n));
 
     for b in new.iter_stem() {
         if b.s() == 0 {

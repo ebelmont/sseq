@@ -106,7 +106,7 @@ impl<A, CC: ChainComplex<Algebra = A>> MuResolution<true, CC>
 where
     A: UnstableAlgebra,
 {
-    pub fn augmented_loops(res: &Self) -> Self {
+    pub fn augmented_loops(res: &Self, max_n: i32) -> Self {
         // Clone differentials and apply loops on each clone.
         let modules: OnceVec<Arc<MuFreeModule<true, CC::Algebra>>> = OnceVec::new();
         for module in res.modules.pop_front().iter() {
@@ -134,7 +134,7 @@ where
             .pop_front()
             .iter()
             .enumerate()
-            .map(|(i,d)| Arc::new(d.loops(i, Arc::clone(&res.zero_module), modules.clone())))
+            .map(|(i,d)| Arc::new(d.loops(i, max_n, Arc::clone(&res.zero_module), modules.clone())))
             .collect();
 
         Self {
