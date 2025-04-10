@@ -35,7 +35,8 @@ use std::io::Write;
 use std::{path::PathBuf, sync::Arc};
 
 fn main() -> anyhow::Result<()> {
-    hopf(5)
+    let n = query::raw("n", str::parse);
+    hopf(n)
 }
 
 fn hopf(n: i32) -> anyhow::Result<()> {
