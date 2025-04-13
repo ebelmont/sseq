@@ -966,7 +966,17 @@ where
     fn has_computed_bidegree(&self, b: Bidegree) -> bool {
         //println!("[resolution] differentials.len = {}, b.s = {}, b.t = {}, differential.next_degree = {}", self.differentials.len(), b.s(), b.t(), self.differential(b.s()).next_degree());
         if (b.s() as usize) < self.differentials.len() {
-            println!("[resolution] differentials.len = {}, b.s = {}, b.t = {}, {:?}", self.differentials.len(), b.s(), b.t(), self.differential(b.s()).next_degree());
+            println!("[resolution] differentials.len = {}, b.s = {}, b.t = {}, next = {:?}, differential outputs min degree = {}, len = {}", self.differentials.len(), b.s(), b.t(), self.differential(b.s()).next_degree(), self.differential(b.s()).outputs.min_degree(), self.differential(b.s()).outputs.len());
+
+            for i in self.differential(b.s()).outputs.min_degree()..self.differential(b.s()).outputs.len() {
+                for j in 0..self.differential(b.s()).outputs[i].len() {
+                    print!("[free_module_homomorphism] self.differential(b.s()).outputs[{i}][{j}] = [");
+                    for k in 0..self.differential(b.s()).outputs[i][j].len() {
+                        print!("{},", self.differential(b.s()).outputs[i][j].entry(k));
+                    }
+                    println!("]");
+                }
+            }
         }
         self.differentials.len() > b.s() as usize && self.differential(b.s()).next_degree() > b.t()
     }

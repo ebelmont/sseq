@@ -42,8 +42,8 @@ fn main() -> anyhow::Result<()> {
 fn hopf(n: i32) -> anyhow::Result<()> {
     //let's think about the sphere
     let module = Arc::new(sphere()?);
-    let max_n = 40;
-    let max_s = 25;
+    let max_n = 50;
+    let max_s = 50;
     let max = Bidegree::n_s(max_n, max_s);
     //let max = Bidegree::n_s(6, 3);
     //prepping out-file containing our data
@@ -169,6 +169,10 @@ fn hopf(n: i32) -> anyhow::Result<()> {
         suspension_shift,
     );
 
+    println!("res_a has_computed_bidegree {:?}", res_a.has_computed_bidegree(Bidegree::s_t(1,31)));
+    println!("H res_a 1");
+    println!("res_a has_computed_bidegree {:?}", res_a.has_computed_bidegree(Bidegree::s_t(0,31)));
+    println!("H res_a 2");
     hom.extend_step_raw(min_degree, Some(t.to_vec()));
     hom.extend_all();
 
@@ -193,7 +197,7 @@ fn hopf(n: i32) -> anyhow::Result<()> {
                 let realstem = stem - (2*n-1);
                 writeln!(
                     writer,
-                    "{} {}: {source_num_gens} {target_num_gens} {m}",
+                    "{n} {} {} {m}",
                     realstem - 1 + n,
                     s + 1
                 )
