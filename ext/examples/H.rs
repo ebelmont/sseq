@@ -132,7 +132,7 @@ fn hopf(n: i32) -> anyhow::Result<()> {
                 let realstem = stem - (2*n-1);
                 writeln!(
                     writer,
-                    "{} {}: {source_num_gens} {target_num_gens} {m}",
+                    "{n} {} {} {m}",
                     realstem - 1 + n,
                     s + 1
                 )
