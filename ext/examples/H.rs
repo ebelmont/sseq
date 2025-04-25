@@ -95,16 +95,6 @@ fn hopf(n: i32) -> anyhow::Result<()> {
     let new: Arc<UnstableResolution<FiniteChainComplex<_>>> =
         Arc::new(UnstableResolution::augmented_loops(&res_a, max_n));
 
-    for b in new.iter_stem() {
-        if b.s() == 0 {
-            continue;
-        }
-        for i in 0..new.number_of_gens_in_bidegree(b) {
-            let gen = BidegreeGenerator::new(b, i);
-            let cocycle = new.cocycle_string(gen, true);
-            println!("d x_{gen:#} = {cocycle}");
-        }
-    }
     let suspension_shift = Bidegree::s_t(0, 0);
     let hom = UnstableResolutionHomomorphism::new(
         String::from("hopf"),

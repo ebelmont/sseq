@@ -220,7 +220,6 @@ where
 
         let num_gens = f_cur.source().number_of_gens_in_degree(input.t());
         let fx_dimension = f_cur.target().dimension(output.t());
-        println!("{:?} and {:?} and {:?}", input.t(), num_gens, fx_dimension);
 
         if num_gens == 0 || fx_dimension == 0 {
             return f_cur.add_generators_from_rows_ooo(
