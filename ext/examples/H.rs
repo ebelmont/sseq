@@ -34,6 +34,19 @@ use std::io::BufWriter;
 use std::io::Write;
 use std::{path::PathBuf, sync::Arc};
 
+/*
+ * Let e_n := \Sigma^n F_2.
+ * William Balderrama explains how it H can be gotten from
+ * Ext^{f+1}(e_n, e_{m+1}) = Ext^f(C_n, e_m) --> Ext^f(e_{2n-1}, e_m):
+ * To find C_n, form \Omega(homological degree >= 1 of a minimal free resolution P of e_n)
+ * where \Omega = algebraic loops (shift dimension down by 1 and apply unstable condition).
+ * Then C_n = cokernel(\Omega P_1 <-- \Omega P_2) and the map on Ext comes from a map
+ * e_{2n-1} --> C_n sending 1 --> x_n where the resolution differential sends x_n --> Sq^n \iota_n.
+ *
+ * The main work is to produce a map of resolutions from
+ * (e_{2n-1} <-- ...) to (C_n <-- \Omega P_1 <--- ...).
+ */
+
 fn main() -> anyhow::Result<()> {
     let n = query::raw("n", str::parse);
     hopf(n)
@@ -90,10 +103,10 @@ fn hopf(n: i32) -> anyhow::Result<()> {
         &[FpVector::from_slice(module.prime(), top.as_slice())],
     );
 
-    //augment the target chain complex since sseq doesn't allow maps which decrease Adams
-    //filtration
+    // Apply algebraic loops to each module of the resolution, and also truncate by removing
+    // homological degree zero.
     let new: Arc<UnstableResolution<FiniteChainComplex<_>>> =
-        Arc::new(UnstableResolution::augmented_loops(&res_a, max_n));
+        Arc::new(UnstableResolution::unaugmented_loops(&res_a, max_n));
 
     let suspension_shift = Bidegree::s_t(0, 0);
     let hom = UnstableResolutionHomomorphism::new(
@@ -106,6 +119,9 @@ fn hopf(n: i32) -> anyhow::Result<()> {
     hom.extend_step_raw(min_degree, Some(t.to_vec()));
     hom.extend_all();
 
+    // Since we have a map from (res of e_{2n-1}) --> (res of C_n), "source" and "target" are
+    // swapped from what they should be for H, and the matrix this code outputs is actually the
+    // transpose of the matrix representing H.
     for stem in (2 * n - 1)..max.n() {
         for s in 0..=max.s() - 1 {
             let source = Bidegree::n_s(stem, s);

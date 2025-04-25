@@ -25,9 +25,9 @@ pub struct MuFreeModuleHomomorphism<const U: bool, M: Module>
 where
     M::Algebra: MuAlgebra<U>,
 {
-    pub source: Arc<MuFreeModule<U, M::Algebra>>,
-    pub target: Arc<M>,
-    pub outputs: OnceBiVec<Vec<FpVector>>, // degree --> input_idx --> output
+    source: Arc<MuFreeModule<U, M::Algebra>>,
+    target: Arc<M>,
+    outputs: OnceBiVec<Vec<FpVector>>, // degree --> input_idx --> output
     pub images: OnceBiVec<Option<Subspace>>,
     pub kernels: OnceBiVec<Option<Subspace>>,
     pub quasi_inverses: OnceBiVec<Option<QuasiInverse>>,
@@ -269,6 +269,13 @@ impl<const U: bool, A> MuFreeModuleHomomorphism<U, MuFreeModule<U, A>>
 where
     A: MuAlgebra<U>,
 {
+    /*
+     * Apply algebraic loops to the differentials.
+     * The differentials keep track of source and target, and these need to point to the actual
+     * source and target modules in the chain complex. This is why modules is an argument to the
+     * function.
+     */
+
     // Restrict the method further so that M::Algebra must implement UnstableAlgebra.
     pub fn loops(&self, i: usize, max_n: i32, zero_module: Arc<MuFreeModule<U,A>>, modules: OnceVec<Arc<MuFreeModule<U, A>>>) -> Self
     where
@@ -277,15 +284,15 @@ where
         // Create a new instance with copied data
         let first = &modules[0 as usize];
         if i == 0 {
-            let mut result = Self {
-                degree_shift: self.degree_shift.clone(),
+            let result = Self {
+                degree_shift: self.degree_shift,
                 source: Arc::clone(first),
                 target: zero_module,
                 outputs: OnceBiVec::new(self.min_degree - 1),
                 images: OnceBiVec::new(self.min_degree - 1),
                 kernels: OnceBiVec::new(self.min_degree - 1),
                 quasi_inverses: OnceBiVec::new(self.min_degree - 1),
-                min_degree: self.min_degree.clone() - 1,
+                min_degree: self.min_degree - 1,
             };
             for degree in (self.min_degree - 1)..max_n+(i as i32) +1 {
                 // I don't know why, but result.output needs to have length max_n + i, where max_n
@@ -297,71 +304,18 @@ where
             }
             return result;
         }
-        let mut result = Self {
-            degree_shift: self.degree_shift.clone(),
+        let result = Self {
+            degree_shift: self.degree_shift,
             source: modules[i].clone(),
             target: modules[i-1].clone(),
             outputs: OnceBiVec::new(self.min_degree - 1),
             images: OnceBiVec::new(self.min_degree - 1),
             kernels: OnceBiVec::new(self.min_degree - 1),
             quasi_inverses: OnceBiVec::new(self.min_degree - 1),
-            min_degree: self.min_degree.clone() - 1,
+            min_degree: self.min_degree - 1,
         };
         let old_outputs = self.outputs.clone();
         let p = self.source.prime();
-        let source_any: Arc<dyn Any + Send + Sync> = self.source.clone();
-        let target_any: Arc<dyn Any + Send + Sync> = self.target.clone();
-        // Downcast to the expected concrete type. This requires that the source is actually
-        // a MuFreeModule<true, M::Algebra>.
-        let source_freemodule = Arc::downcast::<MuFreeModule<true, A>>(source_any)
-            .expect("Source is not a MuFreeModule<true, _>");
-        let new_source_module = Arc::new(MuFreeModule::new(
-            source_freemodule.algebra.clone(),
-            source_freemodule.name.clone(),
-            source_freemodule.min_degree() - 1,
-        ));
-        for deg in source_freemodule.min_degree()..(source_freemodule.max_computed_degree()+1) {
-            let mut names = Vec::new();
-            for gen in 0..source_freemodule.number_of_gens_in_degree(deg) {
-                let name = format!("x_({:?}, {:?})", deg - 1, gen);
-                names.push(name)
-            }
-            new_source_module.add_generators(
-                deg - 1,
-                source_freemodule.number_of_gens_in_degree(deg),
-                Some(names),
-            );
-        }
-        new_source_module.compute_basis(new_source_module.max_computed_degree());
-        //result.source = new_source_module.clone();
-
-
-        // Downcast to the expected concrete type. This requires that the target is actually
-        // a MuFreeModule<true, M::Algebra>.
-        let target_freemodule = Arc::downcast::<MuFreeModule<true, A>>(target_any)
-            .expect("Target is not a MuFreeModule<true, _>");
-        let new_target_module = Arc::new(MuFreeModule::new(
-            target_freemodule.algebra.clone(),
-            target_freemodule.name.clone(),
-            target_freemodule.min_degree() - 1,
-        ));
-        for deg in target_freemodule.min_degree()..(target_freemodule.max_computed_degree()+1) {
-            let mut names = Vec::new();
-            for gen in 0..target_freemodule.number_of_gens_in_degree(deg) {
-                let name = format!("x_({:?}, {:?})", deg - 1, gen);
-                names.push(name)
-            }
-            new_target_module.add_generators(
-                deg - 1,
-                target_freemodule.number_of_gens_in_degree(deg),
-                Some(names),
-            );
-        }
-        new_target_module.compute_basis(self.source.max_generator_degree().unwrap());
-        //result.target = new_target_module.clone();
-
-        // Now that we have the target as a MuFreeModule<true, M::Algebra>, we can safely call
-        // its methods.
         let min_degree = result.min_degree();
 
         for degree in min_degree..self.source.max_generator_degree().unwrap() {
@@ -378,13 +332,17 @@ where
                     result.add_generators_from_rows(degree, out_vec.clone());
                     continue;
                 }
-                let dimension = new_target_module.dimension(degree);
+                let dimension = self.target.dimension(degree+1);
                 let mut out_vec_new = vec![FpVector::new(p, dimension); numgens];
-                for num_gen in 0..source_freemodule.number_of_gens_in_degree(degree+1) {
+                for num_gen in 0..self.source.number_of_gens_in_degree(degree+1) {
                     let mut skipped = 0;
                     for idx in 0..out_vec[num_gen].len() {
-                        let opgen = target_freemodule.index_to_op_gen(degree+1, idx);
-                        if opgen.looped(source_freemodule.algebra()) {
+                        // This specifies an element as a Steenrod square time a basis element, so
+                        // we can check (based on the excess of the Steenrod square) whether this
+                        // element will be killed by algebraic loops. In this case, the entry is
+                        // skipped in out_vec_new, which has smaller dimension.
+                        let opgen = self.target.index_to_op_gen(degree+1, idx);
+                        if opgen.looped(self.source.algebra()) {
                             // Modify the FpVector entry at index `idx`
                             skipped += 1;
                         } else {

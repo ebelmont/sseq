@@ -73,11 +73,11 @@ where
 {
     name: String,
     lock: Mutex<()>,
-    pub complex: Arc<CC>,
-    pub modules: OnceVec<Arc<MuFreeModule<U, CC::Algebra>>>,
-    pub zero_module: Arc<MuFreeModule<U, CC::Algebra>>,
-    pub chain_maps: OnceVec<Arc<MuFreeModuleHomomorphism<U, CC::Module>>>,
-    pub differentials: OnceVec<Arc<MuFreeModuleHomomorphism<U, MuFreeModule<U, CC::Algebra>>>>,
+    complex: Arc<CC>,
+    modules: OnceVec<Arc<MuFreeModule<U, CC::Algebra>>>,
+    zero_module: Arc<MuFreeModule<U, CC::Algebra>>,
+    chain_maps: OnceVec<Arc<MuFreeModuleHomomorphism<U, CC::Module>>>,
+    differentials: OnceVec<Arc<MuFreeModuleHomomorphism<U, MuFreeModule<U, CC::Algebra>>>>,
 
     ///  For each *internal* degree, store the kernel of the most recently calculated chain map as
     ///  returned by `generate_old_kernel_and_compute_new_kernel`, to be used if we run
@@ -106,13 +106,21 @@ impl<A, CC: ChainComplex<Algebra = A>> MuResolution<true, CC>
 where
     A: UnstableAlgebra,
 {
-    pub fn augmented_loops(res: &Self, max_n: i32) -> Self {
+    /* Algebraic loops applied to a free module shifts every generator down in degree by 1, and
+     * then you also have to apply the unstable module condition, which results in killing some
+     * Sq^i's times the new shifted generators.
+     *
+     * We also have to change the differentials accordingly (see loops()).
+     *
+     * "Unaugmented" refers to the fact that we are removing the 0th homological degree.
+     */
+    pub fn unaugmented_loops(res: &Self, max_n: i32) -> Self {
         // Clone differentials and apply loops on each clone.
         let modules: OnceVec<Arc<MuFreeModule<true, CC::Algebra>>> = OnceVec::new();
         for module in res.modules.pop_front().iter() {
             let new = Arc::new(MuFreeModule::new(
-                module.algebra.clone(),
-                module.name.clone(),
+                module.algebra().clone(),
+                module.name().clone(),
                 module.min_degree() - 1,
             ));
             for deg in module.min_degree()..(module.max_computed_degree()) {
@@ -244,22 +252,6 @@ where
 
         // Pop from differentials
         self.differentials.pop_front();
-    }
-
-    pub fn augmented(res: &Self) -> Self {
-        Self {
-            name: res.name.clone(),
-            lock: Mutex::new(()),                         // Create a new lock
-            complex: Arc::clone(&res.complex),            // Share the underlying complex
-            modules: res.modules.pop_front(),             // Create new OnceVec
-            zero_module: Arc::clone(&res.zero_module),    // Share the zero module
-            chain_maps: res.chain_maps.pop_front(),       // Create new OnceVec
-            differentials: res.differentials.pop_front(), // Create new OnceVec
-            kernels: DashMap::new(),                      // Create new DashMap
-            save_dir: res.save_dir.clone(),
-            should_save: res.should_save,
-            load_quasi_inverse: res.load_quasi_inverse,
-        }
     }
 
     /// Gets the kernel of the differential starting at $(s, t)$. If this was previously computed,

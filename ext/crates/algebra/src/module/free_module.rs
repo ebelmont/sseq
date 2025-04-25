@@ -36,16 +36,16 @@ pub type UnstableFreeModule<A> = MuFreeModule<true, A>;
 /// A free module is uniquely determined by its list of generators. The generators are listed in
 /// increasing degrees, and the index in this list is the internal index.
 pub struct MuFreeModule<const U: bool, A: MuAlgebra<U>> {
-    pub algebra: Arc<A>,
-    pub name: String,
-    pub min_degree: i32,
-    pub gen_names: OnceBiVec<Vec<String>>,
+    algebra: Arc<A>,
+    name: String,
+    min_degree: i32,
+    gen_names: OnceBiVec<Vec<String>>,
     /// degree -> internal index of first generator in degree
-    pub gen_deg_idx_to_internal_idx: OnceBiVec<usize>,
-    pub num_gens: OnceBiVec<usize>,
-    pub basis_element_to_opgen: OnceBiVec<OnceVec<OperationGeneratorPair>>,
+    gen_deg_idx_to_internal_idx: OnceBiVec<usize>,
+    num_gens: OnceBiVec<usize>,
+    basis_element_to_opgen: OnceBiVec<OnceVec<OperationGeneratorPair>>,
     /// degree -> internal_gen_idx -> the offset of the generator in degree
-    pub generator_to_index: OnceBiVec<OnceVec<usize>>,
+    generator_to_index: OnceBiVec<OnceVec<usize>>,
 }
 
 impl<const U: bool, A: MuAlgebra<U>> std::fmt::Display for MuFreeModule<U, A> {
@@ -68,6 +68,10 @@ impl<const U: bool, A: MuAlgebra<U>> MuFreeModule<U, A> {
             basis_element_to_opgen: OnceBiVec::new(min_degree),
             generator_to_index: OnceBiVec::new(min_degree),
         }
+    }
+
+    pub fn name(&self) -> String {
+        self.name.clone()
     }
 }
 
