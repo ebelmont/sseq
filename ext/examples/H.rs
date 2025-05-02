@@ -28,11 +28,10 @@ use ext::{
 use fp::vector::FpVector;
 use serde_json::Value;
 use sseq::coordinates::Bidegree;
-use sseq::coordinates::BidegreeGenerator;
 use std::fs::File;
 use std::io::BufWriter;
 use std::io::Write;
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 /*
  * Let e_n := \Sigma^n F_2.
@@ -48,16 +47,19 @@ use std::{path::PathBuf, sync::Arc};
  */
 
 fn main() -> anyhow::Result<()> {
+    let max_deg = query::raw("max degree", str::parse);
     let n = query::raw("n", str::parse);
-    hopf(n)
+    hopf(n, max_deg)
 }
 
-fn hopf(n: i32) -> anyhow::Result<()> {
+fn hopf(n: i32, max_deg : i32) -> anyhow::Result<()> {
     //let's think about the sphere
     let module = Arc::new(sphere()?);
-    let max_n = 40;
-    let max_s = 25;
-    let max = Bidegree::n_s(max_n, max_s);
+    // this is the degree of the max target sphere, so should be smax - n + 1, but also there is an
+    // offset of 2n-1 (internal degree of the target sphere). The +1 is for < vs. <= in the loop.
+    let max_n = max_deg + n+1;
+    let max_s = max_deg;
+    let max = Bidegree::n_s(max_n, max_s as u32);
     //let max = Bidegree::n_s(6, 3);
     //prepping out-file containing our data
     let file = File::create(format!("hopf{n}.txt")).expect("Failed to create log file");
