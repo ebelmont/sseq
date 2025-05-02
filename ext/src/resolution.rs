@@ -868,7 +868,6 @@ where
         Arc::clone(&self.differentials[s as usize])
     }
 
-    #[tracing::instrument(skip(self), fields(self = %self.name, b = %b))]
     fn compute_through_bidegree(&self, b: Bidegree) {
         self.compute_through_bidegree_with_callback(b, |_| ())
     }

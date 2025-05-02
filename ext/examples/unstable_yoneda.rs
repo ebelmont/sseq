@@ -21,7 +21,12 @@ use fp::matrix::{AugmentedMatrix, Matrix};
 use fp::prime::ValidPrime;
 use sseq::coordinates::{Bidegree, BidegreeGenerator};
 use maybe_rayon::prelude::*;
+use tracing::{instrument, span, Level};
+use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+static TOTAL_TIME1: AtomicU64 = AtomicU64::new(0); 
+static TOTAL_TIME2: AtomicU64 = AtomicU64::new(0); 
 
 #[derive(Clone)]
 struct CompositeComputationData {
@@ -42,6 +47,16 @@ fn save_dir(name: &str, shift: i32) -> Option<PathBuf> {
             x
         })
 }
+
+fn log_total_time1() {
+    let total_time = TOTAL_TIME1.load(Ordering::SeqCst);
+    tracing::info!("Total time spent in computing lift: {} ms", total_time);
+}
+fn log_total_time2() {
+    let total_time = TOTAL_TIME2.load(Ordering::SeqCst);
+    tracing::info!("Total time spent in compute_through_bidegree: {} ms", total_time);
+}
+
 
 
 fn main() -> anyhow::Result<()> {
@@ -119,7 +134,12 @@ fn main() -> anyhow::Result<()> {
     // (s,t) = (s1 + s2, th3).
     // We compute this for the maximum values up front.
     //let res1_maxdeg = Bidegree::s_t(prod_max.s(), prod_max.t());
+    let start_time = Instant::now();
+    let span = span!(Level::INFO, "compute_through_bidegree");
+    let _enter = span.enter();
     res1.compute_through_bidegree(res_max_deg);
+    let duration = start_time.elapsed();
+    TOTAL_TIME2.fetch_add(duration.as_millis() as u64, Ordering::SeqCst);
 
     for th2 in th1..(res_max_deg.t() + 1) {
         let res2: Arc<UnstableResolution<FiniteChainComplex<_>>> =
@@ -130,9 +150,16 @@ fn main() -> anyhow::Result<()> {
                 )))),
                 save_dir(&save_dir_name, th2),
             )?);
+
+        let start_time = Instant::now();
+        let span = span!(Level::INFO, "compute_through_bidegree");
+        let _enter = span.enter();
+
         // We use res2 in degree (s,t) = (s2, th3). Compute this in the maximum degrees
         // needed.
         res2.compute_through_bidegree(res_max_deg);
+        let duration = start_time.elapsed();
+        TOTAL_TIME2.fetch_add(duration.as_millis() as u64, Ordering::SeqCst);
 
         for s1 in 0..(res_max_deg.s() + 1) {
             let data = CompositeComputationData {
@@ -154,6 +181,8 @@ fn main() -> anyhow::Result<()> {
                 })?;
         }
     }
+    log_total_time1();
+    log_total_time2();
     Ok(())
 }
 
@@ -256,6 +285,11 @@ fn compute_composites(
 
                 matrix[idx].set_entry(0, 0); // reset this entry to help setting matrix to the next standard basis vector e_{idx+1} on the next iteration
 
+                let start_time = Instant::now();
+                let span = span!(Level::INFO, "lift");
+                let _enter = span.enter();
+                
+
                 hom.extend_through_stem(prod_deg);
 
                 for (k, &v) in c_class.iter().enumerate() {
@@ -264,6 +298,8 @@ fn compute_composites(
                         hom.act(product[idx].slice_mut(0, product_num_gens), v, gen);
                     }
                 }
+                let duration = start_time.elapsed();
+                TOTAL_TIME1.fetch_add(duration.as_millis() as u64, Ordering::SeqCst);
             }
 
             for (i,row) in product.iter().enumerate() {
