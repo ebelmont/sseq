@@ -1,20 +1,16 @@
-//! Computes the suspension map between different unstable Ext groups.
+//! Computes the Hopf map Ext^f(e_n, e_m) --> Ext^{f-1}(e_{2n-1}, e_{m-1}) where n is an input
+//! variable
 //!
 //! Given an unstable Steenrod module $M$, compute the unstable Ext groups of $\Sigma^k M$ for all
 //! $k$ up till the stable range. Each result is printed in the form
 //! ```
-//! n s k: num_gens - matrix
+//! n stem filt - matrix
 //! ```
 //! The entries are to be interpreted as follows:
-//!  - `n` is the stem, which is defined to be `t - s - min_degree`
-//!  - `s` is the Adams filtration
-//!  - `k` is the shift
-//!  - `num_gens` is the number of generators in this Ext group
-//!  - `matrix` is the matrix representing the suspension map from $\Sigma^k M$. This is omitted if
-//!    the source or target of the suspension map is trivial, or if they have the same dimension
-//!    and the matrix is the identity matrix.
-//!
-//! The output is best read after sorting with `sort -n -k 1 -k 2 -k 3`.
+//!  - `n` is as in the first line above
+//!  - `stem` = m - n + f
+//!  - `filt` = f
+//!  - `matrix` is the *transpose* of the matrix representing the Hopf map on Ext.
 
 use algebra::module::{steenrod_module, Module, SteenrodModule, SuspensionModule};
 use algebra::AlgebraType;
@@ -35,7 +31,7 @@ use std::sync::Arc;
 
 /*
  * Let e_n := \Sigma^n F_2.
- * William Balderrama explains how it H can be gotten from
+ * William Balderrama explains how H can be gotten from
  * Ext^{f+1}(e_n, e_{m+1}) = Ext^f(C_n, e_m) --> Ext^f(e_{2n-1}, e_m):
  * To find C_n, form \Omega(homological degree >= 1 of a minimal free resolution P of e_n)
  * where \Omega = algebraic loops (shift dimension down by 1 and apply unstable condition).
@@ -55,7 +51,7 @@ fn main() -> anyhow::Result<()> {
 fn hopf(n: i32, max_deg : i32) -> anyhow::Result<()> {
     //let's think about the sphere
     let module = Arc::new(sphere()?);
-    // this is the degree of the max target sphere, so should be smax - n + 1, but also there is an
+    // this is the degree of the max stem for the target, so should be (max source stem) - n + 1, but also there is an
     // offset of 2n-1 (internal degree of the target sphere). The +1 is for < vs. <= in the loop.
     let max_n = max_deg + n+1;
     let max_s = max_deg;
@@ -85,8 +81,7 @@ fn hopf(n: i32, max_deg : i32) -> anyhow::Result<()> {
             )))),
             None,
         )?);
-    let shift = Bidegree::s_t(0, 0);
-    res_a.compute_through_stem(max + shift);
+    res_a.compute_through_stem(max);
     res_b.compute_through_stem(max);
     //Prepare the vector representation of Sq^n x_{n, 0} in F(n)
     let dim = res_a.module(0).dimension(2 * n);
