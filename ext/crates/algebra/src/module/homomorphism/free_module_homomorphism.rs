@@ -25,8 +25,8 @@ pub struct MuFreeModuleHomomorphism<const U: bool, M: Module>
 where
     M::Algebra: MuAlgebra<U>,
 {
-    source: Arc<MuFreeModule<U, M::Algebra>>,
-    target: Arc<M>,
+    pub source: Arc<MuFreeModule<U, M::Algebra>>,
+    pub target: Arc<M>,
     outputs: OnceBiVec<Vec<FpVector>>, // degree --> input_idx --> output
     pub images: OnceBiVec<Option<Subspace>>,
     pub kernels: OnceBiVec<Option<Subspace>>,
@@ -149,7 +149,7 @@ where
         self.outputs.len()
     }
 
-    pub fn output(&self, generator_degree: i32, generator_index: usize) -> &FpVector {
+        pub fn output(&self, generator_degree: i32, generator_index: usize) -> &FpVector {
         assert!(
             generator_degree >= self.min_degree(),
             "generator_degree {} less than min degree {}",
@@ -162,8 +162,8 @@ where
             generator_index,
             self.source.number_of_gens_in_degree(generator_degree)
         );
-        &self.outputs[generator_degree][generator_index]
-    }
+            &self.outputs[generator_degree][generator_index]
+        }
 
     pub fn differential_density(&self, degree: i32) -> f32 {
         let outputs = &self.outputs[degree];
@@ -378,7 +378,17 @@ where
     }
 }
 
+
 impl<const U: bool, A: MuAlgebra<U>> MuFreeModuleHomomorphism<U, MuFreeModule<U, A>> {
+    pub fn return_output(&self) -> Vec<FpVector> {
+        let mut rtn = vec![];
+        for i in self.outputs.min_degree()..self.outputs.len() {
+            for j in 0..self.outputs[i].len() {
+                rtn.push(self.outputs[i][j].clone());
+            }
+        }
+        rtn
+    }
     /// Given f: M -> N, compute the dual f*: Hom(N, k) -> Hom(M, k) in source (N) degree t.
     pub fn hom_k(&self, t: i32) -> Vec<Vec<u32>> {
         let source_dim = self.source.number_of_gens_in_degree(t + self.degree_shift);
@@ -387,6 +397,11 @@ impl<const U: bool, A: MuAlgebra<U>> MuFreeModuleHomomorphism<U, MuFreeModule<U,
             return vec![];
         }
         let mut result = vec![vec![0; source_dim]; target_dim];
+        for i in self.outputs.min_degree()..self.outputs.len() {
+            for j in 0..self.outputs[i].len() {
+                println!("outputs[{i}][{j}] = {}", self.outputs[i][j]);
+            }
+        }
 
         let offset = self.target.generator_offset(t, t, 0);
         for i in 0..source_dim {
