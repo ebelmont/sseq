@@ -41,4 +41,3 @@ odd-primes = ["fp/odd-primes"]
 [[bench]]
 name = "milnor"
 harness = false
-

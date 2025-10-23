@@ -214,7 +214,7 @@ fn hopf(n: i32, max_deg : i32) -> anyhow::Result<()> {
     for i in 0..vec.len() {
         println!("{}", vec[i]);
         println!("{}", target_module.basis_element_to_string(14, i));
-        println!("{}", target_module.element_to_string(14, vec[i].as_slice()));
+        //println!("{}", target_module.element_to_string(14, vec[i].as_slice()));
     }
 
     println!("vec end");
