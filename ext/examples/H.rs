@@ -29,6 +29,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::io::Write;
 use std::sync::Arc;
+use regex::Regex;
 
 /*
  * Let e_n := \Sigma^n F_2.
@@ -123,24 +124,6 @@ fn hopf(n: i32, max_deg : i32) -> anyhow::Result<()> {
     );
     println!("top_degree = {top_degree}, t = {t:?}");
 
-    println!("=== Resolution 'res_a' after quasi-inverse ===");
-    println!("Generators:");
-    for b in res_a.iter_stem() {
-        for i in 0..res_a.number_of_gens_in_bidegree(b) {
-            let gen = sseq::coordinates::BidegreeGenerator::new(b, i);
-            println!("({}, {}): x_{gen:#}", gen.n() - n, gen.s());
-        }
-    }
-    println!("\nDifferentials:");
-    for b in res_a.iter_stem() {
-        for i in 0..res_a.number_of_gens_in_bidegree(b) {
-            let gen = sseq::coordinates::BidegreeGenerator::new(b, i);
-            let cocycle = res_a.cocycle_string(gen, true);
-            println!("({}, {}): d x_{gen:#} = {cocycle}", b.n() - n, b.s());
-        }
-    }
-    println!("=== End Resolution 'res_a' after quasi-inverse ===\n");
-
     // Apply algebraic loops to each module of the resolution, and also truncate by removing
     // homological degree zero.
     let new: Arc<UnstableResolution<FiniteChainComplex<_>>> =
@@ -200,43 +183,42 @@ fn hopf(n: i32, max_deg : i32) -> anyhow::Result<()> {
 
     hom.extend_step_raw(min_degree, Some(t.to_vec()));
     hom.extend_all();
-//    let result_vector = hom.get_map(4).output(14, 0);
 
-//    print(BidegreeElement::new(14, result_vector).to_string_module(&hom.target(), false));
+
+
+    println!("=== Map of resolutions ===\n");
+    let re_x = Regex::new(r"x_\(([0-9]*), ([0-9]*)\)").unwrap();
+    for hom_deg in 0..6 {
+        let vec = hom.get_map(hom_deg).return_output();
+        let target_module = &hom.get_map(hom_deg).target;
+        let source_module = &hom.get_map(hom_deg).source;
+        for (i, (deg, idx)) in source_module.iter_gens(hom_deg as i32).enumerate() {
+            if deg <= 20 + hom_deg as i32 {
+                let old_str = target_module.element_to_string(deg, vec[i].as_slice());
+                let new_str = re_x.replace_all(old_str.as_ref(), |caps : &regex::Captures| {
+                    let i1 : i32 = caps[1].parse::<i32>().unwrap() - (hom_deg as i32);
+                    let i2 : i32 = caps[2].parse::<i32>().unwrap();
+                    format!("x_({i1}, {}, {i2})", hom_deg + 1)
+                });
+                println!("x_({}, {hom_deg}, {idx}) --> {}", deg - hom_deg as i32, new_str);
+            }
+        }
+    }
+    println!("=== End Map of resolutions ===\n");
+
+
 
     // Since we have a map from (res of e_{2n-1}) --> (res of C_n), "source" and "target" are
     // swapped from what they should be for H, and the matrix this code outputs is actually the
     // transpose of the matrix representing H.
-    let vec = hom.get_map(4).return_output();
-    let target_module = &hom.get_map(4).target;
-    let source_module = &hom.get_map(4).source;
-    println!("vec: {}", vec.len());
-    for i in 0..vec.len() {
-        println!("{}", vec[i]);
-        println!("{}", target_module.basis_element_to_string(14, i));
-        //println!("{}", target_module.element_to_string(14, vec[i].as_slice()));
-    }
-
-    println!("vec end");
     for stem in (2 * n - 1)..max.n() {
         for s in 0..=max.s() - 1 {
             let source = Bidegree::n_s(stem, s);
             let target = source - suspension_shift;
             let source_num_gens = res_b.number_of_gens_in_bidegree(source);
             let target_num_gens = new.number_of_gens_in_bidegree(target);
-            println!("{n} {} {}", stem - (2*n-1) - 1 + n, s+1);
             let m = hom.get_map(target.s()).hom_k(target.t());
             let vec = hom.get_map(target.s()).return_output();
-            /*if s != 0 && target.s() != 0 {
-                for i in 0..vec.len() {
-                    println!("{s}, {n}, {}", vec[i]);
-                    //println!("{}", vec[i]);
-                    let module = &hom.get_map(target.s()).target;
-                    //println!("{}", BidegreeElement::new(target, vec[i].clone()).to_string_module(module, false));
-                    //let opgen = module.index_to_op_gen(target.t(), i);
-                    println!("{}", module.element_to_string(target.t(), vec[i].as_slice()));
-                }
-            }*/
 
             let m = format!(" - {m:?}");
             if source_num_gens != 0 && target_num_gens != 0 {
@@ -251,11 +233,6 @@ fn hopf(n: i32, max_deg : i32) -> anyhow::Result<()> {
                     s + 1
                 )
                 .expect("Failed to write to file");
-                println!(
-                    "{n} {} {} {m}",
-                    realstem - 1 + n,
-                    s + 1
-                    );
             }
         }
     }

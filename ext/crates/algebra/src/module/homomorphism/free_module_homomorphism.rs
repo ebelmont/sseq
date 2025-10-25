@@ -397,12 +397,6 @@ impl<const U: bool, A: MuAlgebra<U>> MuFreeModuleHomomorphism<U, MuFreeModule<U,
             return vec![];
         }
         let mut result = vec![vec![0; source_dim]; target_dim];
-        for i in self.outputs.min_degree()..self.outputs.len() {
-            for j in 0..self.outputs[i].len() {
-                println!("outputs[{i}][{j}] = {}", self.outputs[i][j]);
-            }
-        }
-
         let offset = self.target.generator_offset(t, t, 0);
         for i in 0..source_dim {
             let output = self.output(t + self.degree_shift, i);
