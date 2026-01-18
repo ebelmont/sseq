@@ -28,6 +28,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::io::Write;
 use std::sync::Arc;
+use std::mem;
 
 /*
  * Let e_n := \Sigma^n F_2.
@@ -82,7 +83,6 @@ fn hopf(n: i32, max_deg : i32) -> anyhow::Result<()> {
             None,
         )?);
     res_a.compute_through_stem(max);
-    res_b.compute_through_stem(max);
     //Prepare the vector representation of Sq^n x_{n, 0} in F(n)
     let dim = res_a.module(0).dimension(2 * n);
     let mut top: Vec<u32> = vec![0; dim];
@@ -104,8 +104,10 @@ fn hopf(n: i32, max_deg : i32) -> anyhow::Result<()> {
     // homological degree zero.
     let new: Arc<UnstableResolution<FiniteChainComplex<_>>> =
         Arc::new(UnstableResolution::unaugmented_loops(&res_a, max_n));
+    mem::drop(res_a);
 
     let suspension_shift = Bidegree::s_t(0, 0);
+    res_b.compute_through_stem(max);
     let hom = UnstableResolutionHomomorphism::new(
         String::from("hopf"),
         Arc::clone(&res_b),
