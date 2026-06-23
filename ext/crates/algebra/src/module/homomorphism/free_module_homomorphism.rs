@@ -259,6 +259,52 @@ where
     pub fn set_quasi_inverse(&self, degree: i32, quasi_inverse: Option<QuasiInverse>) {
         self.quasi_inverses.push_checked(quasi_inverse, degree);
     }
+
+    /// Lift `self` (`f: X -> Y`) through `g: N -> Y`, returning `h: X -> N` such that
+    /// `g(h(x)) = f(x)` for each generator `x` of `X`. Requires `f` and `g` to share the
+    /// same target `Y`. Returns `None` if some `f(x)` does not lie in the image of `g`.
+    pub fn lift_through(
+        &self,
+        g: &MuFreeModuleHomomorphism<U, M>,
+    ) -> Option<MuFreeModuleHomomorphism<U, MuFreeModule<U, M::Algebra>>> {
+        assert!(
+            Arc::ptr_eq(&self.target(), &g.target()),
+            "lift_through: f and g must have the same target"
+        );
+
+        let p = self.prime();
+        let source = self.source();
+        let target = g.source();
+        let shift = self.degree_shift() - g.degree_shift();
+
+        let result =
+            MuFreeModuleHomomorphism::new(Arc::clone(&source), Arc::clone(&target), shift);
+
+        let max = self.next_degree();
+
+        g.compute_auxiliary_data_through_degree(max - 1 - shift);
+
+        for gen_deg in result.min_degree()..max {
+            let num_gens = source.number_of_gens_in_degree(gen_deg);
+            let g_input_deg = gen_deg - shift;
+            let n_dim = target.dimension(g_input_deg);
+
+            let mut rows: Vec<FpVector> = Vec::with_capacity(num_gens);
+            for i in 0..num_gens {
+                let mut row = FpVector::new(p, n_dim);
+                let fx = self.output(gen_deg, i);
+                let in_image =
+                    g.apply_quasi_inverse(row.as_slice_mut(), g_input_deg, fx.as_slice());
+                if !in_image {
+                    return None;
+                }
+                rows.push(row);
+            }
+            result.add_generators_from_rows(gen_deg, rows);
+        }
+
+        Some(result)
+    }
 }
 
 impl<const U: bool, M: Module> ZeroHomomorphism<MuFreeModule<U, M::Algebra>, M>

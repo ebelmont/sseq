@@ -38,11 +38,11 @@ pub type CompositeData<A> = Vec<(
 
 /// A homotopy of a map A -> M of pair modules. We assume this map does not hit generators.
 pub struct SecondaryComposite<A: PairAlgebra> {
-    target: Arc<FreeModule<A>>,
-    degree: i32,
+    pub target: Arc<FreeModule<A>>,
+    pub degree: i32,
     /// The component of the map on the R_B portion.
     /// gen_deg -> gen_idx -> coefficient
-    composite: BiVec<Vec<A::Element>>,
+    pub composite: BiVec<Vec<A::Element>>,
 }
 
 impl<A: PairAlgebra> SecondaryComposite<A> {
@@ -557,7 +557,9 @@ pub trait SecondaryLift: Sync + Sized {
 
             let g = BidegreeGenerator::new(b, i);
             let mut v = self.get_intermediate(g);
-            if g.s() > shift.s() + 1 {
+            // The homotopy correction is needed whenever g.s() > shift.s(), not
+            // shift.s() + 1, because differentials can originate from the 0-line.
+            if g.s() > shift.s() {
                 self.homotopies()[g.s() - 1].homotopies.apply(
                     v.as_slice_mut(),
                     1,
