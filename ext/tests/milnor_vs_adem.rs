@@ -24,6 +24,7 @@ use sseq::coordinates::Bidegree;
 #[case("CP3_5", 30)]
 #[case("BCp", 30)]
 #[case("BCp2", 30)]
+#[case("BC4", 30)]
 fn compare(#[case] module_name: &str, #[case] max_degree: i32) {
     let max = Bidegree::s_t(max_degree, max_degree);
     let a = construct((module_name, "adem"), None).unwrap();

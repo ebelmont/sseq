@@ -55,6 +55,23 @@ fn cp_inf_dimensions() {
     }
 }
 
+/// BC4 (= BC_{2^2}) at p=2, min=1: one element per degree >= 1.
+#[test]
+fn bc4_one_per_degree() {
+    let resolution = construct(("BC4", "adem"), None).unwrap();
+    let module = resolution.target().module(0);
+
+    assert_eq!(module.min_degree(), 1);
+    for d in -5..=20 {
+        let expected = if d >= 1 { 1 } else { 0 };
+        assert_eq!(
+            module.dimension(d),
+            expected,
+            "BC4 dimension({d}) should be {expected}"
+        );
+    }
+}
+
 /// BCp2 at p=2, min=1: same as RP_inf, one per degree >= 1.
 #[test]
 fn bcp2_one_per_degree() {
