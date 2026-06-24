@@ -45,6 +45,19 @@ pub struct SecondaryComposite<A: PairAlgebra> {
     pub composite: BiVec<Vec<A::Element>>,
 }
 
+impl<A: PairAlgebra> Clone for SecondaryComposite<A>
+where
+    A::Element: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            target: Arc::clone(&self.target),
+            degree: self.degree,
+            composite: self.composite.clone(),
+        }
+    }
+}
+
 impl<A: PairAlgebra> SecondaryComposite<A> {
     pub fn algebra(&self) -> Arc<A> {
         self.target.algebra()
@@ -755,6 +768,28 @@ where
 
     pub fn homotopy(&self, s: i32) -> &SecondaryHomotopy<CC::Algebra> {
         &self.homotopies[s]
+    }
+
+    /// Copy precomputed composites from another `SecondaryResolution` over the same
+    /// underlying chain complex. This avoids recomputing seed-independent data when
+    /// iterating over multiple seeds.
+    pub fn copy_composites_from(&self, other: &Self)
+    where
+        <CC::Algebra as PairAlgebra>::Element: Clone,
+    {
+        for s in self.homotopies.range() {
+            let src = &other.homotopies[s].composites;
+            let dst = &self.homotopies[s].composites;
+            dst.extend(src.max_degree(), |t| src[t].clone());
+        }
+    }
+
+    /// Copy precomputed intermediates from another `SecondaryResolution` over the same
+    /// underlying chain complex.
+    pub fn copy_intermediates_from(&self, other: &Self) {
+        for entry in other.intermediates.iter() {
+            self.intermediates.insert(*entry.key(), entry.value().clone());
+        }
     }
 
     pub fn e3_page(&self) -> sseq::Sseq<2, sseq::Adams> {

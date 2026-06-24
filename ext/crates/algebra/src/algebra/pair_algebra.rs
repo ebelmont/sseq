@@ -118,6 +118,7 @@ macro_rules! unsub {
     };
 }
 
+#[derive(Clone)]
 pub struct MilnorPairElement {
     ones: FpVector,
     twos: FpVector,

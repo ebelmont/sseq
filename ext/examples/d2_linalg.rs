@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::sync::Arc;
+use std::time::Instant;
 
 use algebra::{
     module::{
@@ -56,6 +57,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Precompute lifts for each basis element (only dim of them, not 2^dim)
+    let t_basis = Instant::now();
     let basis_lifts: Vec<_> = (0..dim)
         .map(|j| {
             let f = FreeModuleHomomorphism::new(Arc::clone(&source), g.target(), degree);
@@ -77,14 +79,21 @@ fn main() -> anyhow::Result<()> {
         })
         .collect();
 
+    eprintln!("[PROFILE] basis_lifts precompute: {:?}", t_basis.elapsed());
+
     // Generator-mapping constraints: require h(gen at src_deg in M_2) = gen at tgt_deg in M_0.
     // To disable these constraints, change to vec![].
     let gen_constraints: Vec<(i32, i32)> = vec![];
 
-    // Compute composites once
+    // Compute composites and intermediates once (both are seed-independent)
+    let t_composites = Instant::now();
     let base = SecondaryResolution::new(Arc::clone(&resolution));
     base.initialize_homotopies();
     base.compute_composites();
+    eprintln!("[PROFILE] base composites: {:?}", t_composites.elapsed());
+    let t_intermediates_base = Instant::now();
+    base.compute_intermediates();
+    eprintln!("[PROFILE] base intermediates: {:?}", t_intermediates_base.elapsed());
 
     let d3 = resolution.differential(3);
     let d1 = resolution.differential(1);
@@ -134,6 +143,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Iterate over all degrees t at s=3
+    let t_constraints = Instant::now();
     let min_t = base.homotopies()[3].homotopies.min_degree();
     let max_t = base.max().t(3);
     eprintln!("s=3 range: t in [{min_t}, {max_t})");
@@ -217,6 +227,8 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    eprintln!("[PROFILE] constraint building: {:?}", t_constraints.elapsed());
+
     let num_constraints = constraint_coeffs.len();
     eprintln!("Total constraints: {num_constraints} equations in {dim} unknowns");
 
@@ -264,6 +276,7 @@ fn main() -> anyhow::Result<()> {
 
     // Helper: compute d_2 for a given seed value
     let compute_d2 = |seed: u128| -> Vec<(Bidegree, usize, Vec<u32>)> {
+        let t0 = Instant::now();
         let h_i = build_lift(
             seed,
             dim,
@@ -275,12 +288,17 @@ fn main() -> anyhow::Result<()> {
             max_src_deg,
             degree,
         );
+        let t_build_lift = t0.elapsed();
 
+        let t1 = Instant::now();
         let lift = SecondaryResolution::new(Arc::clone(&resolution));
         lift.initialize_homotopies();
-        lift.compute_composites();
+        lift.copy_composites_from(&base);
+        lift.copy_intermediates_from(&base);
+        let t_composites = t1.elapsed();
 
         // Seed homotopy at s=2
+        let t2 = Instant::now();
         {
             let hom_field = &lift.homotopies()[2].homotopies;
             let max_seed_deg = std::cmp::min(lift.max().t(2) - 1, source.max_computed_degree());
@@ -301,15 +319,21 @@ fn main() -> anyhow::Result<()> {
                 hom_field.add_generators_from_rows(d, rows);
             }
         }
+        let t_seed = t2.elapsed();
 
-        lift.compute_intermediates();
+        let t3 = Instant::now();
+        // intermediates already copied above
+        let t_intermediates = t3.elapsed();
 
+        let t4 = Instant::now();
         let min_t = lift.homotopies()[2].homotopies.min_degree();
         let s_range = lift.homotopies().range();
         let min = Bidegree::s_t(s_range.start + 1, min_t);
         let max = lift.max().restrict(s_range.end);
         sseq::coordinates::iter_s_t(&|b| lift.compute_homotopy_step(b), min, max);
+        let t_homotopy_steps = t4.elapsed();
 
+        let t5 = Instant::now();
         // Extract d_2 data
         // hom_k(t) returns a target_dim × source_dim matrix where:
         //   target_dim = M_{s-2} gens at degree t (rows = d_2 source generators)
@@ -329,6 +353,12 @@ fn main() -> anyhow::Result<()> {
                 d2_data.push((b, i, entry));
             }
         }
+        let t_extract = t5.elapsed();
+
+        eprintln!(
+            "[PROFILE] compute_d2(seed={seed}): build_lift={t_build_lift:?}, composites={t_composites:?}, seed={t_seed:?}, intermediates={t_intermediates:?}, homotopy_steps={t_homotopy_steps:?}, extract={t_extract:?}, total={:?}",
+            t0.elapsed()
+        );
         d2_data
     };
 
