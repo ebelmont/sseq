@@ -43,7 +43,8 @@ pub struct Config {
 pub fn parse_module_name(module_name: &str) -> anyhow::Result<Value> {
     let mut args = module_name.split('[');
     let module_file = args.next().unwrap();
-    let mut module = load_module_json(module_file)
+    let mut module = synthesize_module_json(module_file)
+        .or_else(|| load_module_json(module_file).ok())
         .with_context(|| format!("Failed to load module file {module_file}"))?;
     if let Some(shift) = args.next() {
         let shift: i64 = match shift.strip_suffix(']') {
@@ -267,6 +268,23 @@ where
     }
 
     crate::resolution::MuResolution::new_with_save(chain_complex, save_dir)
+}
+
+/// Try to synthesize a module JSON specification from a name pattern like "RP23".
+/// Returns `None` if the name doesn't match any known pattern.
+fn synthesize_module_json(name: &str) -> Option<Value> {
+    // Match "RP<n>" for real projective space RP^n
+    if let Some(n_str) = name.strip_prefix("RP") {
+        if let Ok(n) = n_str.parse::<i32>() {
+            return Some(serde_json::json!({
+                "p": 2,
+                "type": "real projective space",
+                "min": 1,
+                "max": n
+            }));
+        }
+    }
+    None
 }
 
 /// Load a module specification from a JSON file.

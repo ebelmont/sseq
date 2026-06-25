@@ -1,14 +1,3 @@
-// TODO: Work in progress. The primary chain map computation works correctly (tested with
-// M = N = S_2, identity map produces all [1] entries as expected). However, the secondary lift
-// panics because SecondaryResolutionHomomorphism::max() in secondary.rs:859 accesses
-// source.homotopies[s] at s = shift.s() = 1, but SecondaryResolution's homotopies OnceBiVec
-// starts at s = 2. This is a bug in the library for underlying shift with s = 0 (module maps).
-// The fix: in SecondaryResolutionHomomorphism::max(), skip the source.homotopies[s] access
-// when s == shift.s(), since the homotopy is zero at that level anyway (see compute_homotopies
-// line 630-635 which extends by zero at s = shift.s()). The original code already returns
-// i32::MAX for the target.homotopies branch at s == shift.s(), but the source.homotopies
-// access on line 859 is evaluated unconditionally before the conditional on line 860.
-
 //! Enumerates all A-module maps M → Σ^t N, lifts each to a chain map of resolutions, and computes
 //! the secondary lift.
 //!

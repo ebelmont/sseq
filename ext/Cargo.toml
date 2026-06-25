@@ -40,9 +40,15 @@ zstd = { version = "0.13.3", optional = true }
 ctrlc = { version = "3", features = ["termination"] }
 
 [dev-dependencies]
+crossterm = "0.28"
 expect-test = "1.5.1"
+image = "0.25"
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+ratatui-image = "6"
 rstest = "0.25.0"
+steenrod-art = { path = "steenrod-art" }
 tempfile = "3.20.0"
+tiny-skia = "0.11"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -70,6 +76,7 @@ members = [
     "crates/once",
     "crates/query",
     "crates/sseq",
+    "steenrod-art",
 ]
 
 [[bench]]

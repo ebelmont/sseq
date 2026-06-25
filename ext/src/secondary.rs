@@ -890,18 +890,23 @@ where
             &|selff, s| {
                 std::cmp::min(
                     selff.underlying.get_map(s).next_degree(),
-                    std::cmp::min(
-                        selff.source.homotopies[s].homotopies.next_degree(),
-                        if s == selff.shift().s() {
-                            i32::MAX
-                        } else {
+                    if s == selff.shift().s() {
+                        // At s = shift.s(), there are no homotopy steps or intermediates
+                        // to compute, so the only constraint is the underlying chain map.
+                        // Accessing source/target homotopies here would be out of bounds
+                        // when the underlying shift has s = 0 (module maps), since
+                        // SecondaryResolution's homotopies OnceBiVec starts at s = 2.
+                        i32::MAX
+                    } else {
+                        std::cmp::min(
+                            selff.source.homotopies[s].homotopies.next_degree(),
                             selff.target.homotopies[s + 1 - selff.shift().s()]
                                 .composites
                                 .max_degree()
                                 + selff.shift().t()
-                                + 1
-                        },
-                    ),
+                                + 1,
+                        )
+                    },
                 )
             },
         )

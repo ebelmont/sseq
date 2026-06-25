@@ -1,3 +1,6 @@
+/// Diagnostic: for each RPn, find the stem at which d2_groups stabilizes.
+/// Tests increasing resolution ranges until the d2 group count stops changing.
+
 use std::sync::Arc;
 
 use algebra::{
@@ -8,65 +11,135 @@ use algebra::{
     AlgebraType, Algebra,
 };
 use ext::chain_complex::{
-    AugmentedChainComplex, BoundedChainComplex, ChainComplex,
+    AugmentedChainComplex, ChainComplex,
 };
 use ext::secondary::{SecondaryLift, SecondaryResolution};
 use ext::utils::construct_standard;
 use fp::matrix::{Matrix, Subspace};
 use fp::vector::FpVector;
-use serde_json::json;
 use sseq::coordinates::{Bidegree, BidegreeGenerator};
 
-struct SweepResult {
-    n: i32,
+fn main() {
+    let max_rp = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(30);
+
+    println!("{:>4}  {:>5}  {:>12}  {:>6}  {:>10}  {:>12}  {:>10}  {:>14}",
+        "RPn", "dim", "constraints", "rank", "free_dim", "valid_seeds", "d2_groups", "stable_stem");
+    println!("{}", "-".repeat(95));
+
+    for n in 2..=max_rp {
+        let result = find_stable_range(n);
+        println!("{:>4}  {:>5}  {:>12}  {:>6}  {:>10}  {:>12}  {:>10}  {:>14}",
+            format!("RP{n}"), result.dim, result.num_constraints, result.rank,
+            result.free_dim, result.num_valid_seeds, result.num_d2_groups,
+            result.stable_stem);
+    }
+}
+
+struct StabilityResult {
+    dim: usize,
+    num_constraints: usize,
+    rank: usize,
+    free_dim: usize,
+    num_valid_seeds: String,
+    num_d2_groups: String,
+    stable_stem: String,
+}
+
+fn find_stable_range(n: i32) -> StabilityResult {
+    // Test at increasing stems until d2_groups stabilizes for 2 consecutive increases
+    let stems: Vec<i32> = (0..8).map(|k| n + 5 + k * 5).collect();
+
+    let mut prev_groups: Option<u128> = None;
+    let mut stable_count = 0;
+    let mut stable_stem_val: Option<i32> = None;
+    let mut last_result: Option<AnalysisResult> = None;
+
+    for &stem in &stems {
+        let max_s = std::cmp::max(stem / 2, 4);
+        eprint!("  RP{n} at ({stem},{max_s})...");
+        let result = analyze(n, stem, max_s);
+        eprintln!(" d2_groups={}", result.num_d2_groups);
+
+        if let Some(prev) = prev_groups {
+            if result.num_d2_groups == prev {
+                stable_count += 1;
+                if stable_count == 1 && stable_stem_val.is_none() {
+                    // First stem where it matched = the stem where it stabilized
+                    stable_stem_val = Some(stem - 5); // the previous stem was where it first hit this value
+                }
+                if stable_count >= 2 {
+                    last_result = Some(result);
+                    break;
+                }
+            } else {
+                stable_count = 0;
+                stable_stem_val = None;
+            }
+        }
+
+        prev_groups = Some(result.num_d2_groups);
+        last_result = Some(result);
+    }
+
+    let r = last_result.unwrap();
+
+    let valid_str = if r.free_dim <= 40 {
+        format!("{}", 1u128 << r.free_dim)
+    } else {
+        format!("2^{}", r.free_dim)
+    };
+
+    let groups_str = if r.num_d2_groups <= (1u128 << 40) {
+        format!("{}", r.num_d2_groups)
+    } else {
+        format!("2^{}", r.num_d2_groups.trailing_zeros())
+    };
+
+    let stable_str = match stable_stem_val {
+        Some(s) => format!("{s}"),
+        None => "not stable".to_string(),
+    };
+
+    StabilityResult {
+        dim: r.dim,
+        num_constraints: r.num_constraints,
+        rank: r.rank,
+        free_dim: r.free_dim,
+        num_valid_seeds: valid_str,
+        num_d2_groups: groups_str,
+        stable_stem: stable_str,
+    }
+}
+
+struct AnalysisResult {
+    dim: usize,
+    num_constraints: usize,
+    rank: usize,
+    free_dim: usize,
     num_d2_groups: u128,
 }
 
-fn main() {
-    println!("max_degree,num_d2_patterns");
-    for n in 2..=60 {
-        eprintln!("n={n:>3} ...");
-        let result = analyze_rp(n);
-        println!("{},{}", result.n, result.num_d2_groups);
-    }
-}
-
-fn analyze_rp(n: i32) -> SweepResult {
-    let trivial = |num| SweepResult { n, num_d2_groups: num };
-
-    let max_t = n + 20;
-    let max_s = (n + 20) / 2;
-    if max_s < 3 {
-        return trivial(1);
-    }
-
-    // Construct module
-    let config = json!({
+fn analyze(n: i32, max_stem: i32, max_s: i32) -> AnalysisResult {
+    let config = serde_json::json!({
         "p": 2,
         "type": "real projective space",
         "min": 1,
         "max": n
     });
 
-    let resolution = match construct_standard::<false, _, _>((config, AlgebraType::Milnor), None) {
-        Ok(r) => Arc::new(r),
-        Err(e) => {
-            eprintln!("  construct failed: {e}");
-            return trivial(0);
-        }
-    };
-
-    resolution.compute_through_stem(Bidegree::n_s(max_t, max_s));
+    let resolution = Arc::new(
+        construct_standard::<false, _, _>((config, AlgebraType::Milnor), None).unwrap()
+    );
+    resolution.compute_through_stem(Bidegree::n_s(max_stem, max_s));
 
     let target_cc = resolution.target();
-    if target_cc.max_s() > 1 {
-        return trivial(0);
-    }
-
     let module = target_cc.module(0);
     let max_nonzero = match module.max_degree() {
         Some(d) => d,
-        None => return trivial(0),
+        None => return AnalysisResult { dim: 0, num_constraints: 0, rank: 0, free_dim: 0, num_d2_groups: 1 },
     };
 
     let source = resolution.module(2);
@@ -77,23 +150,27 @@ fn analyze_rp(n: i32) -> SweepResult {
     resolution.algebra().compute_basis(2 * max_nonzero);
     hom.compute_basis(max_nonzero);
 
-    let g_map = resolution.chain_map(0);
+    let g = resolution.chain_map(0);
     let p = source.prime();
     let max_src_deg = source.max_computed_degree();
 
     let degree = 1;
     let dim = hom.dimension(degree);
 
-    // Precompute lifts for each basis element
+    if dim == 0 {
+        return AnalysisResult { dim: 0, num_constraints: 0, rank: 0, free_dim: 0, num_d2_groups: 1 };
+    }
+
+    // Precompute lifts
     let basis_lifts: Vec<_> = (0..dim)
         .map(|j| {
-            let f = FreeModuleHomomorphism::new(Arc::clone(&source), g_map.target(), degree);
+            let f = FreeModuleHomomorphism::new(Arc::clone(&source), g.target(), degree);
             let gbe = hom.block_structures[degree].index_to_generator_basis_elt(j);
             for gd in f.min_degree()..=max_src_deg {
-                let n_gens = source.number_of_gens_in_degree(gd);
+                let ng = source.number_of_gens_in_degree(gd);
                 let target_dim = module.dimension(gd - degree);
-                let mut rows = Vec::with_capacity(n_gens);
-                for gi in 0..n_gens {
+                let mut rows = Vec::with_capacity(ng);
+                for gi in 0..ng {
                     let mut row = FpVector::new(p, target_dim);
                     if gd == gbe.generator_degree && gi == gbe.generator_index {
                         row.set_entry(gbe.basis_index, 1);
@@ -102,11 +179,11 @@ fn analyze_rp(n: i32) -> SweepResult {
                 }
                 f.add_generators_from_rows(gd, rows);
             }
-            f.lift_through(&g_map).expect("basis element not in image of g")
+            f.lift_through(&g).expect("basis element not in image of g")
         })
         .collect();
 
-    // Compute composites and intermediates once (seed-independent)
+    // Compute composites and intermediates
     let base = SecondaryResolution::new(Arc::clone(&resolution));
     base.initialize_homotopies();
     base.compute_composites();
@@ -115,11 +192,17 @@ fn analyze_rp(n: i32) -> SweepResult {
     let d3 = resolution.differential(3);
     let d1 = resolution.differential(1);
 
-    // Collect constraint equations over F_2
+    // Collect constraints
     let mut constraint_coeffs: Vec<FpVector> = Vec::new();
     let mut constraint_rhs: Vec<u32> = Vec::new();
 
-    // Iterate over all degrees t at s=3
+    if max_s < 3 || base.homotopies().range().end <= 3 {
+        return AnalysisResult {
+            dim, num_constraints: 0, rank: 0, free_dim: dim,
+            num_d2_groups: 1, // can't distinguish without s=3
+        };
+    }
+
     let min_t = base.homotopies()[3].homotopies.min_degree();
     let max_t = base.max().t(3);
 
@@ -135,7 +218,6 @@ fn analyze_rp(n: i32) -> SweepResult {
             continue;
         }
 
-        // Build image subspace of d_1 at target_deg
         let m1_dim = m1.dimension(target_deg);
         let mut image = Subspace::new(p, target_dim);
         for basis_idx in 0..m1_dim {
@@ -179,8 +261,10 @@ fn analyze_rp(n: i32) -> SweepResult {
                 }
 
                 if rhs_bit != 0 && !any_contrib {
-                    eprintln!("  unsatisfiable at (s=3, t={t}, idx={idx})");
-                    return trivial(0);
+                    return AnalysisResult {
+                        dim, num_constraints: constraint_coeffs.len(),
+                        rank: 0, free_dim: 0, num_d2_groups: 0,
+                    };
                 }
 
                 let mut row = FpVector::new(p, dim);
@@ -195,7 +279,7 @@ fn analyze_rp(n: i32) -> SweepResult {
 
     let num_constraints = constraint_coeffs.len();
 
-    // Build augmented matrix [C | rhs] and row reduce
+    // Row reduce
     let mut matrix = Matrix::new(p, std::cmp::max(num_constraints, 1), dim + 1);
     for (i, (row, &rhs)) in constraint_coeffs.iter().zip(&constraint_rhs).enumerate() {
         for j in 0..dim {
@@ -206,13 +290,12 @@ fn analyze_rp(n: i32) -> SweepResult {
     matrix.initialize_pivots();
     matrix.row_reduce();
 
-    // Check consistency
     if num_constraints > 0 && matrix.pivots()[dim] >= 0 {
-        eprintln!("  inconsistent constraint system");
-        return trivial(0);
+        return AnalysisResult {
+            dim, num_constraints, rank: 0, free_dim: 0, num_d2_groups: 0,
+        };
     }
 
-    // Read off solution space
     let mut pivot_cols: Vec<usize> = Vec::new();
     for col in 0..dim {
         if matrix.pivots()[col] >= 0 {
@@ -220,31 +303,28 @@ fn analyze_rp(n: i32) -> SweepResult {
         }
     }
 
-    // Find the free variables
+    let rank = pivot_cols.len();
+    let free_dim = dim - rank;
+
+    // d2 uniqueness check
     let free_vars: Vec<usize> = (0..dim).filter(|j| matrix.pivots()[*j] < 0).collect();
 
-    // --- d_2 uniqueness check via linear algebra ---
-
-    // Helper: compute d_2 for a given seed value
-    let compute_d2 = |seed: u128| -> Vec<(Bidegree, usize, Vec<u32>)> {
-        let h_i = build_lift(
-            seed, dim, &hom, &source, &module, &g_map, p, max_src_deg, degree,
-        );
+    let compute_d2 = |seed: u128| -> Vec<Vec<u32>> {
+        let h_i = build_lift(seed, dim, &hom, &source, &module, &g, p, max_src_deg, degree);
 
         let lift = SecondaryResolution::new(Arc::clone(&resolution));
         lift.initialize_homotopies();
         lift.copy_composites_from(&base);
         lift.copy_intermediates_from(&base);
 
-        // Seed homotopy at s=2
         {
             let hom_field = &lift.homotopies()[2].homotopies;
             let max_seed_deg = std::cmp::min(lift.max().t(2) - 1, source.max_computed_degree());
             for d in hom_field.min_degree()..=max_seed_deg {
-                let n_gens = source.number_of_gens_in_degree(d);
+                let ng = source.number_of_gens_in_degree(d);
                 let target_dim = m0.dimension(d - hom_field.degree_shift());
-                let mut rows = Vec::with_capacity(n_gens);
-                for gi in 0..n_gens {
+                let mut rows = Vec::with_capacity(ng);
+                for gi in 0..ng {
                     let mut row = FpVector::new(p, target_dim);
                     if d >= h_i.min_degree() && d < h_i.next_degree() {
                         let h_out = h_i.output(d, gi);
@@ -264,25 +344,20 @@ fn analyze_rp(n: i32) -> SweepResult {
         let max = lift.max().restrict(s_range.end);
         sseq::coordinates::iter_s_t(&|b| lift.compute_homotopy_step(b), min, max);
 
-        // Extract d_2 data
-        let mut d2_data: Vec<(Bidegree, usize, Vec<u32>)> = Vec::new();
+        let mut d2_data: Vec<Vec<u32>> = Vec::new();
         for b in resolution.iter_stem() {
-            if b.s() < 2 {
-                continue;
-            }
-            if b.t() - 1 > resolution.module(b.s() - 2).max_computed_degree() {
-                continue;
-            }
+            if b.s() < 2 { continue; }
+            if b.t() - 1 > resolution.module(b.s() - 2).max_computed_degree() { continue; }
             let homotopy = lift.homotopy(b.s());
             let m = homotopy.homotopies.hom_k(b.t() - 1);
-            for (i, entry) in m.into_iter().enumerate() {
-                d2_data.push((b, i, entry));
+            for (_i, entry) in m.into_iter().enumerate() {
+                d2_data.push(entry);
             }
         }
         d2_data
     };
 
-    // Compute particular solution seed (free vars = 0)
+    // Particular solution
     let mut particular_seed: u128 = 0;
     for &col in &pivot_cols {
         let row_idx = matrix.pivots()[col] as usize;
@@ -291,11 +366,9 @@ fn analyze_rp(n: i32) -> SweepResult {
         }
     }
 
-    // Build seeds for each free direction
     let direction_seeds: Vec<u128> = free_vars
         .iter()
-        .enumerate()
-        .map(|(_k, &f_k)| {
+        .map(|&f_k| {
             let mut v = vec![0u32; dim];
             v[f_k] = 1;
             for &col in pivot_cols.iter().rev() {
@@ -308,43 +381,29 @@ fn analyze_rp(n: i32) -> SweepResult {
             }
             let mut seed = particular_seed;
             for j in 0..dim {
-                if v[j] != 0 {
-                    seed ^= 1u128 << j;
-                }
+                if v[j] != 0 { seed ^= 1u128 << j; }
             }
             seed
         })
         .collect();
 
-    // Compute d_2 for particular solution (base)
     let d2_base = compute_d2(particular_seed);
 
-    // Check uniqueness: for each free direction, compute d_2 and compare to base
     let mut differing_deltas: Vec<Vec<Vec<u32>>> = Vec::new();
     for &dir_seed in &direction_seeds {
         let d2_dir = compute_d2(dir_seed);
-
-        let delta: Vec<Vec<u32>> = d2_dir
-            .iter()
-            .zip(d2_base.iter())
-            .map(|((_, _, row_dir), (_, _, row_base))| {
+        let delta: Vec<Vec<u32>> = d2_dir.iter().zip(d2_base.iter())
+            .map(|(row_dir, row_base)| {
                 row_dir.iter().zip(row_base.iter()).map(|(&a, &b)| a ^ b).collect()
             })
             .collect();
-
-        let differs = delta.iter().any(|row| row.iter().any(|&x| x != 0));
-
-        if differs {
+        if delta.iter().any(|row| row.iter().any(|&x| x != 0)) {
             differing_deltas.push(delta);
         }
     }
 
-    // Row-reduce deltas to find the rank of the delta space
-    let delta_flat_len: usize = if differing_deltas.is_empty() {
-        0
-    } else {
-        differing_deltas[0].iter().map(|row| row.len()).sum()
-    };
+    let delta_flat_len: usize = if differing_deltas.is_empty() { 0 }
+        else { differing_deltas[0].iter().map(|row| row.len()).sum() };
 
     let mut independent_rank = 0usize;
     if delta_flat_len > 0 {
@@ -353,10 +412,7 @@ fn analyze_rp(n: i32) -> SweepResult {
             let mut v = FpVector::new(p, delta_flat_len);
             let mut col = 0;
             for row in delta {
-                for &val in row {
-                    v.set_entry(col, val);
-                    col += 1;
-                }
+                for &val in row { v.set_entry(col, val); col += 1; }
             }
             let mut v_copy = v.clone();
             basis.reduce(v_copy.as_slice_mut());
@@ -367,13 +423,9 @@ fn analyze_rp(n: i32) -> SweepResult {
         }
     }
 
-    let num_d2_groups = if independent_rank <= 127 {
-        1u128 << independent_rank
-    } else {
-        u128::MAX
-    };
+    let num_d2_groups = 1u128 << independent_rank;
 
-    SweepResult { n, num_d2_groups }
+    AnalysisResult { dim, num_constraints, rank, free_dim, num_d2_groups }
 }
 
 fn build_lift<M: Module>(
@@ -392,10 +444,10 @@ where
 {
     let f = FreeModuleHomomorphism::new(Arc::clone(source), g.target(), degree);
     for gd in f.min_degree()..=max_src_deg {
-        let n = source.number_of_gens_in_degree(gd);
+        let ng = source.number_of_gens_in_degree(gd);
         let target_dim = module.dimension(gd - degree);
-        let mut rows = Vec::with_capacity(n);
-        for gi in 0..n {
+        let mut rows = Vec::with_capacity(ng);
+        for gi in 0..ng {
             let mut row = FpVector::new(p, target_dim);
             for idx in 0..dim {
                 if (seed >> idx) & 1 != 0 {
@@ -411,4 +463,3 @@ where
     }
     f.lift_through(g).expect("seed element not in image of g")
 }
-
