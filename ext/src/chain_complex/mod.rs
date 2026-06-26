@@ -10,7 +10,8 @@ use algebra::{
         homomorphism::{ModuleHomomorphism, MuFreeModuleHomomorphism},
     },
 };
-// pub use hom_complex::HomComplex;
+mod hom_cochain_complex;
+pub use hom_cochain_complex::HomCochainComplex;
 pub use chain_homotopy::ChainHomotopy;
 pub use finite_chain_complex::{FiniteAugmentedChainComplex, FiniteChainComplex};
 use fp::{

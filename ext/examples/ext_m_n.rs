@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use algebra::{Algebra, module::Module};
-use ext::chain_complex::ChainComplex;
-use hom_cochain_complex::HomCochainComplex;
+use ext::chain_complex::{ChainComplex, HomCochainComplex};
 use sseq::coordinates::Bidegree;
 
 fn main() -> anyhow::Result<()> {
@@ -46,73 +45,4 @@ fn main() -> anyhow::Result<()> {
     print!("{result}");
 
     Ok(())
-}
-
-mod hom_cochain_complex {
-    use std::sync::Arc;
-
-    use algebra::module::{
-        HomModule, Module,
-        homomorphism::{HomPullback, ModuleHomomorphism},
-    };
-    use ext::chain_complex::FreeChainComplex;
-    use fp::matrix::Subquotient;
-    use once::OnceBiVec;
-    use sseq::coordinates::Bidegree;
-
-    pub struct HomCochainComplex<CC: FreeChainComplex, M: Module<Algebra = CC::Algebra>> {
-        source: Arc<CC>,
-        target: Arc<M>,
-        modules: OnceBiVec<Arc<HomModule<M>>>,
-        differentials: OnceBiVec<Arc<HomPullback<M>>>,
-    }
-
-    impl<CC: FreeChainComplex, M: Module<Algebra = CC::Algebra>> HomCochainComplex<CC, M> {
-        pub fn new(source: Arc<CC>, target: Arc<M>) -> Self {
-            Self {
-                source,
-                target,
-                modules: OnceBiVec::new(0),
-                differentials: OnceBiVec::new(0),
-            }
-        }
-
-        pub fn min_degree(&self) -> i32 {
-            self.modules[0].min_degree()
-        }
-
-        pub fn compute_through_stem(&self, max: Bidegree) {
-            self.modules.extend(max.s() + 1, |s| {
-                Arc::new(HomModule::new(
-                    self.source.module(s),
-                    Arc::clone(&self.target),
-                ))
-            });
-            self.differentials.extend(max.s(), |s| {
-                Arc::new(HomPullback::new(
-                    Arc::clone(&self.modules[s]),
-                    Arc::clone(&self.modules[s + 1]),
-                    self.source.differential(s + 1),
-                ))
-            });
-            for (s, module) in self.modules.iter() {
-                module.compute_basis(max.n() + s + 1);
-            }
-            for (s, d) in self.differentials.iter() {
-                d.compute_auxiliary_data_through_degree(max.n() + s + 1);
-            }
-        }
-
-        pub fn homology_dimension(&self, b: Bidegree) -> usize {
-            if b.s() == 0 {
-                self.differentials[b.s()].kernel(b.t()).unwrap().dimension()
-            } else {
-                Subquotient::from_parts(
-                    self.differentials[b.s()].kernel(b.t()).cloned().unwrap(),
-                    self.differentials[b.s() - 1].image(b.t()).cloned().unwrap(),
-                )
-                .dimension()
-            }
-        }
-    }
 }
