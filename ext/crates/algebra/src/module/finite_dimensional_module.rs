@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::{json, value::Value};
 
 use crate::{
-    algebra::{Algebra, GeneratedAlgebra},
-    module::{Module, ModuleFailedRelationError, ZeroModule},
+    algebra::{Algebra, Bialgebra, GeneratedAlgebra},
+    module::{Module, ModuleFailedRelationError, TensorModule, ZeroModule},
 };
 
 pub struct FiniteDimensionalModule<A: Algebra> {
@@ -673,6 +673,17 @@ impl<A: GeneratedAlgebra> FiniteDimensionalModule<A> {
             }
         }
         json!(actions)
+    }
+}
+
+impl<A: Algebra + Bialgebra> FiniteDimensionalModule<A> {
+    /// Tensor product of two FDModules, returning a new FDModule.
+    ///
+    /// Uses the existing `TensorModule` (which handles the coproduct/Cartan formula)
+    /// and converts the result to an `FDModule` via `From<&M>`.
+    pub fn tensor(&self, other: &Self) -> Self {
+        let tensor = TensorModule::new(Arc::new(self.clone()), Arc::new(other.clone()));
+        Self::from(&tensor)
     }
 }
 

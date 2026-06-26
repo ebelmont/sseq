@@ -1,5 +1,8 @@
 mod bcp;
 mod cpn;
+mod fd_module_analysis;
+mod fd_module_dual;
+mod fd_module_enumeration;
 mod finite_dimensional_module;
 mod finitely_presented_module;
 mod free_module;

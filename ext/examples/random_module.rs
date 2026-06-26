@@ -24,7 +24,6 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ext::chain_complex::{AugmentedChainComplex, ChainComplex, FreeChainComplex};
-use fp::matrix::Matrix;
 use fp::prime::ValidPrime;
 use rand::Rng;
 use ratatui::{
@@ -37,98 +36,6 @@ use ratatui::{
 };
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol, StatefulImage};
 use sseq::coordinates::Bidegree;
-
-/// Minimal union-find with path halving and union-by-rank.
-struct UnionFind {
-    parent: Vec<usize>,
-    rank: Vec<u8>,
-}
-
-impl UnionFind {
-    fn new(n: usize) -> Self {
-        Self {
-            parent: (0..n).collect(),
-            rank: vec![0; n],
-        }
-    }
-
-    fn find(&mut self, mut x: usize) -> usize {
-        while self.parent[x] != x {
-            self.parent[x] = self.parent[self.parent[x]]; // path halving
-            x = self.parent[x];
-        }
-        x
-    }
-
-    fn union(&mut self, a: usize, b: usize) {
-        let ra = self.find(a);
-        let rb = self.find(b);
-        if ra == rb {
-            return;
-        }
-        match self.rank[ra].cmp(&self.rank[rb]) {
-            std::cmp::Ordering::Less => self.parent[ra] = rb,
-            std::cmp::Ordering::Greater => self.parent[rb] = ra,
-            std::cmp::Ordering::Equal => {
-                self.parent[rb] = ra;
-                self.rank[ra] += 1;
-            }
-        }
-    }
-
-    fn num_components(&mut self) -> usize {
-        let n = self.parent.len();
-        (0..n).filter(|&i| self.find(i) == i).count()
-    }
-}
-
-/// Check whether a module is connected, i.e., every pair of basis elements is linked
-/// through a chain of generator actions.
-fn is_connected(module: &FDModule<SteenrodAlgebra>, algebra: &Arc<SteenrodAlgebra>) -> bool {
-    let min_deg = module.min_degree();
-    let max_deg = match module.max_degree() {
-        Some(d) => d,
-        None => return true, // empty module is vacuously connected
-    };
-
-    // Compute cumulative offsets: flat node ID for basis element (d, i) = offset[d] + i
-    let mut offsets = BiVec::with_capacity(min_deg, max_deg + 1);
-    let mut total = 0usize;
-    for d in min_deg..=max_deg {
-        offsets.push(total);
-        total += module.dimension(d);
-    }
-
-    if total <= 1 {
-        return true;
-    }
-
-    let mut uf = UnionFind::new(total);
-
-    for input_deg in min_deg..=max_deg {
-        for output_deg in (input_deg + 1)..=max_deg {
-            let op_deg = output_deg - input_deg;
-            let input_dim = module.dimension(input_deg);
-            let output_dim = module.dimension(output_deg);
-            if input_dim == 0 || output_dim == 0 {
-                continue;
-            }
-            for op_idx in algebra.generators(op_deg) {
-                for input_idx in 0..input_dim {
-                    let action = module.action(op_deg, op_idx, input_deg, input_idx);
-                    let src = offsets[input_deg] + input_idx;
-                    for output_idx in 0..output_dim {
-                        if action.entry(output_idx) != 0 {
-                            uf.union(src, offsets[output_deg] + output_idx);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    uf.num_components() == 1
-}
 
 /// Generate a random valid `FDModule` over the Steenrod algebra with the given graded dimensions.
 ///
@@ -406,7 +313,7 @@ fn generate_cyclic_quotient_module(
                 }
             }
 
-            if valid && is_connected(&module, algebra) {
+            if valid && module.is_connected() {
                 if verbose && outer > 0 {
                     println!("Found valid cyclic quotient module after {outer} outer retries.");
                 }
@@ -997,195 +904,6 @@ fn launch_steenrod_art(paths: &[PathBuf]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// One step in the systematic enumeration of FDModules.
-struct EnumStep {
-    input_deg: i32,
-    output_deg: i32,
-    has_generator: bool,
-    /// Index of the generator operation (only meaningful if has_generator).
-    generator_op_idx: usize,
-    input_dim: usize,
-    output_dim: usize,
-    /// Number of free F_2 bits at this step: input_dim * output_dim if has_generator, else 0.
-    num_free_bits: usize,
-}
-
-/// Build the list of enumeration steps in canonical order (input_deg HIGH-to-LOW,
-/// output_deg LOW-to-HIGH), skipping pairs where either dimension is 0.
-fn build_enum_steps(
-    algebra: &Arc<SteenrodAlgebra>,
-    graded_dim: &BiVec<usize>,
-) -> Vec<EnumStep> {
-    let min_deg = graded_dim.min_degree();
-    let max_deg = graded_dim.len(); // one past the end
-    let mut steps = Vec::new();
-
-    for input_deg in (min_deg..max_deg).rev() {
-        for output_deg in (input_deg + 1)..max_deg {
-            let op_deg = output_deg - input_deg;
-            let input_dim = graded_dim[input_deg];
-            let output_dim = graded_dim[output_deg];
-
-            if input_dim == 0 || output_dim == 0 {
-                continue;
-            }
-
-            let gens = algebra.generators(op_deg);
-            if gens.is_empty() {
-                // Non-generator step: extend_actions + check_validity, no free bits
-                steps.push(EnumStep {
-                    input_deg,
-                    output_deg,
-                    has_generator: false,
-                    generator_op_idx: 0,
-                    input_dim,
-                    output_dim,
-                    num_free_bits: 0,
-                });
-            } else {
-                // Generator step(s) — for p=2 Adem, each power-of-2 degree has exactly
-                // one generator, but handle multiple just in case.
-                for op_idx in gens {
-                    steps.push(EnumStep {
-                        input_deg,
-                        output_deg,
-                        has_generator: true,
-                        generator_op_idx: op_idx,
-                        input_dim,
-                        output_dim,
-                        num_free_bits: input_dim * output_dim,
-                    });
-                }
-            }
-        }
-    }
-
-    steps
-}
-
-/// Decode a choice integer into output vectors and set generator actions on the module.
-///
-/// Bit layout: bits `[input_idx * output_dim .. (input_idx+1) * output_dim)` encode
-/// the F_2 output vector for `input_idx`.
-fn apply_choice(
-    module: &mut FDModule<SteenrodAlgebra>,
-    step: &EnumStep,
-    choice: u64,
-) {
-    let op_deg = step.output_deg - step.input_deg;
-    for input_idx in 0..step.input_dim {
-        let mut output = vec![0u32; step.output_dim];
-        for out_idx in 0..step.output_dim {
-            let bit_pos = input_idx * step.output_dim + out_idx;
-            if (choice >> bit_pos) & 1 == 1 {
-                output[out_idx] = 1;
-            }
-        }
-        module.set_action(op_deg, step.generator_op_idx, step.input_deg, input_idx, &output);
-    }
-}
-
-/// Recursively enumerate all valid FDModules by backtracking over the enumeration steps.
-fn enumerate_recursive(
-    module: FDModule<SteenrodAlgebra>,
-    steps: &[EnumStep],
-    mut step_idx: usize,
-    results: &mut Vec<FDModule<SteenrodAlgebra>>,
-    progress_step: Option<usize>,
-) {
-    // 1. Process forced steps (has_generator == false) in-place
-    let mut module = module;
-    while step_idx < steps.len() && !steps[step_idx].has_generator {
-        let step = &steps[step_idx];
-        module.extend_actions(step.input_deg, step.output_deg);
-        if module.check_validity(step.input_deg, step.output_deg).is_err() {
-            return; // prune
-        }
-        step_idx += 1;
-    }
-
-    // 2. If all steps processed, module is valid
-    if step_idx >= steps.len() {
-        results.push(module);
-        return;
-    }
-
-    // 3. Generator step — enumerate all 2^num_free_bits choices
-    let step = &steps[step_idx];
-    let num_choices = 1u64 << step.num_free_bits;
-    let progress_interval = if let Some(ps) = progress_step {
-        if step_idx == ps {
-            std::cmp::max(1, num_choices / 16)
-        } else {
-            0
-        }
-    } else {
-        0
-    };
-
-    for choice in 0..num_choices {
-        if progress_interval > 0 && choice % progress_interval == 0 {
-            eprintln!(
-                "  Progress: {}/{} ({:.0}%), {} valid so far",
-                choice,
-                num_choices,
-                100.0 * choice as f64 / num_choices as f64,
-                results.len(),
-            );
-        }
-
-        let mut m = module.clone();
-        apply_choice(&mut m, step, choice);
-        m.extend_actions(step.input_deg, step.output_deg);
-        if m.check_validity(step.input_deg, step.output_deg).is_err() {
-            continue; // prune
-        }
-        enumerate_recursive(m, steps, step_idx + 1, results, progress_step);
-    }
-}
-
-/// Systematically enumerate all valid FDModules with the given graded dimensions.
-fn enumerate_fd_modules(
-    algebra: &Arc<SteenrodAlgebra>,
-    graded_dim: &BiVec<usize>,
-) -> Vec<FDModule<SteenrodAlgebra>> {
-    // Ensure algebra basis is computed up to the max operation degree
-    let degree_difference = graded_dim.len() - graded_dim.min_degree();
-    algebra.compute_basis(degree_difference);
-
-    let steps = build_enum_steps(algebra, graded_dim);
-
-    let total_free_bits: usize = steps.iter().map(|s| s.num_free_bits).sum();
-    let generator_steps: Vec<_> = steps
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.has_generator)
-        .collect();
-
-    eprintln!("Enumeration steps: {} total, {} generator steps", steps.len(), generator_steps.len());
-    eprintln!("Total free bits: {} (raw search space: 2^{} = {})", total_free_bits, total_free_bits,
-        if total_free_bits <= 63 { format!("{}", 1u64 << total_free_bits) } else { format!("~2^{}", total_free_bits) }
-    );
-    if total_free_bits > 28 {
-        eprintln!("WARNING: Large search space (>{} candidates). This may be slow.", 1u64 << 28);
-    }
-
-    // Find the first generator step for progress reporting
-    let progress_step = generator_steps.first().map(|(idx, _)| *idx);
-
-    let base_module = FDModule::new(
-        Arc::clone(algebra),
-        "enum_fd".to_string(),
-        graded_dim.clone(),
-    );
-
-    let mut results = Vec::new();
-    enumerate_recursive(base_module, &steps, 0, &mut results, progress_step);
-
-    eprintln!("Enumeration complete: {} valid modules found.", results.len());
-    results
-}
-
 /// Print nonzero generator actions for a module.
 fn print_actions(module: &FDModule<SteenrodAlgebra>, algebra: &Arc<SteenrodAlgebra>) {
     let min_deg = module.min_degree();
@@ -1218,501 +936,6 @@ fn print_actions(module: &FDModule<SteenrodAlgebra>, algebra: &Arc<SteenrodAlgeb
     if !any_nonzero {
         println!("  (all zero)");
     }
-}
-
-/// Check whether the module is indecomposable by computing End_A(M) and searching for
-/// nontrivial idempotents.
-///
-/// Returns `(result, dim_End_A(M))` where result is:
-/// - `Some(true)` if proven indecomposable
-/// - `Some(false)` if proven decomposable (nontrivial idempotent found)
-/// - `None` if End_A(M) is too large for brute-force idempotent search
-/// M is indecomposable iff End_A(M) has no nontrivial idempotents.
-///
-/// Proof: if e ∈ End_A(M) satisfies e² = e, e ≠ 0, e ≠ 1, then M = im(e) ⊕ ker(e)
-/// as A-modules. Conversely, M = M₁ ⊕ M₂ gives idempotent projection onto M₁.
-///
-/// Algorithm: compute End_A(M) = ker(C) where C encodes the naturality constraint
-/// θ·f = f·θ for all generators θ, then brute-force search for idempotents.
-/// Returns (Some(true), dim) if indecomposable, (Some(false), dim) if decomposable,
-/// (None, dim) if End_A(M) is too large (dim > 20) to search.
-fn check_indecomposable(
-    module: &FDModule<SteenrodAlgebra>,
-    algebra: &Arc<SteenrodAlgebra>,
-) -> (Option<bool>, usize) {
-    if !is_connected(module, algebra) {
-        return (Some(false), 0);
-    }
-
-    let p = module.prime();
-    let min_deg = module.min_degree();
-    let max_deg = module.max_degree().unwrap();
-
-    let mut offsets: Vec<(i32, usize, usize)> = Vec::new();
-    let mut total_vars = 0usize;
-    for d in min_deg..=max_deg {
-        let n = module.dimension(d);
-        if n > 0 {
-            offsets.push((d, n, total_vars));
-            total_vars += n * n;
-        }
-    }
-
-    if total_vars == 0 {
-        return (Some(true), 0);
-    }
-
-    let find_offset = |d: i32| -> Option<(usize, usize)> {
-        offsets.iter().find(|&&(deg, _, _)| deg == d).map(|&(_, n, off)| (n, off))
-    };
-
-    // Naturality constraint: f·θ = θ·f for each generator θ of degree k.
-    // In coordinates: Σ_l F_{d+k}[i][l]·A[l][j] = Σ_l A[i][l]·F_d[l][j]
-    let constraints = build_hom_constraints(module, module, algebra, &offsets, &offsets,
-                                            total_vars, &find_offset, &find_offset);
-
-    if constraints.is_empty() {
-        let dim_end = total_vars;
-        if dim_end == 1 {
-            return (Some(true), 1);
-        }
-        return check_idempotents_in_kernel_dimension(dim_end, total_vars, &offsets, None);
-    }
-
-    let num_constraints = constraints.len();
-    let mut c_transpose = vec![vec![0u32; num_constraints]; total_vars];
-    for (ci, row) in constraints.iter().enumerate() {
-        for (vi, &val) in row.iter().enumerate() {
-            c_transpose[vi][ci] = val;
-        }
-    }
-
-    let (padded_cols, mut aug) = Matrix::augmented_from_vec(p, &c_transpose);
-    aug.row_reduce();
-    let kernel = aug.compute_kernel(padded_cols);
-    let dim_end = kernel.dimension();
-
-    if dim_end <= 1 {
-        return (Some(true), dim_end);
-    }
-
-    check_idempotents_in_kernel_dimension(dim_end, total_vars, &offsets, Some(&kernel))
-}
-
-/// Build linear constraints for Hom_A(M, N): the space of A-module maps f: M → N.
-///
-/// A graded linear map f = {F_d: M_d → N_d} is A-linear iff θ·f = f·θ for each
-/// generator θ, i.e. F_{d+k}·A^M_{θ,d} = A^N_{θ,d}·F_d. Each (θ, d, i, j) entry
-/// of this matrix equation gives one F₂-linear constraint on the entries of f.
-fn build_hom_constraints(
-    source: &FDModule<SteenrodAlgebra>,
-    target: &FDModule<SteenrodAlgebra>,
-    algebra: &Arc<SteenrodAlgebra>,
-    src_offsets: &[(i32, usize, usize)],
-    _tgt_offsets: &[(i32, usize, usize)],
-    total_vars: usize,
-    find_src: &dyn Fn(i32) -> Option<(usize, usize)>,
-    find_tgt: &dyn Fn(i32) -> Option<(usize, usize)>,
-) -> Vec<Vec<u32>> {
-    let max_deg_src = source.max_degree().unwrap();
-    let max_deg_tgt = target.max_degree().unwrap();
-    let mut constraints: Vec<Vec<u32>> = Vec::new();
-
-    for &(d, n_src_d, _off_src_d) in src_offsets {
-        for output_deg in (d + 1)..=max_deg_src.max(max_deg_tgt) {
-            let op_deg = output_deg - d;
-            let n_src_out = match find_src(output_deg) {
-                Some((n, _)) => n,
-                None => 0,
-            };
-            let n_tgt_out = match find_tgt(output_deg) {
-                Some((n, _)) => n,
-                None => 0,
-            };
-            if n_tgt_out == 0 && n_src_out == 0 {
-                continue;
-            }
-
-            for op_idx in algebra.generators(op_deg) {
-                // A^M_{θ,d}: n_src_out × n_src_d (source action)
-                let mut src_action = vec![vec![0u32; n_src_d]; n_src_out];
-                if output_deg <= max_deg_src {
-                    for j in 0..n_src_d {
-                        let action = source.action(op_deg, op_idx, d, j);
-                        for i in 0..n_src_out {
-                            src_action[i][j] = action.entry(i);
-                        }
-                    }
-                }
-
-                // A^N_{θ,d}: n_tgt_out × n_tgt_d where n_tgt_d is the target dim at degree d
-                let n_tgt_d = match find_tgt(d) {
-                    Some((n, _)) => n,
-                    None => continue,
-                };
-                let mut tgt_action = vec![vec![0u32; n_tgt_d]; n_tgt_out];
-                if output_deg <= max_deg_tgt {
-                    for j in 0..n_tgt_d {
-                        let action = target.action(op_deg, op_idx, d, j);
-                        for i in 0..n_tgt_out {
-                            tgt_action[i][j] = action.entry(i);
-                        }
-                    }
-                }
-
-                // Constraint: F_{d+k}·A^M = A^N·F_d
-                // Entry (i,j): Σ_l F_{d+k}[i][l]·A^M[l][j] + Σ_l A^N[i][l]·F_d[l][j] = 0
-                // where F_{d+k}: M_{d+k} → N_{d+k} and F_d: M_d → N_d
-                let (_, off_tgt_out) = match find_tgt(output_deg) {
-                    Some(v) => v,
-                    None => {
-                        // No target at output_deg: constraint is just F_{d+k}·A^M = 0
-                        // but there's no F_{d+k} variable either, skip
-                        continue;
-                    }
-                };
-                let (_, off_tgt_d) = match find_tgt(d) {
-                    Some(v) => v,
-                    None => continue,
-                };
-
-                for i in 0..n_tgt_out {
-                    for j in 0..n_src_d {
-                        let mut row = vec![0u32; total_vars];
-
-                        // Term 1: Σ_l F_{d+k}[i][l]·A^M[l][j]
-                        for l in 0..n_src_out {
-                            if src_action[l][j] != 0 {
-                                let var = off_tgt_out + i * n_src_out + l;
-                                if var < total_vars {
-                                    row[var] ^= 1;
-                                }
-                            }
-                        }
-
-                        // Term 2: Σ_l A^N[i][l]·F_d[l][j]
-                        for l in 0..n_tgt_d {
-                            if tgt_action[i][l] != 0 {
-                                let var = off_tgt_d + l * n_src_d + j;
-                                if var < total_vars {
-                                    row[var] ^= 1;
-                                }
-                            }
-                        }
-
-                        if row.iter().any(|&x| x != 0) {
-                            constraints.push(row);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    constraints
-}
-
-/// Search End_A(M) for nontrivial idempotents via brute force over basis elements.
-fn check_idempotents_in_kernel_dimension(
-    dim_end: usize,
-    total_vars: usize,
-    offsets: &[(i32, usize, usize)],
-    kernel: Option<&fp::matrix::Subspace>,
-) -> (Option<bool>, usize) {
-    if dim_end > 20 {
-        return (None, dim_end);
-    }
-
-    let mut identity = vec![0u32; total_vars];
-    for &(_, n, off) in offsets {
-        for i in 0..n {
-            identity[off + i * n + i] = 1;
-        }
-    }
-
-    let basis_vecs: Vec<Vec<u32>> = if let Some(k) = kernel {
-        k.basis()
-            .map(|slice| (0..total_vars).map(|i| slice.entry(i)).collect())
-            .collect()
-    } else {
-        (0..dim_end)
-            .map(|b| {
-                let mut v = vec![0u32; total_vars];
-                v[b] = 1;
-                v
-            })
-            .collect()
-    };
-
-    for bits in 1..(1u64 << dim_end) {
-        let mut f = vec![0u32; total_vars];
-        for (b, bv) in basis_vecs.iter().enumerate() {
-            if (bits >> b) & 1 == 1 {
-                for (i, &val) in bv.iter().enumerate() {
-                    f[i] ^= val;
-                }
-            }
-        }
-        if f == identity {
-            continue;
-        }
-        if is_idempotent(&f, offsets) {
-            return (Some(false), dim_end);
-        }
-    }
-
-    (Some(true), dim_end)
-}
-
-/// Check f² = f degree-by-degree (matrix multiplication mod 2 per graded block).
-fn is_idempotent(f: &[u32], offsets: &[(i32, usize, usize)]) -> bool {
-    for &(_, n, off) in offsets {
-        for i in 0..n {
-            for j in 0..n {
-                let mut f_sq = 0u32;
-                for l in 0..n {
-                    f_sq ^= f[off + i * n + l] & f[off + l * n + j];
-                }
-                if f_sq != f[off + i * n + j] {
-                    return false;
-                }
-            }
-        }
-    }
-    true
-}
-
-/// Isomorphism-class fingerprint: ranks of each generator's action at each degree.
-///
-/// Isomorphic modules have identical fingerprints since rank is basis-invariant.
-/// Not a complete invariant, but cheap to compute and groups candidates for the
-/// exact Hom_A check.
-fn action_rank_fingerprint(
-    module: &FDModule<SteenrodAlgebra>,
-    algebra: &Arc<SteenrodAlgebra>,
-) -> Vec<(i32, i32, usize)> {
-    let min_deg = module.min_degree();
-    let max_deg = match module.max_degree() {
-        Some(d) => d,
-        None => return vec![],
-    };
-    let p = module.prime();
-    let mut fingerprint = Vec::new();
-
-    for d in min_deg..=max_deg {
-        let n_d = module.dimension(d);
-        if n_d == 0 {
-            continue;
-        }
-        for out_deg in (d + 1)..=max_deg {
-            let op_deg = out_deg - d;
-            let n_out = module.dimension(out_deg);
-            if n_out == 0 {
-                continue;
-            }
-            for op_idx in algebra.generators(op_deg) {
-                // Build action matrix and compute rank via row reduction
-                let mut mat = Matrix::new(p, n_out, n_d);
-                for j in 0..n_d {
-                    let action = module.action(op_deg, op_idx, d, j);
-                    for i in 0..n_out {
-                        mat.row_mut(i).set_entry(j, action.entry(i));
-                    }
-                }
-                mat.row_reduce();
-                let rank = (0..n_out).filter(|&i| !mat.row(i).is_zero()).count();
-                if rank > 0 {
-                    fingerprint.push((d, op_deg, rank));
-                }
-            }
-        }
-    }
-    fingerprint
-}
-
-/// M ≅ N iff Hom_A(M, N) contains an invertible element.
-///
-/// Proof: an A-linear isomorphism is exactly an invertible A-module map.
-/// Hom_A(M, N) is the space of all A-module maps, so M ≅ N iff some f ∈ Hom_A(M, N)
-/// is invertible (i.e., each graded block F_d is full-rank).
-///
-/// Returns None if the Hom space is too large (dim > 20) to search.
-fn check_isomorphic(
-    m: &FDModule<SteenrodAlgebra>,
-    n: &FDModule<SteenrodAlgebra>,
-    algebra: &Arc<SteenrodAlgebra>,
-) -> Option<bool> {
-    let p = m.prime();
-    let min_deg = m.min_degree();
-    let max_deg = match m.max_degree() {
-        Some(d) => d,
-        None => return Some(m.max_degree() == n.max_degree()),
-    };
-
-    // Both must have same graded dims (already guaranteed by fingerprint, but check)
-    for d in min_deg..=max_deg {
-        if m.dimension(d) != n.dimension(d) {
-            return Some(false);
-        }
-    }
-
-    // Variables: F_d is n_d × n_d for each degree d. f: M → N.
-    let mut offsets: Vec<(i32, usize, usize)> = Vec::new();
-    let mut total_vars = 0usize;
-    for d in min_deg..=max_deg {
-        let nd = m.dimension(d);
-        if nd > 0 {
-            offsets.push((d, nd, total_vars));
-            total_vars += nd * nd;
-        }
-    }
-    if total_vars == 0 {
-        return Some(true);
-    }
-
-    let find_offset = |d: i32| -> Option<(usize, usize)> {
-        offsets.iter().find(|&&(deg, _, _)| deg == d).map(|&(_, nd, off)| (nd, off))
-    };
-
-    let constraints = build_hom_constraints(
-        m, n, algebra, &offsets, &offsets, total_vars, &find_offset, &find_offset,
-    );
-
-    if constraints.is_empty() {
-        // Unconstrained: all graded linear maps are A-linear. Check for invertible one.
-        if total_vars > 20 {
-            return None;
-        }
-        return check_invertible_in_space(total_vars, total_vars, &offsets, None);
-    }
-
-    let num_constraints = constraints.len();
-    let mut c_transpose = vec![vec![0u32; num_constraints]; total_vars];
-    for (ci, row) in constraints.iter().enumerate() {
-        for (vi, &val) in row.iter().enumerate() {
-            c_transpose[vi][ci] = val;
-        }
-    }
-    let (padded_cols, mut aug) = Matrix::augmented_from_vec(p, &c_transpose);
-    aug.row_reduce();
-    let kernel = aug.compute_kernel(padded_cols);
-    let dim = kernel.dimension();
-    if dim == 0 {
-        return Some(false);
-    }
-    check_invertible_in_space(dim, total_vars, &offsets, Some(&kernel))
-}
-
-/// Search a subspace of graded linear maps for an invertible element
-/// (one where each degree-block has full rank).
-fn check_invertible_in_space(
-    dim: usize,
-    total_vars: usize,
-    offsets: &[(i32, usize, usize)],
-    kernel: Option<&fp::matrix::Subspace>,
-) -> Option<bool> {
-    if dim > 20 {
-        return None;
-    }
-
-    let basis_vecs: Vec<Vec<u32>> = if let Some(k) = kernel {
-        k.basis()
-            .map(|slice| (0..total_vars).map(|i| slice.entry(i)).collect())
-            .collect()
-    } else {
-        (0..dim)
-            .map(|b| {
-                let mut v = vec![0u32; total_vars];
-                v[b] = 1;
-                v
-            })
-            .collect()
-    };
-
-    for bits in 1..(1u64 << dim) {
-        let mut f = vec![0u32; total_vars];
-        for (b, bv) in basis_vecs.iter().enumerate() {
-            if (bits >> b) & 1 == 1 {
-                for (i, &val) in bv.iter().enumerate() {
-                    f[i] ^= val;
-                }
-            }
-        }
-        if is_invertible(&f, offsets) {
-            return Some(true);
-        }
-    }
-    Some(false)
-}
-
-/// Check if a graded linear map is invertible (each degree-block has full rank mod 2).
-fn is_invertible(f: &[u32], offsets: &[(i32, usize, usize)]) -> bool {
-    for &(_, n, off) in offsets {
-        // Gaussian elimination on the n×n block
-        let mut mat = vec![0u64; n];
-        for i in 0..n {
-            for j in 0..n {
-                if f[off + i * n + j] != 0 {
-                    mat[i] |= 1u64 << j;
-                }
-            }
-        }
-        let mut rank = 0;
-        for col in 0..n {
-            let pivot = (rank..n).find(|&r| mat[r] & (1u64 << col) != 0);
-            let pivot = match pivot {
-                Some(p) => p,
-                None => continue,
-            };
-            mat.swap(rank, pivot);
-            for r in 0..n {
-                if r != rank && mat[r] & (1u64 << col) != 0 {
-                    mat[r] ^= mat[rank];
-                }
-            }
-            rank += 1;
-        }
-        if rank < n {
-            return false;
-        }
-    }
-    true
-}
-
-/// Deduplicate a list of modules up to A-module isomorphism.
-///
-/// Uses action-rank fingerprints for fast grouping, then exact Hom_A(M,N)
-/// computation within each group.
-fn dedup_isomorphism_classes(
-    modules: &[FDModule<SteenrodAlgebra>],
-    algebra: &Arc<SteenrodAlgebra>,
-) -> Vec<usize> {
-    // Group by fingerprint
-    let mut groups: HashMap<Vec<(i32, i32, usize)>, Vec<usize>> = HashMap::new();
-    for (i, m) in modules.iter().enumerate() {
-        let fp = action_rank_fingerprint(m, algebra);
-        groups.entry(fp).or_default().push(i);
-    }
-
-    let mut representatives: Vec<usize> = Vec::new();
-    for (_, group) in &groups {
-        // Within each fingerprint group, keep one representative per isomorphism class
-        let mut class_reps: Vec<usize> = Vec::new();
-        'outer: for &i in group {
-            for &rep in &class_reps {
-                match check_isomorphic(&modules[i], &modules[rep], algebra) {
-                    Some(true) => continue 'outer, // isomorphic to existing rep, skip
-                    Some(false) => {}               // not isomorphic, keep checking
-                    None => {}                      // inconclusive, treat as distinct
-                }
-            }
-            class_reps.push(i);
-        }
-        representatives.extend(class_reps);
-    }
-
-    representatives.sort();
-    representatives
 }
 
 // === Gallery TUI ===
@@ -1781,6 +1004,7 @@ impl GalleryApp {
         dims_label: String,
         picker: Picker,
         algebra: Arc<SteenrodAlgebra>,
+        hom_cache: HashMap<(usize, usize), HomResult>,
     ) -> Self {
         let filtered_indices: Vec<usize> = (0..entries.len()).collect();
         let mut list_state = ListState::default();
@@ -1799,7 +1023,7 @@ impl GalleryApp {
             algebra,
             resolved_cache: HashMap::new(),
             mark_source: None,
-            hom_cache: HashMap::new(),
+            hom_cache,
         }
     }
 
@@ -2162,6 +1386,7 @@ fn run_gallery(
     entries: Vec<GalleryEntry>,
     dims_label: String,
     algebra: Arc<SteenrodAlgebra>,
+    hom_cache: HashMap<(usize, usize), HomResult>,
 ) -> anyhow::Result<()> {
     // Probe terminal graphics protocol before entering raw mode
     let picker = match Picker::from_query_stdio() {
@@ -2189,7 +1414,7 @@ fn run_gallery(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = GalleryApp::new(entries, dims_label, picker, algebra);
+    let mut app = GalleryApp::new(entries, dims_label, picker, algebra, hom_cache);
 
     let result = (|| -> anyhow::Result<()> {
         loop {
@@ -2405,7 +1630,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let (mut indecomp_result, mut dim_end) = check_indecomposable(&module, &algebra);
+    let (mut indecomp_result, mut dim_end) = module.check_indecomposable();
 
     if require_indecomposable && indecomp_result != Some(true) {
         let mut attempt = 1;
@@ -2413,12 +1638,12 @@ fn main() -> anyhow::Result<()> {
             module = generate_module(&mut rng, false);
 
             // Fast pre-check: skip disconnected modules
-            if !is_connected(&module, &algebra) {
+            if !module.is_connected() {
                 attempt += 1;
                 continue;
             }
 
-            let result = check_indecomposable(&module, &algebra);
+            let result = module.check_indecomposable();
             indecomp_result = result.0;
             dim_end = result.1;
             if indecomp_result == Some(true) {
@@ -2495,16 +1720,16 @@ fn run_enumerate_mode(algebra: &Arc<SteenrodAlgebra>) -> anyhow::Result<()> {
     let total_cells: usize = dims.iter().sum();
     println!("Total cells: {}", total_cells);
 
-    let modules = enumerate_fd_modules(algebra, &graded_dim);
+    let modules = FDModule::enumerate(algebra, &graded_dim);
 
     // Filter to connected indecomposables
     let mut connected_count = 0usize;
     let mut indecomposables: Vec<FDModule<SteenrodAlgebra>> = Vec::new();
 
     for m in &modules {
-        if is_connected(m, algebra) {
+        if m.is_connected() {
             connected_count += 1;
-            let (result, _) = check_indecomposable(m, algebra);
+            let (result, _) = m.check_indecomposable();
             if result == Some(true) {
                 indecomposables.push(m.clone());
             }
@@ -2516,7 +1741,7 @@ fn run_enumerate_mode(algebra: &Arc<SteenrodAlgebra>) -> anyhow::Result<()> {
 
     // Deduplicate isomorphism classes
     eprint!("Deduplicating isomorphism classes...\r");
-    let rep_indices = dedup_isomorphism_classes(&indecomposables, algebra);
+    let rep_indices = FDModule::dedup_isomorphism_classes(&indecomposables);
     let before = indecomposables.len();
     let indecomposables: Vec<FDModule<SteenrodAlgebra>> =
         rep_indices.into_iter().map(|i| indecomposables[i].clone()).collect();
@@ -2548,8 +1773,13 @@ fn run_enumerate_mode(algebra: &Arc<SteenrodAlgebra>) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // TODO: scan_all_pairs is available but disabled pending review of
+    // map-lifting obstruction semantics (stem -1 results are misleading
+    // when the source or target module itself fails realization).
+    let hom_cache = HashMap::new();
+
     let dims_label = dims.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(",");
-    run_gallery(gallery_entries, dims_label, Arc::clone(algebra))
+    run_gallery(gallery_entries, dims_label, Arc::clone(algebra), hom_cache)
 }
 
 /// Check whether a module passes the realization obstruction test.
@@ -2653,4 +1883,74 @@ fn compute_hom(
         stem_minus_1,
         all_lift,
     })
+}
+
+/// Scan all ordered pairs (i, j) of modules for Hom spaces and map-lifting obstructions.
+///
+/// Optimisation: all modules share the same graded dimensions, so for a fixed source
+/// the resolution is built once and reused across all targets.
+fn scan_all_pairs(
+    modules: &[FDModule<SteenrodAlgebra>],
+    algebra: &Arc<SteenrodAlgebra>,
+) -> HashMap<(usize, usize), HomResult> {
+    use ext::chain_complex::HomCochainComplex;
+
+    let mut results = HashMap::new();
+    if modules.is_empty() {
+        return results;
+    }
+
+    // All modules share the same graded dimensions, so compute parameters once.
+    let max_deg = match modules[0].max_degree() {
+        Some(d) => d,
+        None => return results,
+    };
+    let min_deg = modules[0].min_degree();
+    let diam = max_deg - min_deg;
+    let s_max = diam + 4;
+    let hom_max = Bidegree::n_s(0, s_max);
+    let res_max = hom_max + Bidegree::n_s(max_deg, 1);
+
+    let n = modules.len();
+    for i in 0..n {
+        eprint!("Scanning maps from module {}/{}...\r", i + 1, n);
+
+        // Build resolution of source module once, reuse for all targets.
+        let sm: SteenrodModule = Arc::new(modules[i].clone());
+        let sm = Arc::new(sm);
+        let cc: Arc<ext::CCC> = Arc::new(ext::chain_complex::FiniteChainComplex::ccdz(sm));
+        let resolution = ext::resolution::Resolution::new(Arc::clone(&cc));
+        resolution.compute_through_stem(res_max);
+        algebra.compute_basis(hom_max.t() + max_deg + 2);
+        let resolution = Arc::new(resolution);
+
+        for j in 0..n {
+            let target_sm: SteenrodModule = Arc::new(modules[j].clone());
+            let target_arc: Arc<SteenrodModule> = Arc::new(target_sm);
+            let hom_cc = HomCochainComplex::new(Arc::clone(&resolution), target_arc);
+            hom_cc.compute_through_stem(hom_max);
+
+            let hom_dim = hom_cc.homology_dimension(Bidegree::n_s(0, 0));
+
+            let mut stem_minus_1 = Vec::new();
+            for s in 2..=diam + 2 {
+                let b = Bidegree::n_s(-1, s);
+                let dim = hom_cc.homology_dimension(b);
+                if dim > 0 {
+                    stem_minus_1.push((s, dim));
+                }
+            }
+
+            let all_lift = stem_minus_1.is_empty();
+
+            results.insert((i, j), HomResult {
+                hom_dim,
+                stem_minus_1,
+                all_lift,
+            });
+        }
+    }
+    eprintln!("Map scan complete: {} pairs checked.              ", n * n);
+
+    results
 }
