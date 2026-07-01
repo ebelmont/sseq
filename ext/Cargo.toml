@@ -71,6 +71,8 @@ nassau = []
 members = [
     "crates/algebra",
     "crates/bivec",
+    "crates/ehp-core",
+    "crates/ehp-cli",
     "crates/fp",
     "crates/maybe-rayon",
     "crates/once",

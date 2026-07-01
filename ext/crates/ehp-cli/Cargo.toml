@@ -1,0 +1,19 @@
+[package]
+name = "ehp-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ehp-sat"
+path = "src/main.rs"
+
+[dependencies]
+ehp-core = { path = "../ehp-core" }
+fp = { path = "../fp", default-features = false }
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.10"
+indicatif = "0.17"
+log = "0.4"
+serde_json = "1"
+rayon = "1.8"
+hashbrown = "0.14"
