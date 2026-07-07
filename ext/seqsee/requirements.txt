@@ -1,0 +1,7 @@
+# Third-party imports of main.py / jsonmaker.py / ehp_batch.py.
+# Pins follow the poetry constraints in the seqsee checkout's pyproject.toml
+# (python ^3.11, compact-json ^1, jinja2 ^3, jsonschema ^4, pandas ^2).
+jinja2>=3,<4
+jsonschema>=4,<5
+pandas>=2,<3
+compact-json>=1,<2

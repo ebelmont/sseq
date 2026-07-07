@@ -23,7 +23,13 @@
 //! - `EHP_R`          — starting page number (default: 2)
 //! - `SEQSEE_THEME`   — chart palette: "dark"/"light" (Catppuccin) or
 //!                      "teak"/"linen" (Finn Juhl dark/light). Default: "dark".
-//! - `SEQSEE_DIR`     — SeqSee directory containing seqsee_new/ (auto-detected if absent)
+//! - `EHP_SEQSEE`     — SeqSee scripts directory (contains main.py). Default:
+//!                      the vendored copy at ext/seqsee (deps from its
+//!                      requirements.txt), else an external ~/seqsee checkout.
+//! - `EHP_PYTHON`     — python used to run the SeqSee scripts (default:
+//!                      python3 for the vendored copy, the poetry venv's
+//!                      python for external checkouts)
+//! - `SEQSEE_DIR`     — legacy: external SeqSee checkout containing seqsee_new/
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, Write as _};
@@ -280,7 +286,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => {
             eprintln!("\nSeqSee not found. CSVs written to output/.");
-            eprintln!("Set SEQSEE_DIR or place seqsee_new/ at ../seqsee/seqsee_new");
+            eprintln!(
+                "Set EHP_SEQSEE (or restore the vendored copy at {})",
+                VENDORED_SEQSEE
+            );
             return Ok(());
         }
     };
@@ -2812,13 +2821,26 @@ fn clean_charts_dir(charts_dir: &Path) -> usize {
     removed
 }
 
-/// The SeqSee venv's python, resolved once. Calling it directly skips
-/// `poetry run`'s ~0.5-1s startup overhead on every invocation.
+/// The python used to run SeqSee scripts, resolved once.
+///
+/// - `EHP_PYTHON` overrides everything.
+/// - The vendored copy (ext/seqsee, detected by its requirements.txt) has no
+///   poetry env: plain `python3` is used, with deps from requirements.txt.
+/// - External checkouts: the poetry venv's python, probed once — calling it
+///   directly skips `poetry run`'s ~0.5-1s startup overhead per invocation.
 static SEQSEE_PYTHON: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 fn seqsee_python(seqsee_dir: &Path) -> Option<PathBuf> {
     SEQSEE_PYTHON
         .get_or_init(|| {
+            if let Ok(py) = std::env::var("EHP_PYTHON") {
+                return Some(PathBuf::from(py));
+            }
+            if seqsee_dir.join("requirements.txt").exists() {
+                // Vendored copy: no poetry env; use python3 from PATH
+                // (install deps with `pip install -r requirements.txt`).
+                return Some(PathBuf::from("python3"));
+            }
             let out = std::process::Command::new("poetry")
                 .args(["env", "info", "--executable"])
                 .current_dir(seqsee_dir)
@@ -3961,8 +3983,20 @@ fn save_all_known_diffs(
 // Find SeqSee directory (kept from original)
 // =============================================================================
 
+/// The SeqSee copy vendored into the repo (ext/seqsee) — see its README.md.
+const VENDORED_SEQSEE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../seqsee");
+
 fn find_seqsee_dir() -> Option<PathBuf> {
-    // Check env var first
+    // Explicit override first.
+    if let Ok(dir) = std::env::var("EHP_SEQSEE") {
+        let p = Path::new(&dir);
+        if p.join("main.py").exists() {
+            return Some(p.to_path_buf());
+        }
+        eprintln!("Warning: EHP_SEQSEE={} has no main.py; ignoring", dir);
+    }
+
+    // Legacy env var (external checkout root or the seqsee_new dir itself).
     if let Ok(dir) = std::env::var("SEQSEE_DIR") {
         let p = Path::new(&dir).join("seqsee_new");
         if p.join("jsonmaker.py").exists() {
@@ -3974,7 +4008,13 @@ fn find_seqsee_dir() -> Option<PathBuf> {
         }
     }
 
-    // Auto-detect common locations
+    // Vendored copy in this repo (self-contained default).
+    let vendored = Path::new(VENDORED_SEQSEE);
+    if vendored.join("main.py").exists() {
+        return Some(vendored.to_path_buf());
+    }
+
+    // Auto-detect external checkouts (cwd-relative)
     let candidates = [
         "../seqsee/seqsee_new",
         "../../seqsee/seqsee_new",

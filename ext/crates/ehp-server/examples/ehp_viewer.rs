@@ -8,7 +8,8 @@
 //!
 //! By default looks for ~/ehp-sat-rs/data/E2.ehp. Override with EHP_DATA env var.
 //! Set EHP_MAX_T to change the max total degree (default 20).
-//! Set SEQSEE_DIR to point to the SeqSee directory (default ~/seqsee/seqsee).
+//! Set EHP_SEQSEE (or legacy SEQSEE_DIR) to point to the SeqSee directory
+//! (default: the vendored copy at ext/seqsee, else ~/seqsee/seqsee).
 
 use std::time::Instant;
 
@@ -16,6 +17,8 @@ use ehp_server::ServerState;
 
 const DEFAULT_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/E2");
 const DEFAULT_MAX_T: i32 = 20;
+/// The SeqSee copy vendored into the repo (ext/seqsee) — see its README.md.
+const VENDORED_SEQSEE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../seqsee");
 const DEFAULT_SEQSEE: &str = concat!(env!("HOME"), "/seqsee/seqsee");
 
 #[tokio::main]
@@ -31,8 +34,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
-    let seqsee_dir =
-        std::env::var("SEQSEE_DIR").unwrap_or_else(|_| DEFAULT_SEQSEE.to_string());
+    // EHP_SEQSEE → legacy SEQSEE_DIR → vendored ext/seqsee → external checkout.
+    let seqsee_dir = std::env::var("EHP_SEQSEE")
+        .or_else(|_| std::env::var("SEQSEE_DIR"))
+        .unwrap_or_else(|_| {
+            if std::path::Path::new(VENDORED_SEQSEE).join("main.py").exists() {
+                VENDORED_SEQSEE.to_string()
+            } else {
+                DEFAULT_SEQSEE.to_string()
+            }
+        });
 
     eprintln!("EHP Spectral Sequence Viewer");
     eprintln!("  data:    {}", data_path);
