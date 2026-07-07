@@ -30,6 +30,12 @@ impl DiffVar {
     }
 }
 
+/// Leibniz pairs that were skipped because a participating degree was excluded,
+/// keyed by the excluded degree (stable-representative form). Used by the
+/// interpage machinery to re-activate exactly these constraints when a degree
+/// becomes certain (ports the original's `excluded_Yconstraints`).
+pub type ExcludedLeibniz = HashMap<Tridegree, Vec<(Tridegree, Tridegree)>>;
+
 /// The constraint system: a list of XOR equations over GF(2).
 ///
 /// Each constraint is a list of variable indices whose XOR equals a RHS value.
@@ -45,6 +51,8 @@ pub struct ConstraintSystem {
     pub rows: Vec<FpVector>,
     /// RHS values.
     pub rhs: Vec<bool>,
+    /// Leibniz pairs skipped due to excluded degrees (see [`ExcludedLeibniz`]).
+    pub excluded_leibniz: ExcludedLeibniz,
 }
 
 impl ConstraintSystem {
@@ -58,6 +66,7 @@ impl ConstraintSystem {
             var_index,
             rows: Vec::new(),
             rhs: Vec::new(),
+            excluded_leibniz: ExcludedLeibniz::new(),
         }
     }
 
@@ -104,13 +113,68 @@ impl ConstraintSystem {
     }
 }
 
+/// Kill-switch for the target-only exclusion relaxation (env
+/// `EHP_RELAX_TARGET_EXCLUDE`, read once). Default ON; set to `0` to restore
+/// the strict behavior: excluded degrees never get differential variables and
+/// every Leibniz pair touching an excluded degree is skipped. When ON, a
+/// degree excluded *only* as the target of an unknown incoming differential
+/// (see [`crate::page::SATPage::target_only_exclude`]) still gets its
+/// outgoing d_r variables, and Leibniz pairs may treat it as the constrained
+/// product degree.
+pub fn relax_target_exclude() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("EHP_RELAX_TARGET_EXCLUDE").map_or(true, |v| v != "0")
+    })
+}
+
+/// Enumerate the differential variables for a single source tridegree
+/// (empty unless both the source and the diff target are unexcluded, in
+/// bounds, and have nonzero dimension).
+///
+/// With [`relax_target_exclude`] ON, a source degree whose exclusion is
+/// target-only still gets variables: its basis is real (at worst over-kept),
+/// so its outgoing differential is representable. The diff target must still
+/// be unexcluded (its coordinates must be trustworthy for the matrix rows).
+pub fn make_basis_single(page: &SATPage, t: Tridegree) -> Vec<DiffVar> {
+    let r = page.r;
+    let mut vars = Vec::new();
+
+    if t.n > t.s + 2 {
+        return vars;
+    }
+    let diff_target = t.diff_target(r);
+
+    let src_hard_excluded = page.is_excluded(t)
+        && !(relax_target_exclude() && page.is_excluded_target_only(t));
+    if src_hard_excluded || page.is_excluded(diff_target) {
+        return vars;
+    }
+    if !page.is_in_computed_polygon_source(t) || !page.is_in_computed_polygon_source(diff_target) {
+        return vars;
+    }
+
+    let src_dim = page.dim_at(t);
+    let tgt_dim = page.dim_at(diff_target);
+
+    if src_dim == 0 || tgt_dim == 0 {
+        return vars;
+    }
+
+    for row in 0..tgt_dim {
+        for col in 0..src_dim {
+            vars.push(DiffVar::new(t.n, t.s, t.f, row as u16, col as u16));
+        }
+    }
+    vars
+}
+
 /// Enumerate all differential variables for the page.
 ///
 /// Each variable represents entry d_r[row, col] at tridegree (n, s, f),
 /// where the differential goes from (n, s, f) to (n, s-1, f+r).
 /// n is capped at s+2 (stable range).
 pub fn make_basis(page: &SATPage, cutoff: i32) -> Vec<DiffVar> {
-    let r = page.r;
     let mut vars = Vec::new();
 
     let mut keys: Vec<Tridegree> = page.dimension.keys().copied().collect();
@@ -120,32 +184,7 @@ pub fn make_basis(page: &SATPage, cutoff: i32) -> Vec<DiffVar> {
         if t.s + t.f > cutoff {
             continue;
         }
-        if t.n > t.s + 2 {
-            continue;
-        }
-        let diff_target = t.diff_target(r);
-
-        if page.is_excluded(t) || page.is_excluded(diff_target) {
-            continue;
-        }
-        if !page.is_in_computed_polygon_source(t)
-            || !page.is_in_computed_polygon_source(diff_target)
-        {
-            continue;
-        }
-
-        let src_dim = page.dim_at(t);
-        let tgt_dim = page.dim_at(diff_target);
-
-        if src_dim == 0 || tgt_dim == 0 {
-            continue;
-        }
-
-        for row in 0..tgt_dim {
-            for col in 0..src_dim {
-                vars.push(DiffVar::new(t.n, t.s, t.f, row as u16, col as u16));
-            }
-        }
+        vars.extend(make_basis_single(page, t));
     }
 
     vars
@@ -155,7 +194,10 @@ pub fn make_basis(page: &SATPage, cutoff: i32) -> Vec<DiffVar> {
 /// of `A * D[src_tridegree]`, where D is the unknown differential matrix.
 ///
 /// Returns a list of lists: for each entry of the result, the list of variable
-/// indices whose XOR equals that entry.
+/// indices whose XOR equals that entry. Returns `None` if a referenced
+/// differential is not a variable in `var_index` — silently dropping the term
+/// would corrupt the constraint (the original raises here), so the caller must
+/// skip the whole constraint set.
 fn matrix_mult_left(
     a: &Matrix,
     src_n: i32,
@@ -164,7 +206,7 @@ fn matrix_mult_left(
     src_dim: usize,
     var_index: &HashMap<DiffVar, usize>,
     col: Option<usize>,
-) -> Vec<Vec<usize>> {
+) -> Option<Vec<Vec<usize>>> {
     let a_rows = a.rows();
     let n_var = src_n.min(src_s + 2);
 
@@ -179,18 +221,17 @@ fn matrix_mult_left(
             let mut indices = Vec::new();
             for k in a.row(i).iter_nonzero().map(|(k, _)| k) {
                 let var = DiffVar::new(n_var, src_s, src_f, k as u16, j as u16);
-                if let Some(&idx) = var_index.get(&var) {
-                    indices.push(idx);
-                }
+                indices.push(*var_index.get(&var)?);
             }
             result.push(indices);
         }
     }
-    result
+    Some(result)
 }
 
 /// Symbolic matrix-vector product: computes which variables appear in each entry
 /// of `D[tgt_tridegree] * A`, where D is the unknown differential matrix.
+/// `None` on a missing variable, like [`matrix_mult_left`].
 fn matrix_mult_right(
     a: &Matrix,
     tgt_n: i32,
@@ -200,7 +241,7 @@ fn matrix_mult_right(
     tgt_dim: usize,
     _src_dim: usize,
     var_index: &HashMap<DiffVar, usize>,
-) -> Vec<Vec<usize>> {
+) -> Option<Vec<Vec<usize>>> {
     let a_cols = a.columns();
     let a_rows = a.rows(); // = B_cols in Python = source dimension of D
     let n_var = tgt_n.min(tgt_s + 2);
@@ -215,15 +256,13 @@ fn matrix_mult_right(
             for t in 0..a_rows {
                 if mat_get(&a, t, j) {
                     let var = DiffVar::new(n_var, tgt_s, tgt_f, i as u16, t as u16);
-                    if let Some(&idx) = var_index.get(&var) {
-                        indices.push(idx);
-                    }
+                    indices.push(*var_index.get(&var)?);
                 }
             }
             result.push(indices);
         }
     }
-    result
+    Some(result)
 }
 
 /// Compute the symmetric difference of two lists of variable indices.
@@ -365,6 +404,14 @@ pub fn make_naturality_constraint_single(
     let diff_tgt = tgt.diff_target(r);
 
     // Check bounds
+    // The square is only trustworthy r-1 inside the cutoff (the original's
+    // `src_s + src_f + r - 1 <= max_t` check, applied to both columns).
+    if let Some(max_t) = page.max_t {
+        if src.s + src.f + r - 1 > max_t || tgt.s + tgt.f + r - 1 > max_t {
+            return Vec::new();
+        }
+    }
+
     let all_trideg = [src, diff_src, tgt, diff_tgt];
     for &td in &all_trideg {
         if page.is_excluded(td) || !page.is_in_computed_polygon_source(td) || !page.is_in_computed_polygon(td) {
@@ -381,15 +428,10 @@ pub fn make_naturality_constraint_single(
         return Vec::new();
     }
 
-    // Get map matrices (transposed, per Python convention)
-    let phi_source = match page.map_matrix(map_kind, src) {
-        Some(m) => mat_transpose(&m),
-        None => return Vec::new(),
-    };
-    let phi_target = match page.map_matrix(map_kind, diff_src) {
-        Some(m) => mat_transpose(&m),
-        None => return Vec::new(),
-    };
+    // Get map matrices (transposed, per Python convention). Missing data means
+    // the zero map (or stable-E identity) — the square still constrains.
+    let phi_source = mat_transpose(&page.map_matrix(map_kind, src));
+    let phi_target = mat_transpose(&page.map_matrix(map_kind, diff_src));
 
     // Check dimensions
     if phi_source.rows() != tgt_dim || phi_source.columns() != src_dim {
@@ -399,28 +441,38 @@ pub fn make_naturality_constraint_single(
         return Vec::new();
     }
 
-    // LHS: phi_target * D[src]
-    let lhs = matrix_mult_left(
-        &phi_target,
-        src.n,
-        src.s,
-        src.f,
-        src_dim,
-        var_index,
-        None,
-    );
-
-    // RHS: D[tgt] * phi_source
-    let rhs = matrix_mult_right(
-        &phi_source,
-        tgt.n,
-        tgt.s,
-        tgt.f,
-        r,
-        diff_tgt_dim,
-        tgt_dim,
-        var_index,
-    );
+    // LHS: phi_target * D[src] ; RHS: D[tgt] * phi_source. A missing variable
+    // means the square references a differential outside the system — skip it
+    // entirely rather than emit a corrupted constraint (the original raises).
+    let mult = || -> Option<(Vec<Vec<usize>>, Vec<Vec<usize>>)> {
+        let lhs = matrix_mult_left(
+            &phi_target,
+            src.n,
+            src.s,
+            src.f,
+            src_dim,
+            var_index,
+            None,
+        )?;
+        let rhs = matrix_mult_right(
+            &phi_source,
+            tgt.n,
+            tgt.s,
+            tgt.f,
+            r,
+            diff_tgt_dim,
+            tgt_dim,
+            var_index,
+        )?;
+        Some((lhs, rhs))
+    };
+    let Some((lhs, rhs)) = mult() else {
+        debug!(
+            "naturality {} square at ({},{},{}) references a non-variable differential — skipped",
+            map_kind.name(), t.n, t.s, t.f
+        );
+        return Vec::new();
+    };
 
     equals_rel(&lhs, &rhs)
 }
@@ -430,14 +482,17 @@ pub fn make_naturality_constraints(
     page: &SATPage,
     cutoff: i32,
     map_kind: MapKind,
-    max_n: i32,
     var_index: &HashMap<DiffVar, usize>,
 ) -> Vec<Vec<usize>> {
     let mut constraints = Vec::new();
 
+    // The original iterates n in [2, s+2]: stable copies (n > s+2) share the
+    // representative's variables, and map data is only stored at the
+    // representative — with missing-data-means-zero semantics, generating
+    // their squares directly would emit wrong constraints.
     for s in 0..=cutoff {
         for f in 0..=(cutoff - s) {
-            for n in 2..=max_n {
+            for n in 2..=(s + 2) {
                 let t = Tridegree::new(n, s, f);
                 let new = make_naturality_constraint_single(page, t, map_kind, var_index);
                 constraints.extend(new);
@@ -452,11 +507,16 @@ pub fn make_naturality_constraints(
 /// Generate Leibniz constraints for a single pair of degrees.
 ///
 /// Encodes: d(x * E(y)) = x * d(E(y)) + d(x) * y
+///
+/// If `excluded_out` is provided and the pair is skipped because a
+/// participating degree is excluded, the pair is recorded under each excluded
+/// degree (stable-representative form) so it can be re-activated later.
 pub fn make_leibniz_constraint_single(
     page: &SATPage,
     deg1: Tridegree,
     deg2: Tridegree,
     var_index: &HashMap<DiffVar, usize>,
+    mut excluded_out: Option<&mut ExcludedLeibniz>,
 ) -> Vec<Vec<usize>> {
     let r = page.r;
 
@@ -484,10 +544,36 @@ pub fn make_leibniz_constraint_single(
         return Vec::new();
     }
 
-    for &td in &all_trideg {
+    let relax = relax_target_exclude();
+    let mut excluded_any = false;
+    for (i, &td) in all_trideg.iter().enumerate() {
         if page.is_excluded(td) {
-            return Vec::new();
+            // Position 5 = prod_deg, the source of the differential this pair
+            // constrains. A target-only exclusion there is safe: the degree's
+            // basis is real but possibly over-kept, and forcing the (lifted)
+            // differential on an over-kept class is at worst gauge-fixing a
+            // phantom — never wrong about surviving classes — provided every
+            // OTHER participating degree is clean (checked here: any other
+            // excluded participant still skips the pair). Such pairs are
+            // emitted, so they are deliberately NOT recorded in
+            // `excluded_out` (nothing to re-activate, and replaying them
+            // after an un-exclusion could re-emit in changed coordinates).
+            if relax && i == 5 && page.is_excluded_target_only(td) {
+                continue;
+            }
+            excluded_any = true;
+            if let Some(map) = excluded_out.as_deref_mut() {
+                let rep = if td.n > td.s + 2 {
+                    Tridegree::new(td.s + 2, td.s, td.f)
+                } else {
+                    td
+                };
+                map.entry(rep).or_default().push((deg1, deg2));
+            }
         }
+    }
+    if excluded_any {
+        return Vec::new();
     }
 
     let dim1 = page.dim_at(deg1);
@@ -500,17 +586,15 @@ pub fn make_leibniz_constraint_single(
 
     let mut all_constraints = Vec::new();
 
-    // Get E map matrix at deg2
+    // Get E map matrix at deg2 (zero / stable-identity when no data — the
+    // relation still constrains the other terms)
     let e_matrix = page.map_matrix(MapKind::E, deg2);
 
     for i2 in 0..dim2 {
         let elt2_vec = vec_basis(dim2, i2);
 
         // Compute E(elt2)
-        let e_elt2_vec = match &e_matrix {
-            Some(mat) => mat_vec_mul(&mat, &elt2_vec),
-            None => continue,
-        };
+        let e_elt2_vec = mat_vec_mul(&e_matrix, &elt2_vec);
 
         for i1 in 0..dim1 {
             // Compute product elt1 * E(elt2)
@@ -525,11 +609,22 @@ pub fn make_leibniz_constraint_single(
             // LHS: d_r(elt1 * E(elt2))
             // Python: prod_mat = column matrix (prod_dim x 1)
             // matrix_mult_right computes D[prod_deg] * prod_mat
+            // A missing variable anywhere in the relation means it references
+            // a differential outside the system; skip the whole pair rather
+            // than emit a corrupted constraint (the original raises here).
+            let skip = || {
+                debug!(
+                    "leibniz pair ({},{},{}) x ({},{},{}) references a non-variable differential — skipped",
+                    deg1.n, deg1.s, deg1.f, deg2.n, deg2.s, deg2.f
+                );
+                Vec::new()
+            };
+
             let lhs = if prod_vec.is_zero() {
                 vec![vec![]; prod_dr_dim]
             } else {
                 let prod_col = mat_col_matrix(&prod_vec);
-                matrix_mult_right(
+                match matrix_mult_right(
                     &prod_col,
                     prod_deg.n,
                     prod_deg.s,
@@ -538,7 +633,10 @@ pub fn make_leibniz_constraint_single(
                     prod_dr_dim,
                     page.dim_at(prod_deg),
                     var_index,
-                )
+                ) {
+                    Some(v) => v,
+                    None => return skip(),
+                }
             };
 
             // RHS1: Ytilde(elt1, d_r(E(elt2)))
@@ -579,18 +677,14 @@ pub fn make_leibniz_constraint_single(
                 if mat_is_zero(&ytil) {
                     vec![vec![]; prod_dr_dim]
                 } else {
-                    // Get E matrix at d_deg2 (transposed)
-                    let e_mat_at_d = match page.map_matrix(MapKind::E, d_deg2) {
-                        Some(m) => mat_transpose(&m),
-                        None => {
-                            continue;
-                        }
-                    };
+                    // Get E matrix at d_deg2 (transposed); zero when no data —
+                    // the constraint lhs = rhs2 must still be emitted.
+                    let e_mat_at_d = mat_transpose(&page.map_matrix(MapKind::E, d_deg2));
 
                     // Ytil * E_mat gives the combined matrix
                     let combined = mat_mul(&ytil, &e_mat_at_d);
 
-                    matrix_mult_left(
+                    match matrix_mult_left(
                         &combined,
                         deg2.n,
                         deg2.s,
@@ -598,7 +692,10 @@ pub fn make_leibniz_constraint_single(
                         dim2,
                         var_index,
                         Some(i2),
-                    )
+                    ) {
+                        Some(v) => v,
+                        None => return skip(),
+                    }
                 }
             };
 
@@ -637,7 +734,7 @@ pub fn make_leibniz_constraint_single(
                 if mat_is_zero(&ytil2) {
                     vec![vec![]; prod_dr_dim]
                 } else {
-                    matrix_mult_left(
+                    match matrix_mult_left(
                         &ytil2,
                         deg1.n,
                         deg1.s,
@@ -645,7 +742,10 @@ pub fn make_leibniz_constraint_single(
                         dim1,
                         var_index,
                         Some(i1),
-                    )
+                    ) {
+                        Some(v) => v,
+                        None => return skip(),
+                    }
                 }
             };
 
@@ -659,14 +759,16 @@ pub fn make_leibniz_constraint_single(
     all_constraints
 }
 
-/// Generate all Leibniz constraints.
+/// Generate all Leibniz constraints, plus the map of pairs skipped because a
+/// degree was excluded (keyed by the excluded degree).
 pub fn make_leibniz_constraints(
     page: &SATPage,
     cutoff: i32,
     var_index: &HashMap<DiffVar, usize>,
-) -> Vec<Vec<usize>> {
+) -> (Vec<Vec<usize>>, ExcludedLeibniz) {
     let _r = page.r;
     let mut constraints = Vec::new();
+    let mut excluded = ExcludedLeibniz::new();
 
     // Index degrees by n for efficient lookup
     let mut degrees_by_n: HashMap<i32, Vec<(i32, i32)>> = HashMap::new();
@@ -676,9 +778,25 @@ pub fn make_leibniz_constraints(
         }
     }
 
+    // Sphere bounds must come from the DATA, not the stem cutoff: the second
+    // factor of a Ytilde pair lives at th2 = th1 + s1 - 1, so h_i-multiplication
+    // pairs (h_i at sphere ≈ n + s) sit far beyond the stem cutoff. Bounding
+    // th1/th2 by `cutoff` silently dropped every such pair — losing exactly
+    // the h0/h1 Leibniz forcings — whenever n + s exceeded max_t. (The Python
+    // original has the same guard, but its production runs used tot ≈ 130 so
+    // it never triggered.) High spheres carry only tiny stems, so the wider
+    // loop is cheap.
+    let max_data_n = page
+        .dimension
+        .iter()
+        .filter(|(_, &d)| d > 0)
+        .map(|(t, _)| t.n)
+        .max()
+        .unwrap_or(cutoff);
+
     for s3 in 0..=cutoff {
         for f3 in 1..=(cutoff - s3) {
-            for th1 in 2..=cutoff {
+            for th1 in 2..=max_data_n {
                 let source_degrees = match degrees_by_n.get(&th1) {
                     Some(v) => v,
                     None => continue,
@@ -688,22 +806,32 @@ pub fn make_leibniz_constraints(
                     let f2 = f3 - f1;
                     let s2 = s3 - s1;
 
-                    if th2 > cutoff {
+                    if th2 > max_data_n {
                         continue;
                     }
 
                     let deg1 = Tridegree::new(th1, s1, f1);
                     let deg2 = Tridegree::new(th2, s2, f2);
 
-                    let new = make_leibniz_constraint_single(page, deg1, deg2, var_index);
+                    let new = make_leibniz_constraint_single(
+                        page,
+                        deg1,
+                        deg2,
+                        var_index,
+                        Some(&mut excluded),
+                    );
                     constraints.extend(new);
                 }
             }
         }
     }
 
-    debug!("Generated {} Leibniz constraints", constraints.len());
-    deduplicate_constraints(constraints)
+    debug!(
+        "Generated {} Leibniz constraints ({} excluded degrees recorded)",
+        constraints.len(),
+        excluded.len()
+    );
+    (deduplicate_constraints(constraints), excluded)
 }
 
 /// Generate constraints for known differential values.
@@ -715,9 +843,121 @@ pub fn make_known_constraints(
     for (var, &val) in known {
         if let Some(&idx) = var_index.get(var) {
             constraints.push((vec![idx], val));
+        } else {
+            log::warn!(
+                "known diff d({},{},{})[{},{}] = {} has no variable (zero dims or out of range) — NOT enforced",
+                var.n, var.s, var.f, var.row, var.col, val as u8,
+            );
         }
     }
     constraints
+}
+
+/// Extend the variable list so every user-asserted (known) differential is
+/// representable, even where automatic variable creation skipped the degree.
+///
+/// `make_basis` skips degrees that are excluded (uncertainty from the previous
+/// page) or outside the polygon/cutoff — right for *derived* constraints, but
+/// it made explicitly asserted differentials silently unenforceable on E₃ and
+/// higher (E₂ has no exclusions). A known diff is ground truth the user takes
+/// responsibility for, so we add the full variable block for its degree pair;
+/// the pinned entry becomes a constraint while the remaining entries stay
+/// free (honestly unknown). Naturality/Leibniz at excluded degrees remain
+/// disabled, and turning still zeroes the matrix while any entry is unknown.
+fn add_known_diff_vars(page: &SATPage, known: &HashMap<DiffVar, bool>, vars: &mut Vec<DiffVar>) {
+    let r = page.r;
+    let mut have: hashbrown::HashSet<(i32, i32, i32)> =
+        vars.iter().map(|v| (v.n, v.s, v.f)).collect();
+
+    let mut degrees: Vec<Tridegree> = known
+        .keys()
+        .map(|dv| {
+            let n_var = dv.n.min(dv.s + 2);
+            Tridegree::new(n_var, dv.s, dv.f)
+        })
+        .collect();
+    degrees.sort();
+    degrees.dedup();
+
+    for t in degrees {
+        if have.contains(&(t.n, t.s, t.f)) {
+            continue;
+        }
+        let src_dim = page.dim_at(t);
+        let tgt_dim = page.dim_at(t.diff_target(r));
+        if src_dim == 0 || tgt_dim == 0 {
+            // No classes to connect — make_known_constraints will warn.
+            continue;
+        }
+        debug!(
+            "adding variable block at ({},{},{}) for user-asserted d_{} (degree was excluded or out of bounds)",
+            t.n, t.s, t.f, r,
+        );
+        have.insert((t.n, t.s, t.f));
+        for row in 0..tgt_dim {
+            for col in 0..src_dim {
+                vars.push(DiffVar::new(t.n, t.s, t.f, row as u16, col as u16));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tridegree::Tridegree;
+
+    /// User-asserted differentials must be representable even at
+    /// uncertainty-excluded degrees (this is what makes click-add work on
+    /// E₃ and higher, where exclude sets are nonempty).
+    #[test]
+    fn known_diff_var_created_at_excluded_degree() {
+        let mut page = SATPage::new(2);
+        let src = Tridegree::new(2, 1, 1);
+        let tgt = src.diff_target(2);
+        page.dimension.insert(src, 2);
+        page.dimension.insert(tgt, 1);
+        page.exclude_set.insert(src);
+
+        // Without a known diff, the excluded degree gets no variables.
+        let sys = build_constraint_system(&page, 10, &HashMap::new());
+        assert_eq!(sys.num_vars, 0);
+
+        // A user-asserted value forces the full 1×2 block plus its constraint.
+        let mut known = HashMap::new();
+        known.insert(DiffVar::new(2, 1, 1, 0, 1), true);
+        let sys = build_constraint_system(&page, 10, &known);
+        assert_eq!(sys.num_vars, 2);
+        assert!(sys.var_index.contains_key(&DiffVar::new(2, 1, 1, 0, 1)));
+        assert_eq!(sys.num_constraints(), 1);
+    }
+
+    /// A source degree excluded only as the target of an unknown incoming
+    /// differential still gets its d_r variables (over-kept basis is real);
+    /// hard exclusions and excluded diff targets still block.
+    #[test]
+    fn target_only_excluded_source_keeps_variables() {
+        if !relax_target_exclude() {
+            return; // running with EHP_RELAX_TARGET_EXCLUDE=0
+        }
+        let mut page = SATPage::new(2);
+        let src = Tridegree::new(2, 1, 1);
+        let tgt = src.diff_target(2);
+        page.dimension.insert(src, 2);
+        page.dimension.insert(tgt, 1);
+
+        // Hard exclusion: no vars.
+        page.exclude_set.insert(src);
+        assert!(make_basis_single(&page, src).is_empty());
+
+        // Target-only exclusion: the full 1×2 block exists.
+        page.target_only_exclude.insert(src);
+        assert_eq!(make_basis_single(&page, src).len(), 2);
+
+        // An excluded diff target still blocks regardless.
+        page.exclude_set.insert(tgt);
+        assert!(make_basis_single(&page, src).is_empty());
+    }
 }
 
 /// Deduplicate constraints by sorting and removing duplicates.
@@ -740,19 +980,19 @@ pub fn build_constraint_system(
     cutoff: i32,
     known_diffs: &HashMap<DiffVar, bool>,
 ) -> ConstraintSystem {
-    let vars = make_basis(page, cutoff);
+    let mut vars = make_basis(page, cutoff);
+    add_known_diff_vars(page, known_diffs, &mut vars);
     let var_index: HashMap<DiffVar, usize> =
         vars.iter().enumerate().map(|(i, v)| (*v, i)).collect();
 
     debug!("Variable count: {}", vars.len());
 
     let mut system = ConstraintSystem::new(vars);
-    let max_n = page.max_n.unwrap_or(cutoff);
 
     // Naturality constraints for E, H, P
     for map_kind in MapKind::all() {
         let nat_constraints =
-            make_naturality_constraints(page, cutoff, map_kind, max_n, &var_index);
+            make_naturality_constraints(page, cutoff, map_kind, &var_index);
         debug!(
             "{} naturality constraints: {}",
             map_kind.name(),
@@ -764,11 +1004,12 @@ pub fn build_constraint_system(
     }
 
     // Leibniz constraints
-    let leibniz_constraints = make_leibniz_constraints(page, cutoff, &var_index);
+    let (leibniz_constraints, excluded_leibniz) = make_leibniz_constraints(page, cutoff, &var_index);
     debug!("Leibniz constraints: {}", leibniz_constraints.len());
     for c in leibniz_constraints {
         system.add_constraint_indices(&c, false);
     }
+    system.excluded_leibniz = excluded_leibniz;
 
     // Known constraints
     let known = make_known_constraints(known_diffs, &var_index);

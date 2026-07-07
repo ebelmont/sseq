@@ -9,12 +9,16 @@ use crate::tridegree::Tridegree;
 
 /// Map table: stores the matrix of a map (E, H, or P) at each source tridegree.
 /// The matrix has dimensions src_dim × tgt_dim (maps source basis vectors to target).
+///
+/// Matrices are behind `Arc` so cloning a table (the interpage overlay clones
+/// the whole page per trial) shares the fp storage instead of deep-copying it.
+#[derive(Clone)]
 pub struct MapTable {
     pub kind: MapKind,
     /// Matrix of the map at each source tridegree.
     /// Convention: rows = source basis vectors, columns = target coordinates.
     /// So applying the map to element v gives v * matrix.
-    pub matrices: HashMap<Tridegree, Matrix>,
+    pub matrices: HashMap<Tridegree, std::sync::Arc<Matrix>>,
 }
 
 impl MapTable {
@@ -29,7 +33,7 @@ impl MapTable {
     pub fn apply(&self, elem: &Element, target_dim: usize) -> Element {
         let target_deg = self.kind.target_degree(elem.degree);
         if let Some(mat) = self.matrices.get(&elem.degree) {
-            let result = mat_vec_mul(mat, &elem.vec);
+            let result = mat_vec_mul(mat.as_ref(), &elem.vec);
             Element::new(target_deg, result)
         } else {
             Element::zero(target_deg, target_dim)
@@ -38,16 +42,17 @@ impl MapTable {
 
     /// Get the matrix at a tridegree.
     pub fn matrix_at(&self, t: Tridegree) -> Option<&Matrix> {
-        self.matrices.get(&t)
+        self.matrices.get(&t).map(|a| a.as_ref())
     }
 
     /// Set the matrix at a tridegree.
     pub fn set_matrix(&mut self, t: Tridegree, mat: Matrix) {
-        self.matrices.insert(t, mat);
+        self.matrices.insert(t, std::sync::Arc::new(mat));
     }
 }
 
 /// One page E_r of the spectral sequence.
+#[derive(Clone)]
 pub struct SATPage {
     pub r: i32,
     /// Dimension at each tridegree.
@@ -62,6 +67,11 @@ pub struct SATPage {
     pub names: HashMap<String, String>,
     /// Multiplication pairs: for each (n,s,f) with s>0 or f>0,
     /// list of y-degrees (n2,s2,f2) such that we have products in E_{n+s}.
+    ///
+    /// NOTE: no longer populated anywhere — nothing in the pipeline reads it
+    /// (constraint generation enumerates pairs itself), and building it cost
+    /// ~13% of startup. Call [`SATPage::build_pairs`] explicitly if a future
+    /// consumer needs it.
     pub pairs: HashMap<Tridegree, Vec<Tridegree>>,
     /// Maximum values for bounds checking.
     pub max_n: Option<i32>,
@@ -70,6 +80,15 @@ pub struct SATPage {
     pub max_t: Option<i32>,
     /// Excluded tridegrees.
     pub exclude_set: hashbrown::HashSet<Tridegree>,
+    /// Subset of `exclude_set`: degrees excluded *only* as the target of an
+    /// unknown incoming differential (no unknown outgoing d_r of their own,
+    /// not carried forward from a prior page). Under partial turning their
+    /// basis is real but possibly over-kept (it surjects onto the true page),
+    /// so selected constraints there stay sound — see
+    /// [`crate::pageturning::make_next_exclude_set`] and the
+    /// `EHP_RELAX_TARGET_EXCLUDE` kill-switch. Not serialized (`exclude_set`
+    /// isn't either; both are recomputed when pages are built).
+    pub target_only_exclude: hashbrown::HashSet<Tridegree>,
 }
 
 impl SATPage {
@@ -91,6 +110,31 @@ impl SATPage {
             max_f: None,
             max_t: None,
             exclude_set: hashbrown::HashSet::new(),
+            target_only_exclude: hashbrown::HashSet::new(),
+        }
+    }
+
+    /// Clone for use as a trial overlay page: identical to `clone()` except
+    /// `pairs` and `names` are left empty — nothing on the interpage
+    /// propagation path reads them (`pairs` is only consumed by the startup
+    /// pair enumeration and `names` by chart export), and `pairs` is the
+    /// single largest structure on the page, so skipping them makes the
+    /// per-trial clone far cheaper.
+    pub fn overlay_clone(&self) -> SATPage {
+        SATPage {
+            r: self.r,
+            dimension: self.dimension.clone(),
+            page: self.page.clone(),
+            products: self.products.clone(),
+            maps: self.maps.clone(),
+            names: HashMap::new(),
+            pairs: HashMap::new(),
+            max_n: self.max_n,
+            max_s: self.max_s,
+            max_f: self.max_f,
+            max_t: self.max_t,
+            exclude_set: self.exclude_set.clone(),
+            target_only_exclude: self.target_only_exclude.clone(),
         }
     }
 
@@ -116,9 +160,23 @@ impl SATPage {
         tris
     }
 
-    /// Get the map matrix at a source tridegree (transposed per Python convention).
-    pub fn map_matrix(&self, kind: MapKind, t: Tridegree) -> Option<Matrix> {
-        self.maps.get(&kind).and_then(|mt| mt.matrix_at(t).cloned())
+    /// Get the map matrix at a source tridegree (rows = source basis, columns
+    /// = target coordinates), with the original `Map.matrix` semantics: a map
+    /// with no stored matrix is the ZERO map of the right dimensions — except
+    /// E in the stable range (n > s+1), which is the IDENTITY. Skipping
+    /// no-data degrees instead of defaulting silently drops naturality/Leibniz
+    /// constraints of the form `d·φ = 0` (the original always constrains).
+    pub fn map_matrix(&self, kind: MapKind, t: Tridegree) -> Matrix {
+        if let Some(m) = self.maps.get(&kind).and_then(|mt| mt.matrix_at(t)) {
+            return m.clone();
+        }
+        let src_dim = self.dim_at(t);
+        let tgt_dim = self.dim_at(kind.target_degree(t));
+        if kind == MapKind::E && t.n > t.s + 1 && src_dim == tgt_dim {
+            mat_identity(src_dim)
+        } else {
+            mat_zero(src_dim, tgt_dim)
+        }
     }
 
     /// Check polygon bounds.
@@ -163,6 +221,18 @@ impl SATPage {
             self.exclude_set.contains(&Tridegree::new(t.s + 2, t.s, t.f))
         } else {
             self.exclude_set.contains(&t)
+        }
+    }
+
+    /// Is the degree's exclusion of the "target-only" kind (see
+    /// [`SATPage::target_only_exclude`])? Folds to the stable representative
+    /// like [`SATPage::is_excluded`].
+    pub fn is_excluded_target_only(&self, t: Tridegree) -> bool {
+        if t.n > t.s + 2 {
+            self.target_only_exclude
+                .contains(&Tridegree::new(t.s + 2, t.s, t.f))
+        } else {
+            self.target_only_exclude.contains(&t)
         }
     }
 

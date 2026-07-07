@@ -33,8 +33,18 @@ pub fn solve(system: &ConstraintSystem) -> Option<SATResult> {
 
     let offset = result.solution.unwrap();
 
-    // Identify unknown (free) variables
-    let unknown: Vec<usize> = result.free_cols.clone();
+    // Identify unknown variables: every variable touched by some kernel
+    // vector. This is strictly more than the free columns — a pivot column
+    // that depends on a free column is also undetermined (the original
+    // computes this as the nonzero columns of the kernel matrix,
+    // `find_zero_cols` in sat_backend.py).
+    let mut touched = hashbrown::HashSet::new();
+    for kv in &result.kernel {
+        for idx in vec_support(kv) {
+            touched.insert(idx);
+        }
+    }
+    let unknown: Vec<usize> = touched.into_iter().collect();
 
     // Build echelon form of the kernel for the unknowns
     let kernel_matrix = if result.kernel.is_empty() {

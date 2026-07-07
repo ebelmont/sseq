@@ -1,0 +1,23 @@
+[package]
+name = "ehp-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ehp-server"
+path = "src/main.rs"
+
+[dependencies]
+ehp-core = { path = "../ehp-core" }
+fp = { path = "../fp", default-features = false }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.10"
+hashbrown = "0.14"
+open = "5"
+rayon = "1.8"

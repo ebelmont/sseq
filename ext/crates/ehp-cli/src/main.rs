@@ -204,10 +204,8 @@ fn cmd_compute(prefix: &str, r: i32, max_total: i32, _output: &str, known_diffs_
     pb.set_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap());
     pb.set_message("Loading page...");
 
-    let mut page = io::load_page(prefix, r, max_total)?;
+    let page = io::load_page(prefix, r, max_total)?;
 
-    pb.set_message("Building pairs...");
-    page.build_pairs();
     pb.finish_with_message(format!(
         "Loaded E_{} page ({} tridegrees)",
         r,
@@ -273,8 +271,7 @@ fn cmd_turn_page(prefix: &str, r: i32, max_total: i32, output: &str, known_diffs
 
     // Load the page
     eprintln!("Loading E_{} page...", r);
-    let mut page = io::load_page(prefix, r, max_total)?;
-    page.build_pairs();
+    let page = io::load_page(prefix, r, max_total)?;
 
     // Build and solve constraint system
     let cutoff = page.max_s.unwrap_or(0);
@@ -307,7 +304,7 @@ fn cmd_turn_page(prefix: &str, r: i32, max_total: i32, output: &str, known_diffs
 
     // Turn the page
     eprintln!("Computing E_{} from E_{}...", r + 1, r);
-    let (next_page, _turned) = pageturning::build_next_page(&page, &sat_result);
+    let (next_page, _turned) = pageturning::build_next_page(&page, &sat_result)?;
 
     // Save — binary if output ends with .ehp, otherwise CSV
     eprintln!("Saving E_{} to {}...", r + 1, output);

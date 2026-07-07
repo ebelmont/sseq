@@ -114,10 +114,6 @@ pub fn load_from_csv(prefix: &str, r: i32, max_t: i32) -> io::Result<SATPage> {
         }
     }
 
-    // Build pairs
-    eprintln!("Building multiplication pairs...");
-    page.build_pairs();
-
     eprintln!("Successfully loaded E_{} page", r);
     Ok(page)
 }
@@ -669,7 +665,7 @@ pub fn save_to_binary(page: &SATPage, path: &str) -> io::Result<()> {
 }
 
 /// Load a page from the binary `.ehp` format.
-pub fn load_from_binary(path: &str) -> io::Result<SATPage> {
+pub fn load_from_binary(path: &str, filter_max_t: Option<i32>) -> io::Result<SATPage> {
     let mut file = std::fs::File::open(path)?;
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
@@ -736,6 +732,12 @@ pub fn load_from_binary(path: &str) -> io::Result<SATPage> {
                     let s = read_i32(section, &mut sp)?;
                     let f = read_i32(section, &mut sp)?;
                     let dim = read_u32(section, &mut sp)? as usize;
+                    // Filter by max_t if provided
+                    if let Some(mt) = filter_max_t {
+                        if s + f > mt {
+                            continue;
+                        }
+                    }
                     let t = Tridegree::new(n, s, f);
                     page.dimension.insert(t, dim);
                     if dim > 0 {
@@ -760,6 +762,13 @@ pub fn load_from_binary(path: &str) -> io::Result<SATPage> {
                     let dim2 = read_u16(section, &mut sp)?;
                     let tgt_dim = read_u16(section, &mut sp)?;
                     let num_words = read_u32(section, &mut sp)? as usize;
+                    // Filter by max_t: skip blocks where either source is out of range
+                    if let Some(mt) = filter_max_t {
+                        if s1 + f1 > mt || s2 + f2 > mt {
+                            sp += num_words * 8;
+                            continue;
+                        }
+                    }
                     let mut words = Vec::with_capacity(num_words);
                     for _ in 0..num_words {
                         words.push(read_u64(section, &mut sp)?);
@@ -788,6 +797,13 @@ pub fn load_from_binary(path: &str) -> io::Result<SATPage> {
                     let nrows = read_u16(section, &mut sp)? as usize;
                     let ncols = read_u16(section, &mut sp)? as usize;
                     let num_words = read_u32(section, &mut sp)? as usize;
+                    // Filter by max_t
+                    if let Some(mt) = filter_max_t {
+                        if s + f > mt {
+                            sp += num_words * 8;
+                            continue;
+                        }
+                    }
                     let mut words = Vec::with_capacity(num_words);
                     for _ in 0..num_words {
                         words.push(read_u64(section, &mut sp)?);
@@ -816,13 +832,21 @@ pub fn load_from_binary(path: &str) -> io::Result<SATPage> {
         }
     }
 
-    // Build pairs
-    page.build_pairs();
+    // Update max values to reflect filtered data
+    if filter_max_t.is_some() {
+        page.compute_max_values();
+    }
 
-    eprintln!("Loaded binary E_{} page ({} tridegrees, {} product blocks)",
+    let filtered_note = if let Some(mt) = filter_max_t {
+        format!(", filtered to s+f <= {}", mt)
+    } else {
+        String::new()
+    };
+    eprintln!("Loaded binary E_{} page ({} tridegrees, {} product blocks{})",
         r,
         page.dimension.values().filter(|&&d| d > 0).count(),
         page.products.num_blocks(),
+        filtered_note,
     );
 
     Ok(page)
@@ -855,9 +879,11 @@ pub fn detect_format(path: &str) -> DataFormat {
 }
 
 /// Load a page, auto-detecting binary vs CSV format.
+///
+/// `max_t` filters to tridegrees with `s + f <= max_t`.
 pub fn load_page(path: &str, r: i32, max_t: i32) -> io::Result<SATPage> {
     match detect_format(path) {
-        DataFormat::Binary => load_from_binary(path),
+        DataFormat::Binary => load_from_binary(path, Some(max_t)),
         DataFormat::Csv => load_from_csv(path, r, max_t),
     }
 }

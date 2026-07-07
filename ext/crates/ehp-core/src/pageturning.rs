@@ -84,8 +84,11 @@ pub fn turn_page_single(
     let z_basis = gauss_right_kernel(d_out);
 
     // B = column space of d_in (boundaries)
-    // The columns of d_in span the boundary subspace
-    let b_basis = gauss_image(&mat_transpose(d_in));
+    // The columns of d_in span the boundary subspace. `gauss_image` already
+    // returns the column space of its argument, so pass d_in directly — an
+    // extra transpose here would compute the row space (wrong subspace, and in
+    // the source dimension), which silently drops incoming differentials.
+    let b_basis = gauss_image(d_in);
 
     if z_basis.is_empty() {
         return None;
@@ -171,39 +174,161 @@ pub fn turn_page_single(
     })
 }
 
+/// A genuine contradiction discovered while turning: d_r ∘ d_r ≠ 0 with both
+/// differentials fully determined (ports the original's `d2Exception`).
+#[derive(Clone, Debug)]
+pub struct D2Error {
+    pub degree: Tridegree,
+    pub r: i32,
+}
+
+impl std::fmt::Display for D2Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "d_{} ∘ d_{} != 0 at ({}, {}, {})",
+            self.r, self.r, self.degree.n, self.degree.s, self.degree.f
+        )
+    }
+}
+
+impl std::error::Error for D2Error {}
+
+/// Context for turning a page with uncertainty-aware semantics:
+///
+/// - Differential matrices are used **partially**: determined entries are
+///   kept (they are real kills/boundaries — quotienting by them is correct,
+///   and this is what makes user-asserted differentials at partially-unknown
+///   degrees take effect), while unknown entries are treated as **zero**
+///   (classes that *might* die stay alive). Degrees with any unknown entry
+///   are still excluded from constraint generation on the next page, so
+///   their possibly-incomplete homology never feeds naturality/Leibniz.
+///   (The original Python zeroed the whole matrix at such degrees; that
+///   conservatism guarded against wrongly-"determined" values, which came
+///   from bugs that are now fixed — the `gauss_image` transpose, the solver
+///   marking correlated pivots as determined, and exclusion-set gaps.)
+/// - If a degree has no differential variables at all (excluded, or a zero
+///   source/target), the differential is treated as zero rather than
+///   dropping the degree.
+/// - If both bounding differentials are fully determined but d∘d ≠ 0, that is
+///   a genuine contradiction ([`D2Error`]); the check is skipped while either
+///   degree still has unknown entries.
+pub struct TurnContext<'a> {
+    pub page: &'a SATPage,
+    pub result: &'a SATResult,
+    /// Stable-representative tridegrees that have at least one unknown d_r entry.
+    unknown_reps: hashbrown::HashSet<Tridegree>,
+}
+
+/// Map a tridegree to its stable representative (variables and exclusions are
+/// keyed by `n = min(n, s+2)`).
+fn stable_rep(t: Tridegree) -> Tridegree {
+    if t.n > t.s + 2 {
+        Tridegree::new(t.s + 2, t.s, t.f)
+    } else {
+        t
+    }
+}
+
+impl<'a> TurnContext<'a> {
+    pub fn new(page: &'a SATPage, result: &'a SATResult) -> Self {
+        let mut unknown_reps = hashbrown::HashSet::new();
+        for &idx in &result.unknown {
+            let v = &result.vars[idx];
+            unknown_reps.insert(Tridegree::new(v.n, v.s, v.f));
+        }
+        TurnContext {
+            page,
+            result,
+            unknown_reps,
+        }
+    }
+
+    /// Does the differential at this degree have any unknown entry?
+    pub fn is_unknown(&self, t: Tridegree) -> bool {
+        self.unknown_reps.contains(&stable_rep(t))
+    }
+
+    /// The determined differential matrix at `t` (unknown entries as 0), or
+    /// `None` if the degree has no differential variables at all.
+    fn var_matrix(&self, t: Tridegree) -> Option<Matrix> {
+        let rep = stable_rep(t);
+        let first = crate::constraints::DiffVar::new(rep.n, rep.s, rep.f, 0, 0);
+        if !self.result.var_index.contains_key(&first) {
+            return None;
+        }
+        let src_dim = self.page.dim_at(rep);
+        let tgt_dim = self.page.dim_at(rep.diff_target(self.page.r));
+        let mut mat = mat_zero(tgt_dim, src_dim);
+        for row in 0..tgt_dim {
+            for col in 0..src_dim {
+                let var =
+                    crate::constraints::DiffVar::new(rep.n, rep.s, rep.f, row as u16, col as u16);
+                if let Some(&idx) = self.result.var_index.get(&var) {
+                    if !self.result.unknown.contains(&idx) && vec_get(&self.result.offset, idx) {
+                        mat_set(&mut mat, row, col, true);
+                    }
+                }
+            }
+        }
+        Some(mat)
+    }
+
+    /// Turn a single tridegree, applying the uncertainty semantics above.
+    pub fn get_tb(&self, t: Tridegree) -> Result<Option<TurnedBidegree>, D2Error> {
+        let r = self.page.r;
+        let t_in = Tridegree::new(t.n, t.s + 1, t.f - r);
+        let old_dim = self.page.dim_at(t);
+
+        let d1 = self.var_matrix(t);
+        let d2 = self.var_matrix(t_in);
+
+        if let (Some(d1m), Some(d2m)) = (&d1, &d2) {
+            if d1m.rows() > 0
+                && d1m.columns() == d2m.rows()
+                && !mat_is_zero(&mat_mul(d1m, d2m))
+                && !self.is_unknown(t)
+                && !self.is_unknown(t_in)
+            {
+                return Err(D2Error { degree: t, r });
+            }
+        }
+
+        // Partial matrices: determined entries kept, unknown entries zero
+        // (var_matrix already zeroes unknowns).
+        let d_out = d1.unwrap_or_else(|| mat_zero(self.page.dim_at(t.diff_target(r)), old_dim));
+        let d_in = d2.unwrap_or_else(|| mat_zero(old_dim, self.page.dim_at(t_in)));
+
+        Ok(turn_page_single(t, &d_out, &d_in, old_dim))
+    }
+}
+
 /// Turn the entire page: compute homology at every tridegree.
+///
+/// Returns `Err` if a fully-determined d∘d ≠ 0 is found (a genuine contradiction).
 pub fn turn_page(
     page: &SATPage,
     sat_result: &SATResult,
     _new_r: i32,
     _max_t: Option<i32>,
-) -> HashMap<Tridegree, TurnedBidegree> {
-    let r = page.r;
+) -> Result<HashMap<Tridegree, TurnedBidegree>, D2Error> {
+    let ctx = TurnContext::new(page, sat_result);
 
     let tridegrees: Vec<Tridegree> = page.page.keys().copied().collect();
 
     info!("Turning page: {} tridegrees", tridegrees.len());
 
-    let results: Vec<(Tridegree, Option<TurnedBidegree>)> = tridegrees
+    let results: Result<Vec<(Tridegree, Option<TurnedBidegree>)>, D2Error> = tridegrees
         .par_iter()
-        .filter_map(|&t| {
+        .map(|&t| {
             let old_dim = page.dim_at(t);
             if old_dim == 0 {
-                return None;
+                return Ok((t, None));
             }
-
-            // Get outgoing differential: d_r at (n, s, f)
-            let d_out = sat_result.diff_matrix(t, &page.dimension)?;
-
-            // Get incoming differential: d_r at (n, s+1, f-r)
-            let d_in_src = Tridegree::new(t.n, t.s + 1, t.f - r);
-            let d_in = sat_result.diff_matrix(d_in_src, &page.dimension)
-                .unwrap_or_else(|| mat_zero(old_dim, page.dim_at(d_in_src)));
-
-            let tb = turn_page_single(t, &d_out, &d_in, old_dim);
-            Some((t, tb))
+            Ok((t, ctx.get_tb(t)?))
         })
         .collect();
+    let results = results?;
 
     let mut turned_page = HashMap::new();
     for (t, tb) in results {
@@ -218,7 +343,7 @@ pub fn turn_page(
         "Page turned: {} tridegrees with nonzero homology",
         turned_page.len()
     );
-    turned_page
+    Ok(turned_page)
 }
 
 /// Compute induced map on the next page for a single tridegree.
@@ -239,10 +364,20 @@ pub fn compute_induced_map_single(
         None => return Vec::new(),
     };
 
-    let map_mat = match page.map_matrix(map_kind, src_degree) {
-        Some(m) => m,
-        None => return Vec::new(),
-    };
+    compute_induced_map_single_tb(src_degree, map_kind, page, tb_src, tb_tgt)
+}
+
+/// Compute induced map on the next page given the turned data directly.
+pub fn compute_induced_map_single_tb(
+    src_degree: Tridegree,
+    map_kind: MapKind,
+    page: &SATPage,
+    tb_src: &TurnedBidegree,
+    tb_tgt: &TurnedBidegree,
+) -> Vec<(Element, Element)> {
+    let target_degree = map_kind.target_degree(src_degree);
+
+    let map_mat = page.map_matrix(map_kind, src_degree);
 
     if map_mat.columns() == 0 {
         return Vec::new();
@@ -439,23 +574,24 @@ pub fn compute_induced_products(
     new_products
 }
 
-/// Build the next page (E_{r+1}) from the current page.
-pub fn build_next_page(
-    page: &SATPage,
-    sat_result: &SATResult,
-) -> (SATPage, HashMap<Tridegree, TurnedBidegree>) {
-    let new_r = page.r + 1;
-    let new_max_t = page.max_t.map(|t| t - 1);
+/// Build a new SATPage from pre-computed homology data (turned page).
+///
+/// Given the turned page data (homology at each tridegree), build the full
+/// next-page SATPage with dimensions, induced maps, induced products, and pairs.
+/// This is the second half of [`build_next_page`] and can be called independently
+/// with a patched turned HashMap for incremental updates.
+pub fn build_page_from_turned(
+    old_page: &SATPage,
+    turned: &HashMap<Tridegree, TurnedBidegree>,
+) -> SATPage {
+    let new_r = old_page.r + 1;
+    let new_max_t = old_page.max_t.map(|t| t - 1);
 
-    // Turn the page (compute homology)
-    let turned = turn_page(page, sat_result, new_r, new_max_t);
-
-    // Build new page
     let mut next = SATPage::new(new_r);
     next.max_t = new_max_t;
 
     // Set dimensions and basis elements
-    for (t, tb) in &turned {
+    for (t, tb) in turned {
         if !tb.basis.is_empty() {
             next.dimension.insert(*t, tb.basis.len());
             next.page.insert(*t, tb.basis.clone());
@@ -465,7 +601,7 @@ pub fn build_next_page(
     next.compute_max_values();
 
     // Compute induced maps
-    let induced_maps = compute_induced_maps(page, &turned);
+    let induced_maps = compute_induced_maps(old_page, turned);
     for (kind, entries) in induced_maps {
         // Group by source tridegree first
         let mut by_src: HashMap<Tridegree, Vec<(usize, FpVector)>> = HashMap::new();
@@ -504,11 +640,187 @@ pub fn build_next_page(
     }
 
     // Compute induced products
-    let induced_products = compute_induced_products(page, &next, &turned);
+    let induced_products = compute_induced_products(old_page, &next, turned);
     next.products = induced_products;
 
-    // Build pairs
-    next.build_pairs();
+    next
+}
 
-    (next, turned)
+/// Build the exclude set for the next page (E_{r+1}) from unknown differentials
+/// on the current page. Ports the original `_make_exclude_set` (sat_ss.py).
+///
+/// When a differential `d_r` at `(n,s,f)` is undetermined, the homology at both
+/// its source `(n,s,f)` and its target `(n,s-1,f+r)` is uncertain (we don't know
+/// which classes are cycles or boundaries). Both are excluded from constraint
+/// generation on E_{r+1}, so we never emit naturality/Leibniz constraints that
+/// treat an uncertain class as a clean survivor. Prior exclusions are carried
+/// forward along incoming differentials.
+///
+/// Only unstable degrees (`n <= s+2`) are stored; stable degrees are handled by
+/// `SATPage::is_excluded` mapping to their `(s+2, s, f)` representative.
+///
+/// Returns `(exclude, target_only)`. `target_only ⊆ exclude` classifies the
+/// degrees excluded *solely* as the target of an unknown incoming
+/// differential: they are not the source of any unknown d_r themselves, and
+/// they are not carried-forward prior exclusions (nor targets of those —
+/// conservative, since a carried-forward degree's outgoing differential is
+/// untrustworthy for reasons this page cannot see). Under partial turning
+/// such a degree's basis consists of real classes that are at worst
+/// over-kept (the computed space surjects onto the true page), so its
+/// *outgoing* differential is still representable and Leibniz constraints
+/// whose only excluded participant is such a degree in the constrained-source
+/// (product) position are sound. That relaxation is controlled by the
+/// `EHP_RELAX_TARGET_EXCLUDE` kill-switch (default ON; set to `0` to restore
+/// the strict behavior where every excluded degree is fully inert) — see
+/// [`crate::constraints::relax_target_exclude`].
+pub fn make_next_exclude_set(
+    page: &SATPage,
+    sat_result: &SATResult,
+) -> (
+    hashbrown::HashSet<Tridegree>,
+    hashbrown::HashSet<Tridegree>,
+) {
+    let r = page.r;
+
+    // Degrees where d_r is unknown (source of an undetermined differential), plus
+    // the previous page's exclusions carried forward along their incoming d_r.
+    // `hard_uncertain` (carried-forward entries) never spawn target-only
+    // classifications; `unknown_sources` do (for their targets).
+    let mut unknown_sources: Vec<Tridegree> = Vec::new();
+    let mut seen = hashbrown::HashSet::new();
+    for &idx in &sat_result.unknown {
+        let v = &sat_result.vars[idx];
+        let key = Tridegree::new(v.n, v.s, v.f);
+        if seen.insert(key) {
+            unknown_sources.push(key);
+        }
+    }
+    let mut carried: Vec<Tridegree> = Vec::new();
+    for &deg in &page.exclude_set {
+        carried.push(deg);
+        carried.push(Tridegree::new(deg.n, deg.s + 1, deg.f - r));
+    }
+
+    let mut exclude = hashbrown::HashSet::new();
+    let mut hard = hashbrown::HashSet::new();
+    let mut targets_of_unknown = hashbrown::HashSet::new();
+    let mut insert_pair = |deg: Tridegree,
+                           from_unknown: bool,
+                           exclude: &mut hashbrown::HashSet<Tridegree>,
+                           hard: &mut hashbrown::HashSet<Tridegree>,
+                           targets_of_unknown: &mut hashbrown::HashSet<Tridegree>| {
+        if deg.n > deg.s + 2 {
+            return; // stable: is_excluded() maps to the (s+2, s, f) representative
+        }
+        exclude.insert(deg);
+        hard.insert(deg);
+        // The target lives at s-1, so it can be stable even when the source is
+        // not (n = s+2 gives n > (s-1)+2). Store its stable representative so
+        // `SATPage::is_excluded` lookups agree with what we insert.
+        let tgt = stable_rep(Tridegree::new(deg.n, deg.s - 1, deg.f + r));
+        exclude.insert(tgt);
+        if from_unknown {
+            targets_of_unknown.insert(tgt);
+        } else {
+            hard.insert(tgt);
+        }
+    };
+    for deg in unknown_sources {
+        insert_pair(deg, true, &mut exclude, &mut hard, &mut targets_of_unknown);
+    }
+    for deg in carried {
+        insert_pair(deg, false, &mut exclude, &mut hard, &mut targets_of_unknown);
+    }
+
+    let target_only: hashbrown::HashSet<Tridegree> = targets_of_unknown
+        .difference(&hard)
+        .copied()
+        .collect();
+    (exclude, target_only)
+}
+
+/// Build the next page (E_{r+1}) from the current page.
+///
+/// Returns `Err` if a fully-determined d∘d ≠ 0 is found (a genuine contradiction).
+pub fn build_next_page(
+    page: &SATPage,
+    sat_result: &SATResult,
+) -> Result<(SATPage, HashMap<Tridegree, TurnedBidegree>), D2Error> {
+    let new_r = page.r + 1;
+    let new_max_t = page.max_t.map(|t| t - 1);
+
+    // Turn the page (compute homology)
+    let turned = turn_page(page, sat_result, new_r, new_max_t)?;
+
+    let mut next = build_page_from_turned(page, &turned);
+
+    // Exclude degrees whose homology is uncertain because a bounding differential
+    // was undetermined, so their (possibly wrong) products don't generate
+    // spurious constraints on the next page.
+    let (exclude, target_only) = make_next_exclude_set(page, sat_result);
+    next.exclude_set = exclude;
+    next.target_only_exclude = target_only;
+
+    Ok((next, turned))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constraints::{ConstraintSystem, DiffVar};
+    use crate::solver::solve;
+
+    /// Solve an unconstrained system over the given vars: all unknown.
+    fn all_unknown_result(vars: Vec<DiffVar>) -> SATResult {
+        let sys = ConstraintSystem::new(vars);
+        solve(&sys).expect("empty system is consistent")
+    }
+
+    #[test]
+    fn target_only_classification() {
+        let page = SATPage::new(2);
+        // One unknown d_2 at (3,3,2); its target is (3,2,4).
+        let res = all_unknown_result(vec![DiffVar::new(3, 3, 2, 0, 0)]);
+        let (exclude, target_only) = make_next_exclude_set(&page, &res);
+        let src = Tridegree::new(3, 3, 2);
+        let tgt = Tridegree::new(3, 2, 4);
+        assert!(exclude.contains(&src) && exclude.contains(&tgt));
+        assert!(!target_only.contains(&src), "unknown source is hard");
+        assert!(target_only.contains(&tgt), "pure target is target-only");
+    }
+
+    #[test]
+    fn target_that_is_also_source_is_hard() {
+        let page = SATPage::new(2);
+        // (3,2,4) is the target of the unknown at (3,3,2) AND itself the
+        // source of another unknown: it must not be target-only.
+        let res = all_unknown_result(vec![
+            DiffVar::new(3, 3, 2, 0, 0),
+            DiffVar::new(3, 2, 4, 0, 0),
+        ]);
+        let (exclude, target_only) = make_next_exclude_set(&page, &res);
+        let mid = Tridegree::new(3, 2, 4);
+        assert!(exclude.contains(&mid));
+        assert!(!target_only.contains(&mid));
+        // The chain's far end (3,1,6) is a pure target.
+        assert!(target_only.contains(&Tridegree::new(3, 1, 6)));
+    }
+
+    #[test]
+    fn carried_forward_targets_are_hard() {
+        let mut page = SATPage::new(2);
+        page.exclude_set.insert(Tridegree::new(2, 5, 3));
+        // One unrelated unknown far away, so the solve is non-degenerate.
+        let res = all_unknown_result(vec![DiffVar::new(9, 9, 9, 0, 0)]);
+        let (exclude, target_only) = make_next_exclude_set(&page, &res);
+        // Carried-forward degree, its diff-source, and its target are all
+        // excluded, none of them target-only (conservative).
+        assert!(exclude.contains(&Tridegree::new(2, 5, 3)));
+        assert!(exclude.contains(&Tridegree::new(2, 4, 5)));
+        assert!(!target_only.contains(&Tridegree::new(2, 5, 3)));
+        assert!(!target_only.contains(&Tridegree::new(2, 4, 5)));
+        // The unrelated unknown's target is the only target-only entry.
+        assert_eq!(target_only.len(), 1);
+        assert!(target_only.contains(&Tridegree::new(9, 8, 11)));
+    }
 }

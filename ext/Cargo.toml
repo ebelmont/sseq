@@ -73,6 +73,7 @@ members = [
     "crates/bivec",
     "crates/ehp-core",
     "crates/ehp-cli",
+    "crates/ehp-server",
     "crates/fp",
     "crates/maybe-rayon",
     "crates/once",

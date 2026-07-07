@@ -9,4 +9,6 @@ pub mod constraints;
 pub mod solver;
 pub mod result;
 pub mod pageturning;
+pub mod interpage;
 pub mod io;
+pub mod seqsee;

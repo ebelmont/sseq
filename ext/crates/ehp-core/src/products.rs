@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use fp::matrix::Matrix;
 use fp::vector::FpVector;
 use hashbrown::HashMap;
@@ -29,6 +31,7 @@ impl ProductKey {
 ///
 /// Row `i*dim2 + j` = product of `basis_i@deg1` × `basis_j@deg2`,
 /// expressed in the target tridegree with `tgt_dim` coordinates.
+#[derive(Clone)]
 pub struct ProductMatrix {
     pub dim1: u16,
     pub dim2: u16,
@@ -38,8 +41,14 @@ pub struct ProductMatrix {
 
 /// The product table stores basis element × basis element → result vector,
 /// organized as block matrices indexed by `(Tridegree, Tridegree)` pairs.
+///
+/// Blocks live behind `Arc` so cloning a table is refcount bumps rather than
+/// deep-copying every block's (padded, tile-aligned) fp storage — the
+/// interpage overlay clones the whole page per trial, which used to cost
+/// ~50s/page. Mutation copy-on-writes the single block touched.
+#[derive(Clone)]
 pub struct ProductTable {
-    matrices: HashMap<(Tridegree, Tridegree), ProductMatrix>,
+    matrices: HashMap<(Tridegree, Tridegree), Arc<ProductMatrix>>,
 }
 
 impl ProductTable {
@@ -63,14 +72,14 @@ impl ProductTable {
         let block_key = (key.deg1, key.deg2);
         let tgt_dim = value.len();
 
-        let pm = self.matrices.entry(block_key).or_insert_with(|| {
-            ProductMatrix {
+        let pm = Arc::make_mut(self.matrices.entry(block_key).or_insert_with(|| {
+            Arc::new(ProductMatrix {
                 dim1: dim1 as u16,
                 dim2: dim2 as u16,
                 tgt_dim: tgt_dim as u16,
                 matrix: mat_zero(dim1 * dim2, tgt_dim),
-            }
-        });
+            })
+        }));
 
         let row_idx = key.idx1 as usize * pm.dim2 as usize + key.idx2 as usize;
         if row_idx < pm.matrix.rows() && tgt_dim == pm.tgt_dim as usize {
@@ -85,7 +94,17 @@ impl ProductTable {
         deg2: Tridegree,
         pm: ProductMatrix,
     ) {
-        self.matrices.insert((deg1, deg2), pm);
+        self.matrices.insert((deg1, deg2), Arc::new(pm));
+    }
+
+    /// Remove the block matrix for a degree pair (if present).
+    pub fn remove_block(&mut self, deg1: Tridegree, deg2: Tridegree) {
+        self.matrices.remove(&(deg1, deg2));
+    }
+
+    /// Get the block matrix for a degree pair.
+    pub fn block(&self, deg1: Tridegree, deg2: Tridegree) -> Option<&ProductMatrix> {
+        self.matrices.get(&(deg1, deg2)).map(|a| a.as_ref())
     }
 
     /// Look up a basis × basis product.
@@ -223,7 +242,7 @@ impl ProductTable {
 
     /// Iterate over block matrices: yields `(&(Tridegree, Tridegree), &ProductMatrix)`.
     pub fn iter_blocks(&self) -> impl Iterator<Item = (&(Tridegree, Tridegree), &ProductMatrix)> {
-        self.matrices.iter()
+        self.matrices.iter().map(|(k, v)| (k, v.as_ref()))
     }
 
     /// Number of block matrices.
