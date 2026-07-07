@@ -60,7 +60,7 @@ use fp::matrix::Matrix;
 use fp::vector::FpVector;
 use hashbrown::{HashMap, HashSet};
 
-const DEFAULT_DATA: &str = concat!(env!("HOME"), "/ehp-sat-rs/data/E2.ehp");
+const DEFAULT_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/E2");
 
 // =============================================================================
 // Provenance

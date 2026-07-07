@@ -20,7 +20,7 @@ use ehp_core::solver;
 use ehp_core::tridegree::Tridegree;
 use hashbrown::{HashMap, HashSet};
 
-const DEFAULT_DATA: &str = concat!(env!("HOME"), "/ehp-sat-rs/data/E2.ehp");
+const DEFAULT_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/E2");
 
 fn stable_rep(t: Tridegree) -> Tridegree {
     if t.n > t.s + 2 {

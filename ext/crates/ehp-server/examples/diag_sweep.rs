@@ -14,7 +14,7 @@ use ehp_core::{io, solver};
 use hashbrown::HashMap;
 use std::time::Instant;
 
-const DEFAULT_DATA: &str = concat!(env!("HOME"), "/ehp-sat-rs/data/E2.ehp");
+const DEFAULT_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/E2");
 
 struct Page {
     page: SATPage,

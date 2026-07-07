@@ -4,7 +4,7 @@
 use ehp_core::io;
 use std::time::Instant;
 
-const DEFAULT_DATA: &str = concat!(env!("HOME"), "/ehp-sat-rs/data/E2.ehp");
+const DEFAULT_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/E2");
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = std::env::var("EHP_DATA").unwrap_or_else(|_| DEFAULT_DATA.to_string());

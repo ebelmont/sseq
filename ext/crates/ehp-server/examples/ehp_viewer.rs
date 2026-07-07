@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use ehp_server::ServerState;
 
-const DEFAULT_DATA: &str = concat!(env!("HOME"), "/ehp-sat-rs/data/E2.ehp");
+const DEFAULT_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/E2");
 const DEFAULT_MAX_T: i32 = 20;
 const DEFAULT_SEQSEE: &str = concat!(env!("HOME"), "/seqsee/seqsee");
 

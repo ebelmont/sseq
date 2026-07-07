@@ -12,7 +12,7 @@ use ehp_core::tridegree::Tridegree;
 use ehp_core::{io, pageturning, solver};
 use hashbrown::HashMap;
 
-const DEFAULT_DATA: &str = concat!(env!("HOME"), "/ehp-sat-rs/data/E2.ehp");
+const DEFAULT_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/E2");
 const SEED: DiffVar = DiffVar { n: 17, s: 15, f: 2, row: 0, col: 0 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

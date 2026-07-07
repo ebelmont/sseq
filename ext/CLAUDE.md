@@ -64,7 +64,7 @@ Interactive tool for exploring and editing EHP spectral sequence differentials.
   - `try <r> <n> <s> <f> <row> <col> <0|1>` — assume a value for one differential and propagate the consequences through all higher pages (incremental kernel update, un-excluding degrees that become certain, re-activating their skipped constraints); reports newly determined diffs or a contradiction (UNSAT / d²≠0), which forces the opposite value.
   - `sweep <r> [min_stem [max_stem]]` — trial-and-error over every unknown d_r × both values in parallel; contradictions mean forced values; results also written to `output/sweep_E<r>.log`.
   - `interpage try [min_stem [max_stem]]` — the automated fixpoint form: sweeps every page's unknowns (lowest r first), APPLIES each forced value (recorded like add/zero, with an undo entry each), cascades immediately so later sweeps see the consequences, and repeats whole passes until nothing new is forced. Findings go to the propagation log, the charts, and `output/interpage_try.log`. Trials are cheap since the overlay page shares product/map blocks via Arc (~0.2s per 4-page try at max_t=50); the final pass is always a full sweep that forces nothing.
-  - `propagate off` defers mutations (add/zero/toggle just record, instantly); `interpage [r]` then propagates everything recorded through all pages in one pass, printing every newly determined differential (the on-demand form of the original run_interpage workflow; INTERPAGE_SPEC.md documents the original). `propagate on` restores cascade-per-add.
+  - `propagate off` defers mutations (add/zero/toggle just record, instantly); `interpage [r]` then propagates everything recorded through all pages in one pass, printing every newly determined differential (the on-demand form of the original run_interpage workflow; notes/INTERPAGE_SPEC.md documents the original). `propagate on` restores cascade-per-add.
 - Uncertainty-aware page turning: differential matrices are used *partially* — determined
   entries are real kills/boundaries and are quotiented (this is what makes user-asserted
   diffs at partially-unknown degrees take effect on the next page); unknown entries are
@@ -112,7 +112,7 @@ Interactive tool for exploring and editing EHP spectral sequence differentials.
 - Prior-page uncertainty on current charts: unknown d_k from earlier pages are pushed
   through the turned-page quotient chain and drawn as faint dashed edges in d_k's page
   color (DIFF_EDGES entries are `[src, tgt, determined, r]`).
-- Stem view (STEM_VIEW_SPEC.md, crates/STEM_VIEW_SPEC.md): one chart per stem k
+- Stem view (notes/STEM_VIEW_SPEC.md): one chart per stem k
   (`stem{k}_E{r}.html`, x = n capped at the stable edge k+2, y = filtration). Node states:
   open d_r-colored circle = supports a differential, filled = hit by one; E edges inherit
   the target's color; right-arrows mark suspensions continuing past the cap. Generated at
@@ -157,17 +157,18 @@ their outgoing differential variables and Leibniz pairs may constrain them in
 the product position (e.g. the h1-Leibniz d3 forcing at S43 (34,4)); see
 `make_next_exclude_set` in `crates/ehp-core/src/pageturning.rs`.
 
-**Known differentials from outside sources:** set `EHP_OUTSIDE_DIFFS=~/EHP_SAT/outside_diffs`
-(or any directory) to load externally recorded differentials at startup: every `.csv` in the
+**Known differentials from outside sources:** set `EHP_OUTSIDE_DIFFS=ext/data/outside_diffs`
+(vendored in the repo; or any directory) to load externally recorded differentials at startup: every `.csv` in the
 directory is scanned for rows `r, n, s, f, row, col, value` (the Python pipeline's
 outside_diffs format); rows for each page merge into its known diffs before the solve
 (n is normalized to min(n, s+2); a `load <file>`-style per-page file still overrides).
 
-**Data:** the canonical E2 input is `~/EHP_SAT/data/E2` (CSVs). The compiled-in
-default `EHP_DATA` is `~/ehp-sat-rs/data/E2`, a byte-identical copy of it — if the
-EHP_SAT data is ever updated, re-copy it there (`cp ~/EHP_SAT/data/E2/*.csv
-~/ehp-sat-rs/data/E2/`). Loading CSVs directly means the only cutoff is the runtime
-s+f ≤ EHP_MAX_T; do NOT point EHP_DATA at an `.ehp` binary unless you know the
-max-total it was converted with (the old default `E2.ehp` had one baked in).
+**Data:** the canonical E2 input lives IN THE REPO at `ext/data/E2` (CSVs) — the
+compiled-in default for the REPL and every diag example (via CARGO_MANIFEST_DIR, so
+it works from any working directory and for collaborators). `EHP_DATA=<path>`
+overrides. The outside-diffs knowledge base is vendored at `ext/data/outside_diffs`.
+Loading CSVs directly means the only cutoff is the runtime s+f ≤ EHP_MAX_T; do NOT
+point EHP_DATA at an `.ehp` binary unless you know the max-total it was converted
+with (the old default `E2.ehp` had one baked in).
 
 **Architecture:** No web server. Charts are local HTML files opened via file://. The REPL runs in the terminal. Clicking nodes in the chart copies an `add` command to the clipboard for pasting into the REPL.

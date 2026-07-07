@@ -20,7 +20,7 @@ use ehp_core::tridegree::Tridegree;
 use ehp_core::{io, pageturning, solver};
 use hashbrown::{HashMap, HashSet};
 
-const DEFAULT_DATA: &str = concat!(env!("HOME"), "/ehp-sat-rs/data/E2");
+const DEFAULT_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/E2");
 
 /// Turning-effective value (mirrors ehp_chart.rs::effective_var_value).
 fn eff(res: &SATResult, var: &DiffVar) -> bool {

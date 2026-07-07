@@ -40,3 +40,4 @@ chart/python/*.egg-info
 # Claude
 .claude
 
+.DS_Store

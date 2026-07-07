@@ -49,7 +49,7 @@ use hashbrown::{HashMap, HashSet};
 // ~/EHP_SAT/data/E2 (the reference copy). Loading the CSVs directly avoids
 // .ehp binaries with a stale max-total cutoff baked in at convert time —
 // the CSV loader's only cutoff is the runtime s+f <= EHP_MAX_T.
-const DEFAULT_DATA: &str = concat!(env!("HOME"), "/ehp-sat-rs/data/E2");
+const DEFAULT_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/E2");
 const DEFAULT_MAX_T: i32 = 20;
 
 // =============================================================================
