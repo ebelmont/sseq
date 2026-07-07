@@ -503,6 +503,66 @@ fn affected_homology_tridegrees(changed: &HashSet<Tridegree>, r: i32) -> HashSet
     affected
 }
 
+/// Expand a set of re-turn degrees across the stable fold: for any degree at
+/// or past the stable edge (n >= s+2), include its stable rep (s+2, s, f) and
+/// every past-stable copy (n' > s+2, same (s, f)) present on the page.
+///
+/// `changed`/`affected` degrees come from DiffVars keyed at stable-REP
+/// degrees (n = min(n, s+2)), but the turned cache / dimensions / products
+/// are keyed by ACTUAL degrees. Copies share the rep's differential data, so
+/// their homology changes in lockstep with the rep's; leaving them
+/// un-re-turned gives the rebuilt next page fresh homology at the rep and
+/// STALE homology at the copies, and constraint generation (E-naturality
+/// identity squares across the near-stable fold; h_i Leibniz pairs whose
+/// second factor lives at sphere th2 = n+s-1) then reads the stale copies and
+/// emits wrong constraints — up to false contradictions against correct user
+/// assertions. This mirrors the stable-copy expansion in ehp-core's interpage
+/// path (`turn_page_local` + `SourceIndex::stable_by_sf`).
+///
+/// The (s, f) → copies index is one O(page keys) scan per call — trivial next
+/// to the constraint re-solve, and the pages it indexes are rebuilt every
+/// cascade iteration anyway, so caching it in `PageState` would just add an
+/// invalidation hazard.
+fn expand_stable_fold(page: &SATPage, degrees: HashSet<Tridegree>) -> HashSet<Tridegree> {
+    // Only build the index if something can actually expand.
+    if !degrees.iter().any(|t| t.n >= t.s + 2) {
+        return degrees;
+    }
+    let mut copies_by_sf: HashMap<(i32, i32), Vec<Tridegree>> = HashMap::new();
+    for &t in page.page.keys() {
+        if t.n > t.s + 2 {
+            copies_by_sf.entry((t.s, t.f)).or_default().push(t);
+        }
+    }
+    let mut out = degrees;
+    let seeds: Vec<Tridegree> = out.iter().copied().filter(|t| t.n >= t.s + 2).collect();
+    for t in seeds {
+        out.insert(Tridegree::new(t.s + 2, t.s, t.f));
+        if let Some(copies) = copies_by_sf.get(&(t.s, t.f)) {
+            out.extend(copies.iter().copied());
+        }
+    }
+    out
+}
+
+/// Stable-fold invariant: every past-stable degree (n > s+2) has the same
+/// dimension as its stable rep (s+2, s, f). Returns violations as
+/// `(degree, dim, rep_dim)`, sorted. One pass over `dimension` — cheap enough
+/// to run after every cascade rebuild as a corruption guardrail.
+fn stable_fold_violations(page: &SATPage) -> Vec<(Tridegree, usize, usize)> {
+    let mut v: Vec<(Tridegree, usize, usize)> = page
+        .dimension
+        .iter()
+        .filter(|(t, _)| t.n > t.s + 2)
+        .filter_map(|(&t, &d)| {
+            let rep_dim = page.dim_at(Tridegree::new(t.s + 2, t.s, t.f));
+            (rep_dim != d).then_some((t, d, rep_dim))
+        })
+        .collect();
+    v.sort_by_key(|(t, _, _)| *t);
+    v
+}
+
 /// A differential newly determined (or changed) by a cascade re-solve.
 struct DeducedDiff {
     r: i32,
@@ -634,6 +694,10 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
             }
         }
 
+        // TODO(unsat-quarantine): before reporting INCONSISTENT as ground
+        // truth, re-verify against a freshly built (non-incremental) page
+        // chain, so stale incremental state can never manufacture a false
+        // contradiction against a correct user assertion. Not built yet.
         pages[i].unsat_reason = match &result {
             Some(_) => None,
             None if num_vars == 0 => Some(format!(
@@ -667,6 +731,12 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
         }
 
         let affected = affected_homology_tridegrees(&changed, r);
+        // THE FIX (stale stable copies): expand across the stable fold so
+        // past-stable copies of any changed rep are re-turned too — otherwise
+        // the rebuilt page mixes fresh rep homology with stale copy homology
+        // and constraint generation emits wrong (even falsely contradictory)
+        // constraints. See `expand_stable_fold`.
+        let affected = expand_stable_fold(&pages[i].page, affected);
         eprintln!(
             "  E_{}: {} tridegrees changed, {} affected for re-turning",
             r,
@@ -724,6 +794,59 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
 
         // Rebuild next page from the full (patched) turned HashMap
         let mut next_page = pageturning::build_page_from_turned(&curr.page, turned);
+
+        // GUARDRAIL (stable-fold invariant): every past-stable degree must
+        // share its rep's dimension. A violation means the incremental
+        // re-turn missed a degree (the stale-stable-copy bug class) — warn
+        // loudly and self-heal with a full, non-incremental page turn instead
+        // of letting the corruption feed constraint generation.
+        let violations = stable_fold_violations(&next_page);
+        if !violations.is_empty() {
+            eprintln!(
+                "  E_{}: STABLE-FOLD VIOLATION after incremental rebuild — {} past-stable degree(s) \
+                 disagree with their stable rep:",
+                r + 1,
+                violations.len(),
+            );
+            for (t, d, rep_dim) in violations.iter().take(5) {
+                eprintln!(
+                    "    dim({},{},{}) = {} but rep dim({},{},{}) = {}",
+                    t.n, t.s, t.f, d, t.s + 2, t.s, t.f, rep_dim,
+                );
+            }
+            if violations.len() > 5 {
+                eprintln!("    ... and {} more", violations.len() - 5);
+            }
+            eprintln!(
+                "    Self-healing with a full E_{} page turn (non-incremental). \
+                 This is an incremental-cascade bug — please report it.",
+                r,
+            );
+            let new_max_t = curr.page.max_t.map(|t| t - 1);
+            match pageturning::turn_page(&curr.page, new_res, r + 1, new_max_t) {
+                Ok(full) => {
+                    *turned = full;
+                    next_page = pageturning::build_page_from_turned(&curr.page, turned);
+                    let still = stable_fold_violations(&next_page);
+                    if !still.is_empty() {
+                        eprintln!(
+                            "    WARNING: {} violation(s) persist after the full turn — the E_{} \
+                             source data itself is fold-inconsistent.",
+                            still.len(),
+                            r,
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  E_{}: CONTRADICTION during self-heal full turn: {} — consider `undo`",
+                        r, e,
+                    );
+                    return CascadeOutcome { deduced, affected_degrees };
+                }
+            }
+        }
+
         // Recompute the next page's exclusions: degrees whose bounding d_r is
         // still unknown stay excluded; degrees that just became determined are
         // un-excluded so constraints there become active.
@@ -756,6 +879,12 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
             .iter()
             .flat_map(|&t| [t, t.diff_source(r_next)])
             .collect();
+        // Chart regen: dimension changes anywhere on the rebuilt page (incl.
+        // from a self-heal full turn) invalidate those charts too.
+        affected_degrees
+            .entry(r_next)
+            .or_default()
+            .extend(dims_changed.iter().copied());
         if !dims_changed.is_empty() {
             eprintln!(
                 "  E_{}: {} tridegrees changed dimension after rebuild",

@@ -157,6 +157,12 @@ their outgoing differential variables and Leibniz pairs may constrain them in
 the product position (e.g. the h1-Leibniz d3 forcing at S43 (34,4)); see
 `make_next_exclude_set` in `crates/ehp-core/src/pageturning.rs`.
 
+**Known differentials from outside sources:** set `EHP_OUTSIDE_DIFFS=~/EHP_SAT/outside_diffs`
+(or any directory) to load externally recorded differentials at startup: every `.csv` in the
+directory is scanned for rows `r, n, s, f, row, col, value` (the Python pipeline's
+outside_diffs format); rows for each page merge into its known diffs before the solve
+(n is normalized to min(n, s+2); a `load <file>`-style per-page file still overrides).
+
 **Data:** the canonical E2 input is `~/EHP_SAT/data/E2` (CSVs). The compiled-in
 default `EHP_DATA` is `~/ehp-sat-rs/data/E2`, a byte-identical copy of it — if the
 EHP_SAT data is ever updated, re-copy it there (`cp ~/EHP_SAT/data/E2/*.csv

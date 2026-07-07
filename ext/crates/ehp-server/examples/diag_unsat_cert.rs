@@ -27,13 +27,21 @@
 //!   SA: stock + target d4(3,32,9)[0,0]=1             (expect UNSAT → cert)
 //!   SB: stock + user's other 8 adds, no target       (expect SAT — user report)
 //!   SC: stock + all 9 adds                           (expect UNSAT → cert)
+//!   SD: replay of the REPL's INCREMENTAL cascade for the two d3 adds
+//!       (patched turned map, not a full re-turn), then the 8/9-add tests on
+//!       the resulting E4; also prints where it differs from a full re-turn
+//!   SF: knowns from a REPL `save` file (DIAG_KNOWN_DIFFS=<path>) at every
+//!       page — the faithful reproduction of a live session's accumulated
+//!       state; tests the final page with the file minus/plus the target
 //!
 //! Run (t=50 first — much faster; then t=70 to match the user):
 //!   EHP_MAX_T=50 EHP_MAX_R=4 EHP_DATA=$HOME/ehp-sat-rs/data/E2 \
 //!     cargo run -p ehp-server --release --example diag_unsat_cert
 //!
-//! Env: DIAG_SCENARIOS (default "0ABC", any subset), DIAG_MAX_DIG (default 40,
-//! cap on deep-dug certificate rows).
+//! Env: DIAG_SCENARIOS (default "0ABC", any subset of "0ABCDF"),
+//! DIAG_MAX_DIG (deep-dig row cap, default 40), DIAG_KNOWN_DIFFS (save file
+//! for SF), EHP_RELAX_TARGET_EXCLUDE=0 to test under the strict pre-relaxation
+//! exclusion semantics the user's live session was running.
 
 use std::collections::BTreeMap;
 
@@ -44,13 +52,13 @@ use ehp_core::constraints::{
 use ehp_core::gf2::*;
 use ehp_core::map::MapKind;
 use ehp_core::page::SATPage;
-use ehp_core::pageturning;
+use ehp_core::pageturning::{self, TurnContext, TurnedBidegree};
 use ehp_core::result::SATResult;
 use ehp_core::tridegree::Tridegree;
 use ehp_core::{io, solver};
 use fp::matrix::Matrix;
 use fp::vector::FpVector;
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 
 const DEFAULT_DATA: &str = concat!(env!("HOME"), "/ehp-sat-rs/data/E2.ehp");
 
@@ -515,6 +523,9 @@ struct Chain {
     prev: Vec<(SATPage, SATResult)>,
     /// The final page E_{max_r}.
     final_page: SATPage,
+    /// Turned data of the LAST turn (E_{max_r-1} → E_{max_r}), needed to
+    /// replay the REPL's *incremental* cascade in scenario SD.
+    last_turned: HashMap<Tridegree, TurnedBidegree>,
 }
 
 fn build_chain(
@@ -522,15 +533,18 @@ fn build_chain(
     max_t: i32,
     max_r: i32,
     extra_known: &HashMap<i32, Vec<(DiffVar, bool)>>,
+    known_file: Option<&str>,
 ) -> Result<Chain, String> {
     let mut current = io::load_page(data, 2, max_t).map_err(|e| e.to_string())?;
     let mut prev = Vec::new();
+    let mut last_turned = HashMap::new();
     loop {
         let r = current.r;
         if r >= max_r {
-            return Ok(Chain { prev, final_page: current });
+            return Ok(Chain { prev, final_page: current, last_turned });
         }
-        let mut known = ehp_server::load_known_diffs(r, None).map_err(|e| e.to_string())?;
+        let mut known =
+            ehp_server::load_known_diffs(r, known_file).map_err(|e| e.to_string())?;
         for (dv, val) in extra_known.get(&r).into_iter().flatten() {
             known.insert(*dv, *val);
         }
@@ -544,11 +558,107 @@ fn build_chain(
             num_vars - result.unknown.len(),
             num_vars
         );
-        let (next, _turned) = pageturning::build_next_page(&current, &result)
+        let (next, turned) = pageturning::build_next_page(&current, &result)
             .map_err(|e| format!("E_{r}: contradiction while turning: {e}"))?;
+        last_turned = turned;
         prev.push((current, result));
         current = next;
     }
+}
+
+// =============================================================================
+// Scenario SD: replay of the REPL's INCREMENTAL cascade (ehp_chart.rs
+// cascade_resolve): after an add on E_{r}, only `changed ∪ changed.diff_target`
+// degrees are re-turned in the cached turned map before rebuilding E_{r+1}.
+// Everything else in the turned map — including all STABLE COPIES (n > s+2)
+// of changed stable-representative degrees, which share the rep's
+// differential — keeps its pre-add homology. This function replicates that
+// path exactly so the resulting E4 can be compared against a full re-turn.
+// =============================================================================
+
+/// ehp_chart.rs `effective_var_value`: unknown/absent → false.
+fn effective_var_value(result: &SATResult, var: &DiffVar) -> bool {
+    if let Some(&idx) = result.var_index.get(var) {
+        if result.unknown.contains(&idx) {
+            false
+        } else {
+            result.offset.entry(idx) != 0
+        }
+    } else {
+        false
+    }
+}
+
+/// ehp_chart.rs `changed_diff_tridegrees`.
+fn changed_diff_tridegrees(
+    old_result: Option<&SATResult>,
+    new_result: &SATResult,
+) -> HashSet<Tridegree> {
+    let mut changed = HashSet::new();
+    for var in &new_result.vars {
+        let new_val = effective_var_value(new_result, var);
+        let old_val = old_result.is_some_and(|r| effective_var_value(r, var));
+        if new_val != old_val {
+            changed.insert(var.tridegree());
+        }
+    }
+    if let Some(old) = old_result {
+        for var in &old.vars {
+            if !new_result.var_index.contains_key(var) && effective_var_value(old, var) {
+                changed.insert(var.tridegree());
+            }
+        }
+    }
+    changed
+}
+
+/// Replay one REPL cascade step at the previous page: re-solve it with
+/// `known`, patch `turned` only at the incremental `affected` set, and
+/// return the new result. Mirrors ehp_chart.rs cascade_resolve lines
+/// ~598-726 for a single page step.
+fn incremental_cascade_step(
+    prev_page: &SATPage,
+    old_result: &SATResult,
+    known: &HashMap<DiffVar, bool>,
+    turned: &mut HashMap<Tridegree, TurnedBidegree>,
+) -> Result<SATResult, String> {
+    let r = prev_page.r;
+    let cutoff = prev_page.max_s.unwrap_or(0);
+    let sys = constraints::build_constraint_system(prev_page, cutoff, known);
+    let new_res = solver::solve(&sys)
+        .ok_or_else(|| format!("E_{r} re-solve INCONSISTENT during incremental replay"))?;
+
+    let changed = changed_diff_tridegrees(Some(old_result), &new_res);
+    // affected_homology_tridegrees: t and t.diff_target(r) only.
+    let mut affected: HashSet<Tridegree> = HashSet::new();
+    for &t in &changed {
+        affected.insert(t);
+        affected.insert(t.diff_target(r));
+    }
+    eprintln!(
+        "  [SD] E_{r} incremental step: {} changed tridegrees, {} re-turned (turned map has {} keys)",
+        changed.len(),
+        affected.len(),
+        turned.len()
+    );
+
+    let ctx = TurnContext::new(prev_page, &new_res);
+    for &t in &affected {
+        if prev_page.dim_at(t) == 0 {
+            turned.remove(&t);
+            continue;
+        }
+        match ctx.get_tb(t) {
+            Ok(Some(tb)) if !tb.basis.is_empty() => {
+                turned.insert(t, tb);
+            }
+            Ok(_) => {
+                turned.remove(&t);
+            }
+            Err(e) => return Err(format!("E_{r} incremental re-turn contradiction: {e}")),
+        }
+    }
+    Ok(new_res)
 }
 
 /// Analyze one scenario on the final page. Returns the certificate if UNSAT.
@@ -692,6 +802,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("DIAG_SCENARIOS").unwrap_or_else(|_| "0ABC".to_string());
     let max_dig: usize =
         std::env::var("DIAG_MAX_DIG").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
+    // A REPL `save` file (`r,n,s,f,row,col,value` lines): scenario F builds
+    // the whole chain with these knowns at every page — the user's exact
+    // accumulated session knowledge.
+    let known_file = std::env::var("DIAG_KNOWN_DIFFS").ok();
 
     // The user's adds (REPL `add <r> <n> <s> <f> <row> <col> <value>` form).
     let target = DiffVar::new(3, 32, 9, 0, 0); // d4, the bisected culprit
@@ -714,7 +828,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cert_a = None;
     if scenarios.contains('0') || scenarios.contains('A') {
         eprintln!("\nBuilding chain A (stock knowns)...");
-        let chain = build_chain(&data, max_t, max_r, &HashMap::new())?;
+        let chain = build_chain(&data, max_t, max_r, &HashMap::new(), None)?;
         let prev = chain.prev.last().map(|(p, r)| (p, r));
         let stock = ehp_server::load_known_diffs(max_r, None)?;
 
@@ -739,7 +853,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("\nBuilding chain B (with user's two d3 adds at E3)...");
         let mut extra = HashMap::new();
         extra.insert(3, other_d3.iter().map(|&v| (v, true)).collect::<Vec<_>>());
-        let chain = build_chain(&data, max_t, max_r, &extra)?;
+        let chain = build_chain(&data, max_t, max_r, &extra, None)?;
         let prev = chain.prev.last().map(|(p, r)| (p, r));
         let stock = ehp_server::load_known_diffs(max_r, None)?;
         let mut with_others = stock.clone();
@@ -773,6 +887,222 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
+    }
+
+    // ---- Scenario SD: REPL incremental-cascade replay ---------------------
+    // The REPL does NOT rebuild E4 from scratch after a d3 add: it re-solves
+    // E3 and re-turns only `changed ∪ changed.diff_target(3)` in the cached
+    // turned map (cascade_resolve in ehp_chart.rs), then rebuilds E4 from
+    // that PATCHED map. Everything not in the affected set — in particular
+    // every STABLE COPY (n > s+2) of a changed stable-rep degree — keeps its
+    // pre-add homology. This scenario replays that path with the user's two
+    // d3 adds, reports where the stale E4 differs from a full re-turn, and
+    // re-tests the 8-adds / 9-adds consistency on the stale page.
+    if scenarios.contains('D') {
+        eprintln!("\nBuilding chain for SD (stock knowns, keeping turned data)...");
+        let chain = build_chain(&data, max_t, max_r, &HashMap::new(), None)?;
+        let (e3_page, e3_stock_res) =
+            chain.prev.last().ok_or("SD: no previous page in chain")?;
+        let mut turned = chain.last_turned.clone();
+
+        // Replay: the six d4 adds only touch E4's known-diff map (no page
+        // change). The two d3 adds each trigger an E3 cascade — apply them
+        // one at a time, exactly like typed REPL adds.
+        let mut e3_known = ehp_server::load_known_diffs(max_r - 1, None)?;
+        let mut last: Option<SATResult> = None;
+        for &dv in &other_d3 {
+            e3_known.insert(dv, true);
+            let prev_res: &SATResult = last.as_ref().unwrap_or(e3_stock_res);
+            let res = incremental_cascade_step(e3_page, prev_res, &e3_known, &mut turned)?;
+            last = Some(res);
+        }
+        let e3_new = last.ok_or("SD: no d3 adds to replay")?;
+
+        // Rebuild E4 from the PATCHED turned map (the REPL's next_ps.page).
+        let mut e4_stale = pageturning::build_page_from_turned(e3_page, &turned);
+        let (ex, tonly) = pageturning::make_next_exclude_set(e3_page, &e3_new);
+        e4_stale.exclude_set = ex;
+        e4_stale.target_only_exclude = tonly;
+
+        // Compare against a FULL re-turn from the same E3 result.
+        match pageturning::build_next_page(e3_page, &e3_new) {
+            Ok((e4_fresh, _)) => {
+                let mut stale: Vec<(Tridegree, usize, usize)> = Vec::new();
+                for (&t, &d) in &e4_stale.dimension {
+                    if e4_fresh.dim_at(t) != d {
+                        stale.push((t, d, e4_fresh.dim_at(t)));
+                    }
+                }
+                for (&t, &d) in &e4_fresh.dimension {
+                    if !e4_stale.dimension.contains_key(&t) && d > 0 {
+                        stale.push((t, 0, d));
+                    }
+                }
+                stale.sort();
+                println!(
+                    "\n[SD] incremental-vs-full E4 dimension mismatches: {}",
+                    stale.len()
+                );
+                for (t, ds, df) in stale.iter().take(80) {
+                    println!(
+                        "  ({:>3},{:>3},{:>3}): incremental dim {} vs full dim {}{}",
+                        t.n, t.s, t.f, ds, df,
+                        if t.n > t.s + 2 { "   [stable copy]" } else { "" }
+                    );
+                }
+                if stale.len() > 80 {
+                    println!("  ... ({} more)", stale.len() - 80);
+                }
+            }
+            Err(e) => println!("\n[SD] full re-turn hit contradiction: {e}"),
+        }
+
+        let stock = ehp_server::load_known_diffs(max_r, None)?;
+        let mut with_others = stock.clone();
+        for &v in &other_d4 {
+            with_others.insert(v, true);
+        }
+        analyze(
+            "SD-B: STALE incremental E4 + other 8 adds (NO target)",
+            &e4_stale,
+            &with_others,
+            Some((e3_page, &e3_new)),
+            max_dig,
+        );
+        let mut known = with_others.clone();
+        known.insert(target, true);
+        analyze(
+            "SD-C: STALE incremental E4 + all 9 adds (target included)",
+            &e4_stale,
+            &known,
+            Some((e3_page, &e3_new)),
+            max_dig,
+        );
+    }
+
+    // ---- Scenario SF: the user's SAVED session knowns (REPL `save` file) --
+    // Builds the chain with the file's knowns at EVERY page (their sweep
+    // forcings, E2/E3 adds, everything), then tests the final page with the
+    // file's knowns minus/plus the target diff. This is the faithful
+    // reproduction once the user provides their save file:
+    //   DIAG_KNOWN_DIFFS=path/to/save.csv DIAG_SCENARIOS=F \
+    //     EHP_MAX_T=70 EHP_MAX_R=4 cargo run -p ehp-server --release \
+    //     --example diag_unsat_cert
+    if scenarios.contains('F') {
+        let Some(path) = known_file.as_deref() else {
+            eprintln!("DIAG_SCENARIOS=F requires DIAG_KNOWN_DIFFS=<save file>");
+            return Ok(());
+        };
+        eprintln!("\nBuilding chain F (knowns from {path} at every page)...");
+        let chain = build_chain(&data, max_t, max_r, &HashMap::new(), Some(path))?;
+        let prev = chain.prev.last().map(|(p, r)| (p, r));
+        let file_known = ehp_server::load_known_diffs(max_r, Some(path))?;
+
+        let mut without = file_known.clone();
+        let had_target = without.remove(&target).is_some();
+        analyze(
+            &format!(
+                "SF-B: saved knowns MINUS target (file contained target: {had_target})"
+            ),
+            &chain.final_page,
+            &without,
+            prev,
+            max_dig,
+        );
+        let mut with = without.clone();
+        with.insert(target, true);
+        analyze(
+            "SF-C: saved knowns PLUS target d4(3,32,9)[0,0]=1",
+            &chain.final_page,
+            &with,
+            prev,
+            max_dig,
+        );
+    }
+
+    // ---- Scenarios R0-R3: the user's ACTUAL saved session state -----------
+    // DIAG_KNOWN_DIFFS=<save file>, DIAG_SCENARIOS=R.
+    //   R0: saved state as-is (baseline; the file postdates the undo)
+    //   R1: saved state + target d4(3,32,9)[0,0]=1 alone
+    //   R2: saved state + the full 9-add batch (the two d3s are already in
+    //       the file, so this adds the 7 d4s incl. the target)
+    //   R3: saved state MINUS the suspect d2(36,35,2)=1 + the batch — the
+    //       closest match to the historical state at contradiction time
+    if scenarios.contains('R') {
+        let Some(path) = known_file.as_deref() else {
+            eprintln!("DIAG_SCENARIOS=R requires DIAG_KNOWN_DIFFS=<save file>");
+            return Ok(());
+        };
+
+        // --- chain with the saved knowns at every page (R0, R1, R2) -------
+        eprintln!("\nBuilding chain R (saved knowns at every page from {path})...");
+        let chain = build_chain(&data, max_t, max_r, &HashMap::new(), Some(path))?;
+        let prev = chain.prev.last().map(|(p, r)| (p, r));
+        let base = ehp_server::load_known_diffs(max_r, Some(path))?;
+
+        analyze("R0: saved state as-is (baseline)", &chain.final_page, &base, prev, max_dig);
+
+        let mut r1 = base.clone();
+        r1.insert(target, true);
+        analyze(
+            "R1: saved state + target d4(3,32,9)[0,0]=1 ALONE",
+            &chain.final_page,
+            &r1,
+            prev,
+            max_dig,
+        );
+
+        let mut r2 = base.clone();
+        for &v in &other_d4 {
+            r2.insert(v, true);
+        }
+        r2.insert(target, true);
+        analyze(
+            "R2: saved state + full 9-add batch (7 d4s; d3s already saved)",
+            &chain.final_page,
+            &r2,
+            prev,
+            max_dig,
+        );
+
+        // --- R3: rebuild the chain WITHOUT the suspect d2(36,35,2)=1 -------
+        let suspect_line = "2,36,35,2,0,0,1";
+        let contents = std::fs::read_to_string(path)?;
+        let filtered: String = contents
+            .lines()
+            .filter(|l| l.trim() != suspect_line)
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let removed = contents.lines().count() - filtered.lines().count();
+        let filtered_path = std::env::temp_dir().join("diag_unsat_cert_no_suspect_d2.csv");
+        std::fs::write(&filtered_path, &filtered)?;
+        eprintln!(
+            "\nBuilding chain R3 (saved knowns MINUS d2(36,35,2)=1 — removed {removed} line(s))..."
+        );
+        let filtered_str = filtered_path.to_string_lossy().to_string();
+        let chain3 = build_chain(&data, max_t, max_r, &HashMap::new(), Some(&filtered_str))?;
+        let prev3 = chain3.prev.last().map(|(p, r)| (p, r));
+        let base3 = ehp_server::load_known_diffs(max_r, Some(&filtered_str))?;
+
+        analyze(
+            "R3-base: saved state minus d2(36,35,2), no batch",
+            &chain3.final_page,
+            &base3,
+            prev3,
+            max_dig,
+        );
+        let mut r3 = base3.clone();
+        for &v in &other_d4 {
+            r3.insert(v, true);
+        }
+        r3.insert(target, true);
+        analyze(
+            "R3: saved state minus d2(36,35,2) + full 9-add batch",
+            &chain3.final_page,
+            &r3,
+            prev3,
+            max_dig,
+        );
     }
 
     Ok(())

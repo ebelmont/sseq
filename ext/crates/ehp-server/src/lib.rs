@@ -228,29 +228,122 @@ pub fn load_known_diffs(
     r: i32,
     file: Option<&str>,
 ) -> Result<hashbrown::HashMap<DiffVar, bool>, Box<dyn std::error::Error>> {
+    // Externally recorded differentials (the Python pipeline's
+    // `outside_diffs` knowledge base): every CSV in $EHP_OUTSIDE_DIFFS is
+    // scanned for rows `[r, n, s, f, row, col, value]` matching this page.
+    // These load first; a page-specific file (below) overrides on conflict.
+    let mut diffs = match std::env::var("EHP_OUTSIDE_DIFFS") {
+        Ok(dir) if !dir.is_empty() => load_outside_diffs(r, &dir)?,
+        _ => hashbrown::HashMap::new(),
+    };
+
     if let Some(path) = file {
-        let diffs = io::load_known_diffs(path, r)?;
-        info!("Loaded {} known differentials from {}", diffs.len(), path);
-        Ok(diffs)
-    } else {
-        let mut diffs = hashbrown::HashMap::new();
-        match r {
-            2 => {
-                diffs.insert(DiffVar::new(17, 15, 1, 0, 0), true);
-            }
-            3 => {
-                diffs.insert(DiffVar::new(17, 15, 2, 0, 0), true);
-            }
-            4 => {
-                diffs.insert(DiffVar::new(40, 38, 2, 0, 0), true);
-            }
-            _ => {}
-        }
-        if !diffs.is_empty() {
-            info!("Using {} hardcoded known differentials", diffs.len());
-        }
-        Ok(diffs)
+        let file_diffs = io::load_known_diffs(path, r)?;
+        info!("Loaded {} known differentials from {}", file_diffs.len(), path);
+        diffs.extend(file_diffs);
+        return Ok(diffs);
     }
+
+    let hardcoded: &[(DiffVar, bool)] = match r {
+        2 => &[(DiffVar::new(17, 15, 1, 0, 0), true)],
+        3 => &[(DiffVar::new(17, 15, 2, 0, 0), true)],
+        4 => &[(DiffVar::new(40, 38, 2, 0, 0), true)],
+        _ => &[],
+    };
+    let mut used_hardcoded = 0;
+    for &(dv, v) in hardcoded {
+        if let Some(&prev) = diffs.get(&dv) {
+            if prev != v {
+                warn!(
+                    "outside diff d_{}({},{},{})[{},{}]={} conflicts with hardcoded value {} — keeping the outside value",
+                    r, dv.n, dv.s, dv.f, dv.row, dv.col, prev as u8, v as u8,
+                );
+            }
+        } else {
+            diffs.insert(dv, v);
+            used_hardcoded += 1;
+        }
+    }
+    if used_hardcoded > 0 {
+        info!("Using {} hardcoded known differentials", used_hardcoded);
+    }
+    Ok(diffs)
+}
+
+/// Load the externally recorded differentials for page `r` from a directory
+/// of CSV files (the Python pipeline's `outside_diffs` format): each row is
+/// `r, n, s, f, row, col, value`; every `.csv` file in the directory is
+/// scanned and rows for other pages are skipped. `n` is normalized to the
+/// stable representative `min(n, s+2)`, matching how differential variables
+/// are keyed. Conflicting duplicate entries warn and keep the first value.
+pub fn load_outside_diffs(
+    r: i32,
+    dir: &str,
+) -> Result<hashbrown::HashMap<DiffVar, bool>, Box<dyn std::error::Error>> {
+    let mut diffs = hashbrown::HashMap::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("EHP_OUTSIDE_DIFFS: cannot read {}: {}", dir, e);
+            return Ok(diffs);
+        }
+    };
+    let mut files = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("csv") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            warn!("EHP_OUTSIDE_DIFFS: cannot read {}", path.display());
+            continue;
+        };
+        files += 1;
+        for (lineno, line) in content.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<i64> = line
+                .split(',')
+                .map(|p| p.trim().parse::<i64>())
+                .collect::<Result<_, _>>()
+                .unwrap_or_default();
+            if fields.len() != 7 {
+                warn!(
+                    "EHP_OUTSIDE_DIFFS: {}:{}: expected 7 integer fields, got {:?} — skipped",
+                    path.display(),
+                    lineno + 1,
+                    line,
+                );
+                continue;
+            }
+            if fields[0] as i32 != r {
+                continue;
+            }
+            let (n, s, f) = (fields[1] as i32, fields[2] as i32, fields[3] as i32);
+            let dv = DiffVar::new(n.min(s + 2), s, f, fields[4] as u16, fields[5] as u16);
+            let value = fields[6] != 0;
+            if let Some(&prev) = diffs.get(&dv) {
+                if prev != value {
+                    warn!(
+                        "EHP_OUTSIDE_DIFFS: conflicting values for d_{}({},{},{})[{},{}] — keeping {}",
+                        r, dv.n, dv.s, dv.f, dv.row, dv.col, prev as u8,
+                    );
+                }
+            } else {
+                diffs.insert(dv, value);
+            }
+        }
+    }
+    info!(
+        "Loaded {} outside differentials for E_{} from {} ({} csv files)",
+        diffs.len(),
+        r,
+        dir,
+        files,
+    );
+    Ok(diffs)
 }
 
 // =============================================================================
