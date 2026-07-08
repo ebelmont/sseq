@@ -245,7 +245,6 @@ fn load_products(path: &str, page: &mut SATPage) -> io::Result<usize> {
 
         let factor1_str = fields[0];
         let factor2_str = fields[1];
-        let result_str = fields[2..].join(","); // Handle commas in result
 
         let (t1, i1) = match parse_element_ref(factor1_str, page) {
             Some(v) => v,
@@ -255,6 +254,19 @@ fn load_products(path: &str, page: &mut SATPage) -> io::Result<usize> {
             Some(v) => v,
             None => continue,
         };
+
+        let dim1 = page.dim_at(t1);
+        let dim2 = page.dim_at(t2);
+        // A factor outside the loaded s+f window has dim 0 here: no product
+        // query can ever reference this row (multiply on a 0-dim factor is
+        // zero, and ProductTable::multiply treats absent blocks as zero).
+        // Skipping saves the result-string allocation and ~2/3 of the table
+        // inserts at typical max_t — the load was several minutes of startup.
+        if dim1 == 0 || dim2 == 0 {
+            continue;
+        }
+
+        let result_str = fields[2..].join(","); // Handle commas in result
 
         let result = match parse_element_full(result_str.trim_matches('"'), page) {
             Some(e) => e.vec,
@@ -266,8 +278,6 @@ fn load_products(path: &str, page: &mut SATPage) -> io::Result<usize> {
             }
         };
 
-        let dim1 = page.dim_at(t1);
-        let dim2 = page.dim_at(t2);
         let key = ProductKey::new(t1, i1 as u16, t2, i2 as u16);
         page.products.insert(key, result, dim1, dim2);
         count += 1;
@@ -301,16 +311,23 @@ fn load_map_csv(
         }
 
         let elem_str = fields[0];
-        let image_str = fields[1..].join(",");
-        let image_str = image_str.trim_matches('"');
 
         let (src_t, src_i) = match parse_element_ref(elem_str, page) {
             Some(v) => v,
             None => continue,
         };
 
+        // Sources outside the loaded window never produce a matrix (the
+        // build loop below skips src_dim == 0) — skip before the string work.
+        if page.dim_at(src_t) == 0 {
+            continue;
+        }
+
         let tgt_t = kind.target_degree(src_t);
         let tgt_dim = page.dim_at(tgt_t);
+
+        let image_str = fields[1..].join(",");
+        let image_str = image_str.trim_matches('"');
 
         let image_vec = if image_str.trim() == "0" || tgt_dim == 0 {
             vec_zero(tgt_dim)

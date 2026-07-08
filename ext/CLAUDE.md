@@ -150,18 +150,30 @@ Interactive tool for exploring and editing EHP spectral sequence differentials.
 EHP_MAX_T=100 cargo run -p ehp-server --release --example ehp_chart
 ```
 
-`EHP_RELAX_TARGET_EXCLUDE=0` kill-switch: restores the strict exclusion behavior
-(degrees excluded only as the *target* of an unknown incoming differential get
-no d_r variables and no Leibniz constraints). Default ON: such degrees keep
-their outgoing differential variables and Leibniz pairs may constrain them in
-the product position (e.g. the h1-Leibniz d3 forcing at S43 (34,4)); see
-`make_next_exclude_set` in `crates/ehp-core/src/pageturning.rs`.
+`EHP_RELAX_TARGET_EXCLUDE=1` opt-in: relaxes the strict exclusion behavior —
+degrees excluded only as the *target* of an unknown incoming differential keep
+their outgoing d_r variables and Leibniz pairs may constrain them in the
+product position (e.g. the h1-Leibniz d3 forcing at S43 (34,4)); see
+`make_next_exclude_set` in `crates/ehp-core/src/pageturning.rs`. **Default
+OFF** (strict): the relaxation enabled the t=80 outside-diffs E4 UNSAT
+(certificate: `notes/unsat_cert_t80_2026-07-07.log`, analysis:
+`notes/CHANGES_2026-07-07.md` §11–12c) and its validation gauntlet is
+unfinished. When enabled, the carve-out is guarded by an `e_d_deg2`
+exclusion check (constraints.rs) — do not remove that guard.
 
 **Known differentials from outside sources:** set `EHP_OUTSIDE_DIFFS=ext/data/outside_diffs`
 (vendored in the repo; or any directory) to load externally recorded differentials at startup: every `.csv` in the
 directory is scanned for rows `r, n, s, f, row, col, value` (the Python pipeline's
 outside_diffs format); rows for each page merge into its known diffs before the solve
 (n is normalized to min(n, s+2); a `load <file>`-style per-page file still overrides).
+Caveats (2026-07-07, `notes/CHANGES_2026-07-07.md` §11–12):
+- `stable_Dan.csv` is SKIPPED by default (user ruled it out as an input);
+  `EHP_OUTSIDE_SKIP` holds the comma-separated skip patterns (set to `""` to
+  load everything).
+- Rows for r≥3 pin `[row,col]` entries that are basis-dependent; rows at
+  excluded / over-kept / edge-margin degrees are pruned at load with per-row
+  warnings (Python-parity; `EHP_OUTSIDE_PARITY=0` force-enforces everything).
+  SAT at one max_t does NOT validate the same rows at a larger max_t.
 
 **Data:** the canonical E2 input lives IN THE REPO at `ext/data/E2` (CSVs) — the
 compiled-in default for the REPL and every diag example (via CARGO_MANIFEST_DIR, so

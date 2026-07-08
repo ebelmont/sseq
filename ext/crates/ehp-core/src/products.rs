@@ -124,6 +124,14 @@ impl ProductTable {
     /// Expands bilinearly using the stored block matrix.
     ///
     /// Single hash lookup per call instead of O(support1 × support2).
+    /// Whether any product block is stored for this degree pair. `multiply`
+    /// returns zero for absent blocks, so `!has_block(a, b)` guarantees every
+    /// `multiply(a, _, b, _, _)` is zero — used to fail fast in constraint
+    /// generation.
+    pub fn has_block(&self, deg1: Tridegree, deg2: Tridegree) -> bool {
+        self.matrices.contains_key(&(deg1, deg2))
+    }
+
     pub fn multiply(
         &self,
         deg1: Tridegree,

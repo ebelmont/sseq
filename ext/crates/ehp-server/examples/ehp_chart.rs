@@ -133,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let r = current_page.r;
         let t1 = Instant::now();
-        let known_diffs = ehp_server::load_known_diffs(r, None)?;
+        let known_diffs = ehp_server::load_known_diffs_for_page(&current_page, None)?;
         let cutoff = current_page.max_s.unwrap_or(0);
         let system = constraints::build_constraint_system(&current_page, cutoff, &known_diffs);
         let num_vars = system.num_vars;
@@ -403,6 +403,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("          try <r> <n> <s> <f> <row> <col> <0|1>, sweep <r> [min_stem [max_stem]]");
     eprintln!("          interpage [r], propagate on|off");
     eprintln!("          mapview <E|H|P> <source_n> [r]  |  mapview all [r]");
+    eprintln!("          why <r> <n> <s> <f> (why is this differential un/determined?)");
     eprintln!("          undo [r n s f row col], list, status, regen [r [n]], save <path>, quit");
     eprintln!("Tip: click two nodes in a chart to copy an `add` command; shift-click extra");
     eprintln!("     targets first for a sum. ';'-separated commands solve as one batch.");
@@ -1275,6 +1276,31 @@ fn process_stdin_cmd(
             }
         }
 
+        "why" => {
+            // why <r> <n> <s> <f> — explain a differential's status and, if it
+            // is exclusion-suppressed, which lower-page unknowns caused that.
+            if parts.len() < 5 {
+                eprintln!("Usage: why <r> <n> <s> <f>");
+                eprintln!(
+                    "Explains d_r at (n,s,f): determined / genuinely underdetermined / \
+                     suppressed by an exclusion — tracing the exclusion to the unknown \
+                     lower-page differential entries that created it."
+                );
+                return false;
+            }
+            let nums: Option<Vec<i64>> = parts[1..5].iter().map(|p| p.parse().ok()).collect();
+            let Some(nums) = nums else {
+                eprintln!("Invalid numeric argument");
+                return false;
+            };
+            let (r, n, s, f) = (nums[0] as i32, nums[1] as i32, nums[2] as i32, nums[3] as i32);
+            let Some(idx) = page_index(pages, r) else {
+                eprintln!("No page E_{} loaded", r);
+                return false;
+            };
+            why_differential(pages, idx, n, s, f);
+        }
+
         "regen" => {
             // regen [r [n]]
             let target_r = if parts.len() > 1 {
@@ -1773,6 +1799,7 @@ fn process_stdin_cmd(
             eprintln!("          try <r> <n> <s> <f> <row> <col> <0|1>, sweep <r> [min_stem [max_stem]]");
             eprintln!("          interpage [r], interpage try [min_stem [max_stem]], propagate on|off");
             eprintln!("          mapview <E|H|P> <source_n> [r]  |  mapview all [r]");
+            eprintln!("          why <r> <n> <s> <f> (explain a differential's status)");
             eprintln!("          undo [r n s f row col], list, status, regen [r [n]], save <path>, quit");
         }
     }
@@ -2348,6 +2375,200 @@ fn solve_and_export(
 // =============================================================================
 
 /// Generate (or regenerate) the HTML chart for a single sphere.
+/// `why` command: explain the status of d_r at (n, s, f) on `pages[idx]`.
+fn why_differential(pages: &[PageState], idx: usize, n_raw: i32, s: i32, f: i32) {
+    let ps = &pages[idx];
+    let r = ps.page.r;
+    let n = n_raw.min(s + 2);
+    if n != n_raw {
+        eprintln!("(n folded to the stable representative: {} -> {})", n_raw, n);
+    }
+    let src = Tridegree::new(n, s, f);
+    let tgt = src.diff_target(r);
+    let sdim = ps.page.dim_at(src);
+    let tdim = ps.page.dim_at(tgt);
+    eprintln!(
+        "d_{}({},{},{}) -> ({},{},{}) on E_{}: source dim {}, target dim {}",
+        r, src.n, src.s, src.f, tgt.n, tgt.s, tgt.f, r, sdim, tdim,
+    );
+    if sdim == 0 || tdim == 0 {
+        eprintln!("  => trivially ZERO (a 0-dimensional side); no variables needed.");
+        return;
+    }
+    let Some(res) = ps.result.as_ref() else {
+        eprintln!(
+            "  E_{} has no solve result ({}).",
+            r,
+            ps.unsat_reason.as_deref().unwrap_or("unsolved"),
+        );
+        return;
+    };
+
+    if res.var_index.contains_key(&DiffVar::new(n, s, f, 0, 0)) {
+        // Variables exist: report each entry.
+        let mut unknown_entries = Vec::new();
+        for row in 0..tdim as u16 {
+            for col in 0..sdim as u16 {
+                let dv = DiffVar::new(n, s, f, row, col);
+                match res.var_index.get(&dv) {
+                    Some(&vi) if res.unknown.contains(&vi) => unknown_entries.push((row, col)),
+                    Some(&vi) => {
+                        let v = res.offset.entry(vi) != 0;
+                        eprintln!("  [{},{}] determined = {}", row, col, v as u8);
+                    }
+                    None => eprintln!("  [{},{}] (no variable)", row, col),
+                }
+            }
+        }
+        if unknown_entries.is_empty() {
+            eprintln!("  => fully DETERMINED.");
+        } else {
+            let list: Vec<String> = unknown_entries
+                .iter()
+                .map(|(a, b)| format!("[{},{}]", a, b))
+                .collect();
+            eprintln!(
+                "  entries {} UNKNOWN — variables exist but no constraint pins them \
+                 and no trial contradiction forces them: genuinely underdetermined.",
+                list.join(" "),
+            );
+            eprintln!(
+                "  (`try {} {} {} {} <row> <col> <0|1>` tests a value; if `interpage try` \
+                 already reached its fixpoint, both values are consistent.)",
+                r, n, s, f,
+            );
+        }
+        return;
+    }
+
+    // No variables: exclusion (or bounds).
+    eprintln!("  no d_{} variables exist at this degree:", r);
+    let mut any_excluded = false;
+    for (label, deg) in [("source", src), ("target", tgt)] {
+        if ps.page.is_excluded(deg) {
+            any_excluded = true;
+            let kind = if ps.page.is_excluded_target_only(deg) {
+                "target-only"
+            } else {
+                "hard"
+            };
+            eprintln!(
+                "  - {} ({},{},{}) is EXCLUDED ({}):",
+                label, deg.n, deg.s, deg.f, kind,
+            );
+            explain_exclusion(pages, idx, deg, 6, 4);
+        }
+    }
+    if !any_excluded {
+        eprintln!("  - neither degree is excluded: outside the polygon/cutoff bounds.");
+        return;
+    }
+    eprintln!(
+        "  => the differential is UNCERTAIN (suppressed, not determined zero). \
+         Determining the unknown entries above un-excludes it on the next re-solve."
+    );
+}
+
+/// Print, indented by `indent`, the previous-page unknowns and carried-forward
+/// exclusions that put `deg` in `pages[idx]`'s exclude set. Mirrors
+/// `make_next_exclude_set`: an input degree x (an unknown-d_{r-1} source, a
+/// prior excluded degree, or its incoming-d pre-image (n, s+1, f-r)) excludes
+/// x itself (if unstable) and stable_rep(x.diff_target(r-1)).
+fn explain_exclusion(pages: &[PageState], idx: usize, deg: Tridegree, depth: usize, indent: usize) {
+    let pad = " ".repeat(indent);
+    if idx == 0 {
+        eprintln!("{}(exclusion on the base page — unexpected)", pad);
+        return;
+    }
+    if depth == 0 {
+        eprintln!("{}(trace depth limit reached)", pad);
+        return;
+    }
+    let prev = &pages[idx - 1];
+    let pr = prev.page.r;
+    let fold = |t: Tridegree| {
+        if t.n > t.s + 2 {
+            Tridegree::new(t.s + 2, t.s, t.f)
+        } else {
+            t
+        }
+    };
+    let mut found = false;
+
+    // 1. Unknown differentials on the previous page.
+    if let Some(res) = prev.result.as_ref() {
+        let mut by_src: HashMap<Tridegree, Vec<(u16, u16)>> = HashMap::new();
+        for &vi in res.unknown.iter() {
+            let v = &res.vars[vi];
+            by_src
+                .entry(Tridegree::new(v.n, v.s, v.f))
+                .or_default()
+                .push((v.row, v.col));
+        }
+        let mut srcs: Vec<_> = by_src.keys().copied().collect();
+        srcs.sort();
+        for src in srcs {
+            let hits_as_source = src == deg;
+            let hits_as_target = fold(src.diff_target(pr)) == deg;
+            if !hits_as_source && !hits_as_target {
+                continue;
+            }
+            found = true;
+            let mut entries = by_src[&src].clone();
+            entries.sort();
+            let list: Vec<String> = entries
+                .iter()
+                .map(|(a, b)| format!("[{},{}]", a, b))
+                .collect();
+            eprintln!(
+                "{}unknown d_{}({},{},{}) {} — entries {}",
+                pad,
+                pr,
+                src.n,
+                src.s,
+                src.f,
+                if hits_as_source {
+                    "OUT of this degree"
+                } else {
+                    "hitting this degree"
+                },
+                list.join(" "),
+            );
+        }
+    } else {
+        eprintln!("{}E_{} below has no solve result — cannot trace", pad, pr);
+    }
+
+    // 2. Carried-forward exclusions from the previous page.
+    let mut carried: Vec<Tridegree> = Vec::new();
+    for &pdeg in prev.page.exclude_set.iter() {
+        for x in [pdeg, Tridegree::new(pdeg.n, pdeg.s + 1, pdeg.f - pr)] {
+            let matches = (x.n <= x.s + 2 && x == deg)
+                || fold(x.diff_target(pr)) == deg;
+            if matches && !carried.contains(&pdeg) {
+                carried.push(pdeg);
+            }
+        }
+    }
+    carried.sort();
+    for pdeg in carried {
+        found = true;
+        eprintln!(
+            "{}carried forward from E_{}'s exclusion of ({},{},{}):",
+            pad, pr, pdeg.n, pdeg.s, pdeg.f,
+        );
+        explain_exclusion(pages, idx - 1, pdeg, depth - 1, indent + 2);
+    }
+
+    if !found {
+        eprintln!(
+            "{}(no matching unknown or carried entry found on E_{} — possible stale \
+             exclude set; try `regen` / a fresh solve)",
+            pad, pr,
+        );
+    }
+}
+
 fn regenerate_sphere(
     n: i32,
     csv_path: &Path,
@@ -2395,9 +2616,12 @@ fn regenerate_all(
 /// homology (fresh CSV → SeqSee). Charts the cascade didn't touch keep the
 /// cheap in-place CLASSDIMS/DIFFDATA update.
 ///
-/// Returns the number of charts regenerated. When the cascade touched more
-/// charts than `MAX_AUTO_REGEN` (e.g. a huge `interpage try`), it skips with
-/// a hint — run `regen <r>` manually instead.
+/// Returns the number of charts regenerated. Every affected chart is
+/// regenerated no matter how many (the generation is batched and parallel —
+/// a near-full set costs about the same as startup chart generation), so the
+/// fade-last-class shortcut never has to stand in for real layout; it
+/// survives only as the display of last resort when chart generation itself
+/// fails (e.g. no usable python).
 fn regen_affected_charts(
     pages: &[PageState],
     affected: &HashMap<i32, HashSet<Tridegree>>,
@@ -2406,7 +2630,6 @@ fn regen_affected_charts(
     seqsee_dir: &Path,
     theme: &str,
 ) -> usize {
-    const MAX_AUTO_REGEN: usize = 80;
     // Collect (page idx, spheres, stems) worth regenerating.
     let mut plan: Vec<(usize, BTreeSet<i32>, BTreeSet<i32>)> = Vec::new();
     let mut total = 0usize;
@@ -2433,13 +2656,12 @@ fn regen_affected_charts(
     if plan.is_empty() {
         return 0;
     }
-    if total > MAX_AUTO_REGEN {
+    if total > 80 {
         eprintln!(
-            "  {} charts affected — too many for auto-regen; falling back to the fade-last-class \
-             shortcut (node indices may be off). Run `regen <r>` to re-lay out a page exactly.",
+            "  {} charts affected — regenerating all of them (batched, parallel; \
+             a large set takes a few minutes, comparable to startup)...",
             total,
         );
-        return 0;
     }
     plan.sort_by_key(|(idx, _, _)| *idx);
 
@@ -2740,26 +2962,55 @@ fn inject_stem_scripts(charts_dir: &Path) {
 (function() {{
   const NAV = /*STEMNAV*/{nav}/*ENDSTEMNAV*/;
   const CLASS_DIMS = /*CLASSDIMS*/null/*ENDCLASSDIMS*/;
+  const PAGE_R = {r};
+  const STEM_K = {k};
+  // Live dims shared with the click script (shift-tap zero needs the target
+  // degree's current dimension).
+  window.EHP_CLASS_DIMS = CLASS_DIMS;
+
+  // The template restores `seqsee_viewport` from sessionStorage on every
+  // load; saving here before WASD navigation keeps the pan/zoom fixed while
+  // stepping stems/pages (it only jumped because the injected nav never
+  // saved).
+  function saveViewport() {{
+    try {{
+      if (window.panZoom) {{
+        const p = window.panZoom.getPan();
+        sessionStorage.setItem('seqsee_viewport',
+          JSON.stringify({{ x: p.x, y: p.y, zoom: window.panZoom.getZoom() }}));
+      }}
+    }} catch (err) {{}}
+  }}
+
   window.addEventListener('keydown', (e) => {{
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === 'Escape') {{ cancelPending('cancelled'); return; }}
     const dir = {{w: 'up', s: 'down', a: 'left', d: 'right'}}[e.key.toLowerCase()];
     if (!dir) return;
+    window.__ehpShiftTap = false;  // shift+WASD is navigation, not a zero-tap
     e.preventDefault();
     e.stopImmediatePropagation();
     const url = NAV[dir];
-    if (url) location.href = url;
+    if (url) {{ saveViewport(); location.href = url; }}
   }}, true);
+
+  function parseNodeId(id) {{
+    const m = (id || '').match(/^S(-?\d+)_(-?\d+)_(-?\d+)(?:_(\d+))?$/);
+    if (!m) return null;
+    return {{ n: parseInt(m[1]), s: parseInt(m[2]), f: parseInt(m[3]),
+             idx: m[4] !== undefined ? parseInt(m[4]) : 0 }};
+  }}
+
   function applyClassDims() {{
     if (!CLASS_DIMS) return;
     const dead = new Set();
     document.querySelectorAll('#nodes-group circle, #nodes-group rect').forEach(el => {{
-      const m = (el.id || '').match(/^S(-?\d+)_(-?\d+)_(-?\d+)(?:_(\d+))?$/);
-      if (!m) return;
-      const key = m[1] + '_' + m[2] + '_' + m[3];
+      const p = parseNodeId(el.id);
+      if (!p) return;
+      const key = p.n + '_' + p.s + '_' + p.f;
       const dim = (key in CLASS_DIMS) ? CLASS_DIMS[key] : 0;
-      const idx = m[4] !== undefined ? parseInt(m[4]) : 0;
-      const isDead = idx >= dim;
+      const isDead = p.idx >= dim;
       el.style.opacity = isDead ? '0.15' : '';
       if (isDead) dead.add(el.id);
     }});
@@ -2769,8 +3020,139 @@ fn inject_stem_scripts(charts_dir: &Path) {
       el.style.opacity = (dead.has(s) || (t && dead.has(t))) ? '0.1' : '';
     }});
   }}
+
+  // ==========================================================================
+  // Add-differential flow from "?" (uncertain) classes.
+  //
+  // Click an uncertain-SOURCE class (data-uncertain="src"|"both") on this
+  // stem chart: the pending source is stored in sessionStorage and the chart
+  // navigates to stem k-1 on the same page — the target stem of a d_r. That
+  // chart highlights the target bidegree (same n, f + r); click or
+  // shift-click classes there to build the `add` batch, which is copied to
+  // the clipboard for pasting into the REPL (each segment
+  // `add r n s f row col`, row = target index, col = source index).
+  // Escape cancels anywhere.
+  // ==========================================================================
+  const PENDING_KEY = 'ehp_stem_pending';
+  let pendingTargets = [];
+
+  function readPending() {{
+    try {{ return JSON.parse(sessionStorage.getItem(PENDING_KEY) || 'null'); }}
+    catch (err) {{ return null; }}
+  }}
+
+  function cancelPending(msg) {{
+    if (sessionStorage.getItem(PENDING_KEY)) {{
+      sessionStorage.removeItem(PENDING_KEY);
+      document.querySelectorAll('.ehp-target-hl, .ehp-target-sel').forEach(el => {{
+        el.classList.remove('ehp-target-hl');
+        el.classList.remove('ehp-target-sel');
+      }});
+      pendingTargets = [];
+      if (msg) setStemStatus('Add-differential ' + msg);
+    }}
+  }}
+
+  function setStemStatus(text) {{
+    let bar = document.getElementById('ehp-stem-status');
+    if (!bar) {{
+      bar = document.createElement('div');
+      bar.id = 'ehp-stem-status';
+      bar.style.cssText = 'position:fixed;top:8px;left:50%;transform:translateX(-50%);' +
+        'background:rgba(0,0,0,0.78);color:#fff;padding:6px 14px;border-radius:6px;' +
+        'font:13px sans-serif;z-index:10000;pointer-events:none;max-width:80%;';
+      document.body.appendChild(bar);
+    }}
+    bar.textContent = text;
+    bar.style.display = text ? 'block' : 'none';
+  }}
+
+  function copyCmd(cmd, desc) {{
+    navigator.clipboard.writeText(cmd).then(() => {{
+      setStemStatus('Copied: ' + cmd + '  (' + desc + ') — paste into REPL');
+    }}).catch(() => {{
+      window.prompt('Paste into REPL:', cmd);
+      setStemStatus(cmd);
+    }});
+  }}
+
+  function initPendingTarget() {{
+    const pending = readPending();
+    if (!pending || pending.r !== PAGE_R || pending.s - 1 !== STEM_K) return;
+    const tn = pending.n, ts = pending.s - 1, tf = pending.f + PAGE_R;
+    let count = 0;
+    document.querySelectorAll('#nodes-group circle, #nodes-group rect').forEach(el => {{
+      const p = parseNodeId(el.id);
+      if (p && p.n === tn && p.s === ts && p.f === tf) {{
+        el.classList.add('ehp-target-hl');
+        count++;
+      }}
+    }});
+    if (count === 0) {{
+      setStemStatus('d_' + PAGE_R + '(' + pending.name + '): no classes at target (' +
+                    tn + ',' + ts + ',' + tf + ') on this chart — Escape cancels');
+      return;
+    }}
+    setStemStatus('d_' + PAGE_R + '(' + pending.name + '): click a highlighted target' +
+                  ' — shift-click to build a sum, Escape cancels');
+  }}
+
+  function onStemNodeClick(e) {{
+    const el = e.currentTarget;
+    const p = parseNodeId(el.id);
+    if (!p) return;
+    const pending = readPending();
+
+    // Target-selection mode: this chart is the pending source's target stem
+    // and the clicked class sits in the target bidegree.
+    if (pending && pending.r === PAGE_R && pending.s - 1 === STEM_K &&
+        p.n === pending.n && p.s === pending.s - 1 && p.f === pending.f + PAGE_R) {{
+      if (!pendingTargets.includes(p.idx)) {{
+        pendingTargets.push(p.idx);
+        el.classList.add('ehp-target-sel');
+      }}
+      if (e.shiftKey) {{
+        setStemStatus('d_' + PAGE_R + '(' + pending.name + ') = ' +
+                      pendingTargets.map(i => '[' + i + ']').join(' + ') +
+                      ' + …  — shift-click more targets, plain click the last one');
+        return;
+      }}
+      const segs = pendingTargets.map(row =>
+        'add ' + PAGE_R + ' ' + pending.n + ' ' + pending.s + ' ' + pending.f +
+        ' ' + row + ' ' + pending.idx);
+      const cmd = segs.join('; ');
+      cancelPending(null);
+      copyCmd(cmd, 'd_' + PAGE_R + '(' + pending.name + ')');
+      return;
+    }}
+
+    // Otherwise: start a new flow from an uncertain-source class.
+    const unc = el.getAttribute('data-uncertain');
+    if (unc === 'src' || unc === 'both') {{
+      const tgtUrl = 'stem' + (p.s - 1) + '_E' + PAGE_R + '.html';
+      sessionStorage.setItem(PENDING_KEY, JSON.stringify({{
+        r: PAGE_R, n: p.n, s: p.s, f: p.f, idx: p.idx, name: el.id
+      }}));
+      saveViewport();
+      location.href = tgtUrl;
+    }} else if (unc === 'tgt') {{
+      setStemStatus(el.id + ' is a possible TARGET of an uncertain differential' +
+                    ' — start from the source class (one stem up)');
+    }}
+  }}
+
   function initStem() {{
     applyClassDims();
+    const st = document.createElement('style');
+    st.textContent =
+      '.ehp-target-hl {{ stroke: #f5a623 !important; stroke-width: 4px !important; }}' +
+      '.ehp-target-sel {{ stroke: #2ecc71 !important; stroke-width: 4px !important; }}' +
+      '#nodes-group [data-uncertain] {{ cursor: pointer; }}';
+    document.head.appendChild(st);
+    document.querySelectorAll('#nodes-group circle, #nodes-group rect').forEach(el => {{
+      el.addEventListener('click', onStemNodeClick);
+    }});
+    initPendingTarget();
     // The template's Sphere/Stem toggle is a placeholder; from a stem chart
     // it navigates back to a sphere chart of this page.
     const viewBtn = document.getElementById('sphere-toggle');
@@ -2837,22 +3219,68 @@ fn seqsee_python(seqsee_dir: &Path) -> Option<PathBuf> {
                 return Some(PathBuf::from(py));
             }
             if seqsee_dir.join("requirements.txt").exists() {
-                // Vendored copy: no poetry env; use python3 from PATH
-                // (install deps with `pip install -r requirements.txt`).
-                return Some(PathBuf::from("python3"));
+                // Vendored copy: no poetry env. Prefer python3 from PATH
+                // (deps from requirements.txt), but PROBE it first — a
+                // bare-bones system python without jinja2 makes every chart
+                // subprocess die silently at import time (stderr is nulled).
+                let path_py = PathBuf::from("python3");
+                if python_has_jinja2(&path_py) {
+                    return Some(path_py);
+                }
+                // PATH python3 lacks deps: fall back to the poetry venv of an
+                // external SeqSee checkout, if one exists and passes the probe.
+                if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                    for candidate in [home.join("seqsee/seqsee_new"), home.join("SeqSee")] {
+                        if !candidate.is_dir() {
+                            continue;
+                        }
+                        if let Some(py) = poetry_python(&candidate) {
+                            if python_has_jinja2(&py) {
+                                eprintln!(
+                                    "note: PATH python3 lacks SeqSee deps (jinja2); using poetry venv python {} from {}",
+                                    py.display(),
+                                    candidate.display()
+                                );
+                                return Some(py);
+                            }
+                        }
+                    }
+                }
+                eprintln!(
+                    "WARNING: no python with SeqSee deps found (python3 on PATH cannot import jinja2, and no usable poetry venv was located). \
+Chart generation WILL FAIL silently. Fix with `pip install -r {}/requirements.txt` or set EHP_PYTHON to a python that has the deps.",
+                    seqsee_dir.display()
+                );
+                return Some(path_py);
             }
-            let out = std::process::Command::new("poetry")
-                .args(["env", "info", "--executable"])
-                .current_dir(seqsee_dir)
-                .output()
-                .ok()?;
-            if !out.status.success() {
-                return None;
-            }
-            let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-            p.exists().then_some(p)
+            poetry_python(seqsee_dir)
         })
         .clone()
+}
+
+/// True if `py -c "import jinja2"` succeeds (the canary dep for SeqSee scripts).
+fn python_has_jinja2(py: &Path) -> bool {
+    std::process::Command::new(py)
+        .args(["-c", "import jinja2"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Resolve the poetry venv's python for a directory containing a pyproject.
+fn poetry_python(dir: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("poetry")
+        .args(["env", "info", "--executable"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    p.exists().then_some(p)
 }
 
 /// Command to run a SeqSee python script, using the resolved venv python
@@ -4528,6 +4956,7 @@ const CLICK_SCRIPT: &str = r##"
       openMapView(k.toUpperCase());
     } else if (k === 'E' || k === 'H' || k === 'P') {
       // Image highlighting lives in the split-screen map view.
+      window.__ehpShiftTap = false;  // Shift+E/H/P is not a zero-tap
       ev.preventDefault();
       ev.stopImmediatePropagation();
       setStatus('Image mode is in the split-screen view: press ' + k.toLowerCase() +
@@ -4580,11 +5009,14 @@ const CLICK_SCRIPT: &str = r##"
     const p = parseNodeId(nodeId);
     if (!p) return;
 
+    window.__ehpShiftTap = false;  // a click is never part of a bare shift-tap
+
     if (!diffClickState) {
       diffClickState = { ...p, name: nodeId, el, targets: [] };
       el.classList.add('ehp-selected');
       setStatus('Source: ' + nodeId + ' \u2014 click target for d_' + PAGE_R +
-                ' (shift-click to build a sum of targets)');
+                ' (shift-click to build a sum of targets; tap Shift alone for d_' +
+                PAGE_R + ' = 0)');
       return;
     }
 
@@ -4644,10 +5076,86 @@ const CLICK_SCRIPT: &str = r##"
 
   window.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'Shift') {
+      // Arm a bare shift-tap (source selected + tap Shift = assert d_r = 0).
+      // Any click, other key, mouse press, or wheel disarms it, so shift-click
+      // target accumulation and Shift+key combos are unaffected.
+      if (!e.repeat && diffClickState) window.__ehpShiftTap = true;
+      return;
+    }
+    window.__ehpShiftTap = false;
     if (e.key === 'L') toggleLog();
     else if (e.key === 'M') toggleMaps();
     else if (e.key === 'Escape') { clearDiffClick(); setStatus('Click source node for d_' + PAGE_R); }
   });
+
+  window.addEventListener('keyup', (e) => {
+    if (e.key !== 'Shift') return;
+    if (!window.__ehpShiftTap) return;
+    window.__ehpShiftTap = false;
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    emitZeroForSource();
+  });
+
+  window.addEventListener('mousedown', () => { window.__ehpShiftTap = false; }, true);
+  window.addEventListener('wheel', () => { window.__ehpShiftTap = false; },
+                          { capture: true, passive: true });
+
+  // Current dimension at a degree: live CLASSDIMS if the nav script exposed
+  // them (updated in place after every mutation), else count the chart's
+  // regen-time nodes.
+  function liveDimAt(n, s, f) {
+    const dims = window.EHP_CLASS_DIMS;
+    if (dims) {
+      const key = n + '_' + s + '_' + f;
+      return (key in dims) ? dims[key] : 0;
+    }
+    let count = 0;
+    document.querySelectorAll('#nodes-group circle, #nodes-group rect').forEach(el => {
+      const p = parseNodeId(el.id || '');
+      if (p && p.n === n && p.s === s && p.f === f) count++;
+    });
+    return count;
+  }
+
+  // Bare shift-tap with a source selected: assert d_r(source class) = 0 by
+  // emitting one `zero` per target row (a ';'-batch applies with a single
+  // cascade in the REPL, same as sum-target adds).
+  function emitZeroForSource() {
+    if (!diffClickState) return;
+    const src = diffClickState;
+    if ((src.targets || []).length > 0) {
+      setStatus('Shift-tap ignored while building a sum — plain-click the last target, or Escape');
+      return;
+    }
+    const tn = src.n, ts = src.s - 1, tf = src.f + PAGE_R;
+    const dim = liveDimAt(tn, ts, tf);
+    clearDiffClick();
+    if (dim <= 0) {
+      setStatus('d_' + PAGE_R + '(' + src.name + ') is already 0 — target (' +
+                tn + ',' + ts + ',' + tf + ') has no classes, nothing to assert');
+      return;
+    }
+    const segs = [];
+    for (let row = 0; row < dim; row++) {
+      segs.push('zero ' + PAGE_R + ' ' + src.n + ' ' + src.s + ' ' + src.f +
+                ' ' + row + ' ' + src.idx);
+    }
+    const cmd = segs.join('; ');
+    addToLog(cmd, src.name, '0');
+    navigator.clipboard.writeText(cmd).then(() => {
+      setStatus('Copied: ' + cmd + '  — paste into REPL (asserts d_' + PAGE_R +
+                '(' + src.name + ') = 0)');
+    }).catch(() => {
+      setStatus('Command: ' + cmd);
+      window.prompt('Paste into REPL:', cmd);
+    });
+    const logPanel = document.getElementById('ehp-log');
+    if (logPanel.style.display === 'none') {
+      logPanel.style.display = 'block';
+      document.getElementById('btn-log').classList.add('active');
+    }
+  }
 
   // =========================================================================
   // Differential edge overlay (updated in-place by the REPL, no regen needed)

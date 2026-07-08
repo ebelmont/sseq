@@ -1,0 +1,654 @@
+data=/Users/francisbaer/sseq/ext/crates/ehp-server/../../data/E2 max_t=80 max_r=4 scenarios=0
+
+Building chain A (stock knowns)...
+Loading dimensions from /Users/francisbaer/sseq/ext/crates/ehp-server/../../data/E2/E2_rank.csv...
+  Loaded 167797 tridegrees with non-zero dimension
+Loading multiplication table from /Users/francisbaer/sseq/ext/crates/ehp-server/../../data/E2/E2_relations.csv...
+  Loaded 2002332 products
+  E map: 107015 entries
+  H map: 18199 entries
+  P map: 19142 entries
+  Names file not found, using empty dictionary
+Successfully loaded E_2 page
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(89,87,9)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(77,75,5)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(74,72,12)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(80,78,5)[2,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(59,57,24)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(81,79,5)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(81,79,9)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(84,82,10)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(89,87,7)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(76,74,15)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(73,71,22)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(75,73,9)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(83,81,8)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(91,89,7)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(79,77,5)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(87,85,8)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(83,81,7)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(65,63,23)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(70,68,15)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(74,72,12)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(80,78,5)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(85,83,10)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(64,62,22)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(82,80,12)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(82,80,15)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(83,81,3)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(83,81,4)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(76,74,7)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(83,81,12)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(79,77,3)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(80,78,5)[3,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(89,87,5)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(79,77,5)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(80,78,3)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(82,80,15)[2,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(84,82,4)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(85,83,10)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(81,79,5)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(80,78,5)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(76,74,15)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(60,58,23)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(83,81,4)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(88,86,5)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(83,81,12)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(81,79,10)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(78,76,5)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(87,85,3)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(87,85,7)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(83,81,7)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(84,82,11)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(68,66,27)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(77,75,6)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(91,89,7)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(67,65,28)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(83,81,3)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(67,65,22)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(77,75,6)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(82,80,15)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(68,66,21)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(73,71,19)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(85,83,6)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(77,75,7)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(71,69,13)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(81,79,3)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(83,81,13)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(85,83,6)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(86,84,9)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(89,87,5)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(89,87,9)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(94,92,4)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:02:41Z WARN  ehp_core::constraints] known diff d(95,93,3)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+  E_2: 50528/52283 vars determined
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(73,71,11)[2,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(74,72,12)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(77,75,5)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(82,80,5)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(81,79,9)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(87,85,6)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(73,71,11)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(72,70,10)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(65,63,24)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(77,75,5)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(82,80,5)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(75,73,9)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(81,79,7)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(79,77,5)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(83,81,7)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(67,65,19)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(65,63,23)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(74,72,12)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(80,78,5)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(64,62,22)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(81,79,3)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(81,79,10)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(83,81,3)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(79,77,5)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(84,82,4)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(88,86,5)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(82,80,10)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(87,85,7)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(81,79,10)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(78,76,5)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(74,72,8)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(83,81,9)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(77,75,6)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(83,81,3)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(67,65,22)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(66,64,17)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(86,84,10)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(73,71,11)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(81,79,3)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(81,79,7)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:06:07Z WARN  ehp_core::constraints] known diff d(73,71,14)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+  E_3: 13606/15583 vars determined
+
+=================================================================
+SCENARIO S0: stock known diffs only
+=================================================================
+E_4 page: cutoff(max_s)=76 max_t=Some(76), 71 known diffs:
+  d4(18,16,2)[0,0] = 0   (source dim>0: true)
+  d4(25,23,4)[0,0] = 0   (source dim>0: true)
+  d4(33,31,8)[0,0] = 1   (source dim>0: true)
+  d4(33,31,9)[0,0] = 1   (source dim>0: true)
+  d4(34,32,4)[0,0] = 0   (source dim>0: true)
+  d4(34,32,6)[0,0] = 0   (source dim>0: true)
+  d4(36,34,3)[0,0] = 0   (source dim>0: true)
+  d4(39,37,8)[0,0] = 1   (source dim>0: true)
+  d4(40,38,2)[0,0] = 1   (source dim>0: true)
+  d4(40,38,4)[0,0] = 0   (source dim>0: true)
+  d4(41,39,5)[0,0] = 0   (source dim>0: true)
+  d4(41,39,12)[0,0] = 1   (source dim>0: true)
+  d4(42,40,5)[0,0] = 0   (source dim>0: true)
+  d4(47,45,12)[0,0] = 1   (source dim>0: true)
+  d4(49,47,16)[0,0] = 1   (source dim>0: true)
+  d4(50,48,6)[0,0] = 0   (source dim>0: true)
+  d4(50,48,9)[0,0] = 0   (source dim>0: true)
+  d4(52,50,10)[0,0] = 1   (source dim>0: true)
+  d4(54,52,8)[0,0] = 0   (source dim>0: true)
+  d4(55,53,7)[0,0] = 0   (source dim>0: true)
+  d4(57,55,11)[0,0] = 1   (source dim>0: true)
+  d4(57,55,20)[0,0] = 1   (source dim>0: true)
+  d4(58,56,13)[0,0] = 1   (source dim>0: true)
+  d4(60,58,8)[0,0] = 0   (source dim>0: true)
+  d4(60,58,14)[0,0] = 1   (source dim>0: true)
+  d4(64,62,2)[0,0] = 0   (source dim>0: true)
+  d4(65,63,6)[0,0] = 0   (source dim>0: true)
+  d4(65,63,6)[1,0] = 0   (source dim>0: true)
+  d4(65,63,6)[2,0] = 0   (source dim>0: true)
+  d4(65,63,23)[0,0] = 0   (source dim>0: false)
+  d4(66,64,2)[0,0] = 0   (source dim>0: true)
+  d4(66,64,4)[0,0] = 0   (source dim>0: true)
+  d4(66,64,5)[0,0] = 0   (source dim>0: true)
+  d4(66,64,5)[1,0] = 0   (source dim>0: true)
+  d4(66,64,7)[0,0] = 0   (source dim>0: true)
+  d4(66,64,7)[1,0] = 0   (source dim>0: true)
+  d4(66,64,7)[2,0] = 0   (source dim>0: true)
+  d4(66,64,10)[0,0] = 0   (source dim>0: true)
+  d4(67,65,10)[0,0] = 0   (source dim>0: true)
+  d4(68,66,6)[0,0] = 0   (source dim>0: true)
+  d4(68,66,8)[0,0] = 0   (source dim>0: true)
+  d4(68,66,18)[0,0] = 1   (source dim>0: false)
+  d4(69,67,8)[0,0] = 0   (source dim>0: true)
+  d4(69,67,8)[1,0] = 0   (source dim>0: true)
+  d4(71,69,3)[0,0] = 0   (source dim>0: true)
+  d4(71,69,3)[1,0] = 0   (source dim>0: true)
+  d4(72,70,9)[0,0] = 0   (source dim>0: true)
+  d4(73,71,5)[0,0] = 0   (source dim>0: true)
+  d4(73,71,6)[0,0] = 0   (source dim>0: true)
+  d4(73,71,19)[0,0] = 1   (source dim>0: false)
+  d4(74,72,5)[0,0] = 0   (source dim>0: true)
+  d4(74,72,8)[0,0] = 0   (source dim>0: true)
+  d4(74,72,15)[0,0] = 0   (source dim>0: false)
+  d4(74,72,21)[0,0] = 1   (source dim>0: false)
+  d4(75,73,9)[0,0] = 0   (source dim>0: false)
+  d4(75,73,17)[0,0] = 0   (source dim>0: false)
+  d4(76,74,10)[0,0] = 0   (source dim>0: false)
+  d4(76,74,19)[0,0] = 0   (source dim>0: false)
+  d4(77,75,6)[0,0] = 0   (source dim>0: false)
+  d4(79,77,3)[0,0] = 0   (source dim>0: true)
+  d4(79,77,10)[0,0] = 0   (source dim>0: false)
+  d4(80,78,5)[0,0] = 1   (source dim>0: false)
+  d4(81,79,3)[0,0] = 0   (source dim>0: false)
+  d4(82,80,10)[0,0] = 0   (source dim>0: false)
+  d4(83,81,5)[0,0] = 0   (source dim>0: false)
+  d4(83,81,5)[1,0] = 0   (source dim>0: false)
+  d4(83,81,8)[0,0] = 0   (source dim>0: false)
+  d4(84,82,4)[0,0] = 0   (source dim>0: false)
+  d4(84,82,6)[0,0] = 0   (source dim>0: false)
+  d4(85,83,6)[0,0] = 0   (source dim>0: false)
+  d4(86,84,6)[0,0] = 0   (source dim>0: false)
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(83,81,5)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(76,74,10)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(68,66,18)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(74,72,15)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(76,74,19)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(82,80,10)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(74,72,8)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(74,72,21)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(86,84,6)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(75,73,9)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(83,81,8)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(77,75,6)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(72,70,9)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(79,77,10)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(65,63,23)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(83,81,5)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(84,82,6)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(80,78,5)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(65,63,6)[2,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(73,71,19)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(85,83,6)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(79,77,3)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(81,79,3)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(84,82,4)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:28Z WARN  ehp_core::constraints] known diff d(75,73,17)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+system: 5555 vars, 11139 constraints
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(83,81,5)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(76,74,10)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(68,66,18)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(74,72,15)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(76,74,19)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(82,80,10)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(74,72,8)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(74,72,21)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(86,84,6)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(75,73,9)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(83,81,8)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(77,75,6)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(72,70,9)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(79,77,10)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(65,63,23)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(83,81,5)[1,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(84,82,6)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(80,78,5)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(65,63,6)[2,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(73,71,19)[0,0] = 1 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(85,83,6)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(79,77,3)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(81,79,3)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(84,82,4)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+[2026-07-08T02:07:33Z WARN  ehp_core::constraints] known diff d(75,73,17)[0,0] = 0 has no variable (zero dims or out of range) — NOT enforced
+provenance reconstruction: VERIFIED (matches real system row-for-row)
+solver::solve: None (inconsistent or empty)
+tracked elimination: 0.7s — INCONSISTENT, certificate of 21 constraints
+
+--- UNSAT CERTIFICATE (XOR of these constraints = [0 = 1]) ---
+
+  row #5: d4(3,32,9)[0,0] + d4(4,32,9)[0,0] = 0
+    from: naturality[E] anchor (3,32,9)
+
+  row #37: d4(4,32,9)[0,0] + d4(5,32,9)[0,0] = 0
+    from: naturality[E] anchor (4,32,9)
+
+  row #422: d4(10,45,12)[0,0] + d4(11,45,12)[0,0] = 0
+    from: naturality[E] anchor (10,45,12)
+
+  row #504: d4(11,45,12)[0,0] + d4(12,45,12)[0,0] = 0
+    from: naturality[E] anchor (11,45,12)
+
+  row #592: d4(12,45,12)[0,0] + d4(13,45,12)[0,0] = 0
+    from: naturality[E] anchor (12,45,12)
+
+  row #1202: d4(17,37,8)[0,0] + d4(18,37,8)[0,0] = 0
+    from: naturality[E] anchor (17,37,8)
+
+  row #3595: d4(2,33,10)[0,0] + d4(3,32,9)[0,0] = 0
+    from: naturality[H] anchor (2,33,10)
+
+  row #3596: d4(2,35,11)[0,0] + d4(3,34,10)[0,0] = 0
+    from: naturality[H] anchor (2,35,11)
+
+  row #3639: d4(3,34,10)[0,0] + d4(5,32,9)[0,0] = 0
+    from: naturality[H] anchor (3,34,10)
+
+  row #3682: d4(4,41,11)[0,1] + d4(7,38,10)[0,0] = 0
+    from: naturality[H] anchor (4,41,11)
+
+  row #4264: d4(2,33,10)[0,0] + d4(2,53,14)[0,0] = 0
+    from: leibniz deg1=(2,33,10) deg2=(34,20,4)
+
+  row #4266: d4(2,35,11)[0,0] + d4(2,49,15)[0,0] = 0
+    from: leibniz deg1=(2,35,11) deg2=(36,14,4)
+
+  row #4276: d4(2,49,15)[0,0] = 0
+    from: leibniz deg1=(2,10,6) deg2=(11,39,9)
+
+  row #4283: d4(2,53,14)[0,0] + d4(17,37,8)[0,0] = 0
+    from: leibniz deg1=(2,16,6) deg2=(17,37,8)
+
+  row #4284: d4(2,54,16)[0,0] + d4(10,45,12)[0,0] = 0
+    from: leibniz deg1=(2,9,4) deg2=(10,45,12)
+
+  row #4285: d4(2,54,16)[0,0] + d4(18,37,8)[0,0] = 0
+    from: leibniz deg1=(2,17,8) deg2=(18,37,8)
+
+  row #4498: d4(4,41,11)[0,1] + d4(4,55,15)[0,0] = 0
+    from: leibniz deg1=(4,41,11) deg2=(44,14,4)
+
+  row #4562: d4(4,55,15)[0,0] + d4(13,45,12)[0,0] = 0
+    from: leibniz deg1=(4,10,3) deg2=(13,45,12)
+
+  row #4820: d4(7,38,10)[0,0] + d4(7,58,14)[1,1] = 0
+    from: leibniz deg1=(7,38,10) deg2=(44,20,4)
+
+  row #4871: d4(7,58,14)[1,1] + d4(33,31,8)[0,0] = 0
+    from: leibniz deg1=(7,27,6) deg2=(33,31,8)
+
+  row #11119: d4(33,31,8)[0,0] = 1
+    from: known-diff d(33,31,8)[0,0] = 1
+
+--- DEEP DIG on certificate constraints ---
+
+  row #5:
+    generator: naturality[E] anchor (3,32,9)
+    square: phi_target * D[(3,32,9)] = D[(4,32,9)] * phi_source   (d_4)
+      src        (  3, 32,  9)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(src)     (  3, 31, 13)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      tgt        (  4, 32,  9)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(tgt)     (  4, 31, 13)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      phi_source = E(3,32,9)  [1x1]  stored
+        [1]
+      phi_target = E(3,31,13)  [1x1]  stored
+        [1]
+
+  row #37:
+    generator: naturality[E] anchor (4,32,9)
+    square: phi_target * D[(4,32,9)] = D[(5,32,9)] * phi_source   (d_4)
+      src        (  4, 32,  9)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(src)     (  4, 31, 13)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      tgt        (  5, 32,  9)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(tgt)     (  5, 31, 13)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      phi_source = E(4,32,9)  [1x1]  stored
+        [1]
+      phi_target = E(4,31,13)  [1x1]  stored
+        [1]
+
+  row #422:
+    generator: naturality[E] anchor (10,45,12)
+    square: phi_target * D[(10,45,12)] = D[(11,45,12)] * phi_source   (d_4)
+      src        ( 10, 45, 12)  dim=2 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(src)     ( 10, 44, 16)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      tgt        ( 11, 45, 12)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(tgt)     ( 11, 44, 16)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      phi_source = E(10,45,12)  [2x1]  stored
+        [1]
+        [0]
+      phi_target = E(10,44,16)  [1x1]  stored
+        [1]
+
+  row #504:
+    generator: naturality[E] anchor (11,45,12)
+    square: phi_target * D[(11,45,12)] = D[(12,45,12)] * phi_source   (d_4)
+      src        ( 11, 45, 12)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(src)     ( 11, 44, 16)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      tgt        ( 12, 45, 12)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(tgt)     ( 12, 44, 16)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      phi_source = E(11,45,12)  [1x1]  stored
+        [1]
+      phi_target = E(11,44,16)  [1x1]  stored
+        [1]
+
+  row #592:
+    generator: naturality[E] anchor (12,45,12)
+    square: phi_target * D[(12,45,12)] = D[(13,45,12)] * phi_source   (d_4)
+      src        ( 12, 45, 12)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(src)     ( 12, 44, 16)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      tgt        ( 13, 45, 12)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(tgt)     ( 13, 44, 16)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      phi_source = E(12,45,12)  [1x1]  stored
+        [1]
+      phi_target = E(12,44,16)  [1x1]  stored
+        [1]
+
+  row #1202:
+    generator: naturality[E] anchor (17,37,8)
+    square: phi_target * D[(17,37,8)] = D[(18,37,8)] * phi_source   (d_4)
+      src        ( 17, 37,  8)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(src)     ( 17, 36, 12)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      tgt        ( 18, 37,  8)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(tgt)     ( 18, 36, 12)  dim=2 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      phi_source = E(17,37,8)  [1x1]  stored
+        [1]
+      phi_target = E(17,36,12)  [1x2]  stored
+        [10]
+
+  row #3595:
+    generator: naturality[H] anchor (2,33,10)
+    square: phi_target * D[(2,33,10)] = D[(3,32,9)] * phi_source   (d_4)
+      src        (  2, 33, 10)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(src)     (  2, 32, 14)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      tgt        (  3, 32,  9)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(tgt)     (  3, 31, 13)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      phi_source = H(2,33,10)  [1x1]  stored
+        [1]
+      phi_target = H(2,32,14)  [1x1]  stored
+        [1]
+
+  row #3596:
+    generator: naturality[H] anchor (2,35,11)
+    square: phi_target * D[(2,35,11)] = D[(3,34,10)] * phi_source   (d_4)
+      src        (  2, 35, 11)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(src)     (  2, 34, 15)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      tgt        (  3, 34, 10)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(tgt)     (  3, 33, 14)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      phi_source = H(2,35,11)  [1x1]  stored
+        [1]
+      phi_target = H(2,34,15)  [1x1]  stored
+        [1]
+
+  row #3639:
+    generator: naturality[H] anchor (3,34,10)
+    square: phi_target * D[(3,34,10)] = D[(5,32,9)] * phi_source   (d_4)
+      src        (  3, 34, 10)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(src)     (  3, 33, 14)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      tgt        (  5, 32,  9)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(tgt)     (  5, 31, 13)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      phi_source = H(3,34,10)  [1x1]  stored
+        [1]
+      phi_target = H(3,33,14)  [1x1]  stored
+        [1]
+
+  row #3682:
+    generator: naturality[H] anchor (4,41,11)
+    square: phi_target * D[(4,41,11)] = D[(7,38,10)] * phi_source   (d_4)
+      src        (  4, 41, 11)  dim=2 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(src)     (  4, 40, 15)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      tgt        (  7, 38, 10)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(tgt)     (  7, 37, 14)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      phi_source = H(4,41,11)  [2x1]  stored
+        [0]
+        [1]
+      phi_target = H(4,40,15)  [1x1]  stored
+        [1]
+
+  row #4264:
+    generator: leibniz deg1=(2,33,10) deg2=(34,20,4)
+    relation: d(x·E(y)) = x·d(E(y)) + d(x)·y  with x@(2,33,10), y@(34,20,4)  (d_4)
+      x=deg1     (  2, 33, 10)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      y=deg2     ( 34, 20,  4)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E(y)       ( 35, 20,  4)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(x)       (  2, 32, 14)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(y)       ( 34, 19,  8)  dim=0 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      dE(y)      ( 35, 19,  8)  dim=0 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      x·E(y)     (  2, 53, 14)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(x·E(y))  (  2, 52, 18)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E at deg2 (34,20,4)  [1x1]  stored
+        [1]
+      E at d(deg2) (34,19,8)  [0x0]  DEFAULTED (stable-E identity, no stored data)
+        [0x0 empty]
+      product block x·E(y)    (2,33,10) x (35,20,4): stored [1x1 -> tgt_dim 1]
+        [1]
+      product block d(x)·y    (2,32,14) x (34,20,4): stored [1x1 -> tgt_dim 1]
+        [1]
+
+  row #4266:
+    generator: leibniz deg1=(2,35,11) deg2=(36,14,4)
+    relation: d(x·E(y)) = x·d(E(y)) + d(x)·y  with x@(2,35,11), y@(36,14,4)  (d_4)
+      x=deg1     (  2, 35, 11)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      y=deg2     ( 36, 14,  4)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E(y)       ( 37, 14,  4)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(x)       (  2, 34, 15)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(y)       ( 36, 13,  8)  dim=0 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      dE(y)      ( 37, 13,  8)  dim=0 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      x·E(y)     (  2, 49, 15)  dim=1 excluded=true | E3: d3-out-unknown=false d3-in-unknown=true was-excluded=false
+      d(x·E(y))  (  2, 48, 19)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E at deg2 (36,14,4)  [1x1]  stored
+        [1]
+      E at d(deg2) (36,13,8)  [0x0]  DEFAULTED (stable-E identity, no stored data)
+        [0x0 empty]
+      product block x·E(y)    (2,35,11) x (37,14,4): stored [1x1 -> tgt_dim 1]
+        [1]
+      product block d(x)·y    (2,34,15) x (36,14,4): stored [1x1 -> tgt_dim 1]
+        [1]
+
+  row #4276:
+    generator: leibniz deg1=(2,10,6) deg2=(11,39,9)
+    relation: d(x·E(y)) = x·d(E(y)) + d(x)·y  with x@(2,10,6), y@(11,39,9)  (d_4)
+      x=deg1     (  2, 10,  6)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      y=deg2     ( 11, 39,  9)  dim=2 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E(y)       ( 12, 39,  9)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(x)       (  2,  9, 10)  dim=0 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(y)       ( 11, 38, 13)  dim=0 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      dE(y)      ( 12, 38, 13)  dim=1 excluded=true | E3: d3-out-unknown=true d3-in-unknown=false was-excluded=false
+      x·E(y)     (  2, 49, 15)  dim=1 excluded=true | E3: d3-out-unknown=false d3-in-unknown=true was-excluded=false
+      d(x·E(y))  (  2, 48, 19)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E at deg2 (11,39,9)  [2x1]  stored
+        [1]
+        [0]
+      E at d(deg2) (11,38,13)  [0x1]  DEFAULTED (zero map, no stored data)
+        [0x1 empty]
+      product block x·E(y)    (2,10,6) x (12,39,9): stored [1x1 -> tgt_dim 1]
+        [1]
+      product block x·dE(y)   (2,10,6) x (12,38,13): MISSING — multiply() returns ZERO (wrong if the true product is nonzero)
+
+  row #4283:
+    generator: leibniz deg1=(2,16,6) deg2=(17,37,8)
+    relation: d(x·E(y)) = x·d(E(y)) + d(x)·y  with x@(2,16,6), y@(17,37,8)  (d_4)
+      x=deg1     (  2, 16,  6)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      y=deg2     ( 17, 37,  8)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E(y)       ( 18, 37,  8)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(x)       (  2, 15, 10)  dim=0 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(y)       ( 17, 36, 12)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      dE(y)      ( 18, 36, 12)  dim=2 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      x·E(y)     (  2, 53, 14)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(x·E(y))  (  2, 52, 18)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E at deg2 (17,37,8)  [1x1]  stored
+        [1]
+      E at d(deg2) (17,36,12)  [1x2]  stored
+        [10]
+      product block x·E(y)    (2,16,6) x (18,37,8): stored [1x1 -> tgt_dim 1]
+        [1]
+      product block x·dE(y)   (2,16,6) x (18,36,12): stored [1x2 -> tgt_dim 1]
+        [1]
+        [0]
+
+  row #4284:
+    generator: leibniz deg1=(2,9,4) deg2=(10,45,12)
+    relation: d(x·E(y)) = x·d(E(y)) + d(x)·y  with x@(2,9,4), y@(10,45,12)  (d_4)
+      x=deg1     (  2,  9,  4)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      y=deg2     ( 10, 45, 12)  dim=2 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E(y)       ( 11, 45, 12)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(x)       (  2,  8,  8)  dim=0 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(y)       ( 10, 44, 16)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      dE(y)      ( 11, 44, 16)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      x·E(y)     (  2, 54, 16)  dim=1 excluded=true | E3: d3-out-unknown=false d3-in-unknown=true was-excluded=false
+      d(x·E(y))  (  2, 53, 20)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E at deg2 (10,45,12)  [2x1]  stored
+        [1]
+        [0]
+      E at d(deg2) (10,44,16)  [1x1]  stored
+        [1]
+      product block x·E(y)    (2,9,4) x (11,45,12): stored [1x1 -> tgt_dim 1]
+        [1]
+      product block x·dE(y)   (2,9,4) x (11,44,16): stored [1x1 -> tgt_dim 1]
+        [1]
+
+  row #4285:
+    generator: leibniz deg1=(2,17,8) deg2=(18,37,8)
+    relation: d(x·E(y)) = x·d(E(y)) + d(x)·y  with x@(2,17,8), y@(18,37,8)  (d_4)
+      x=deg1     (  2, 17,  8)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      y=deg2     ( 18, 37,  8)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E(y)       ( 19, 37,  8)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(x)       (  2, 16, 12)  dim=0 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(y)       ( 18, 36, 12)  dim=2 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      dE(y)      ( 19, 36, 12)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      x·E(y)     (  2, 54, 16)  dim=1 excluded=true | E3: d3-out-unknown=false d3-in-unknown=true was-excluded=false
+      d(x·E(y))  (  2, 53, 20)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E at deg2 (18,37,8)  [1x1]  stored
+        [1]
+      E at d(deg2) (18,36,12)  [2x1]  stored
+        [1]
+        [0]
+      product block x·E(y)    (2,17,8) x (19,37,8): stored [1x1 -> tgt_dim 1]
+        [1]
+      product block x·dE(y)   (2,17,8) x (19,36,12): stored [1x1 -> tgt_dim 1]
+        [1]
+
+  row #4498:
+    generator: leibniz deg1=(4,41,11) deg2=(44,14,4)
+    relation: d(x·E(y)) = x·d(E(y)) + d(x)·y  with x@(4,41,11), y@(44,14,4)  (d_4)
+      x=deg1     (  4, 41, 11)  dim=2 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      y=deg2     ( 44, 14,  4)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E(y)       ( 45, 14,  4)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(x)       (  4, 40, 15)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(y)       ( 44, 13,  8)  dim=0 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      dE(y)      ( 45, 13,  8)  dim=0 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      x·E(y)     (  4, 55, 15)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(x·E(y))  (  4, 54, 19)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E at deg2 (44,14,4)  [1x1]  stored
+        [1]
+      E at d(deg2) (44,13,8)  [0x0]  DEFAULTED (stable-E identity, no stored data)
+        [0x0 empty]
+      product block x·E(y)    (4,41,11) x (45,14,4): stored [2x1 -> tgt_dim 1]
+        [0]
+        [1]
+      product block d(x)·y    (4,40,15) x (44,14,4): stored [1x1 -> tgt_dim 1]
+        [1]
+
+  row #4562:
+    generator: leibniz deg1=(4,10,3) deg2=(13,45,12)
+    relation: d(x·E(y)) = x·d(E(y)) + d(x)·y  with x@(4,10,3), y@(13,45,12)  (d_4)
+      x=deg1     (  4, 10,  3)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      y=deg2     ( 13, 45, 12)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E(y)       ( 14, 45, 12)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(x)       (  4,  9,  7)  dim=0 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(y)       ( 13, 44, 16)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      dE(y)      ( 14, 44, 16)  dim=2 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      x·E(y)     (  4, 55, 15)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(x·E(y))  (  4, 54, 19)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E at deg2 (13,45,12)  [1x1]  stored
+        [1]
+      E at d(deg2) (13,44,16)  [1x2]  stored
+        [10]
+      product block x·E(y)    (4,10,3) x (14,45,12): stored [1x1 -> tgt_dim 1]
+        [1]
+      product block x·dE(y)   (4,10,3) x (14,44,16): stored [1x2 -> tgt_dim 1]
+        [1]
+        [0]
+
+  row #4820:
+    generator: leibniz deg1=(7,38,10) deg2=(44,20,4)
+    relation: d(x·E(y)) = x·d(E(y)) + d(x)·y  with x@(7,38,10), y@(44,20,4)  (d_4)
+      x=deg1     (  7, 38, 10)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      y=deg2     ( 44, 20,  4)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E(y)       ( 45, 20,  4)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(x)       (  7, 37, 14)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(y)       ( 44, 19,  8)  dim=0 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      dE(y)      ( 45, 19,  8)  dim=0 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      x·E(y)     (  7, 58, 14)  dim=2 excluded=true | E3: d3-out-unknown=false d3-in-unknown=true was-excluded=false
+      d(x·E(y))  (  7, 57, 18)  dim=2 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E at deg2 (44,20,4)  [1x1]  stored
+        [1]
+      E at d(deg2) (44,19,8)  [0x0]  DEFAULTED (stable-E identity, no stored data)
+        [0x0 empty]
+      product block x·E(y)    (7,38,10) x (45,20,4): stored [1x1 -> tgt_dim 2]
+        [01]
+      product block d(x)·y    (7,37,14) x (44,20,4): stored [1x1 -> tgt_dim 2]
+        [01]
+
+  row #4871:
+    generator: leibniz deg1=(7,27,6) deg2=(33,31,8)
+    relation: d(x·E(y)) = x·d(E(y)) + d(x)·y  with x@(7,27,6), y@(33,31,8)  (d_4)
+      x=deg1     (  7, 27,  6)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      y=deg2     ( 33, 31,  8)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E(y)       ( 34, 31,  8)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(x)       (  7, 26, 10)  dim=0 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      d(y)       ( 33, 30, 12)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      dE(y)      ( 34, 30, 12)  dim=1 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      x·E(y)     (  7, 58, 14)  dim=2 excluded=true | E3: d3-out-unknown=false d3-in-unknown=true was-excluded=false
+      d(x·E(y))  (  7, 57, 18)  dim=2 excluded=false | E3: d3-out-unknown=false d3-in-unknown=false was-excluded=false
+      E at deg2 (33,31,8)  [1x1]  stored
+        [1]
+      E at d(deg2) (33,30,12)  [1x1]  stored
+        [1]
+      product block x·E(y)    (7,27,6) x (34,31,8): stored [1x1 -> tgt_dim 2]
+        [01]
+      product block x·dE(y)   (7,27,6) x (34,30,12): stored [1x1 -> tgt_dim 2]
+        [01]
+
+  row #11119:
+    generator: known-diff d(33,31,8)[0,0] = 1
+      (user/stock assertion — ground truth by definition)

@@ -232,7 +232,7 @@
         <g id="ticks" class="tick">
           <g id="x-ticks" class="x-tick">
             {%- for i in range(data.header.chart.width.min, data.header.chart.width.max + 1, axis_interval) %}
-              <text x="{{ i * spacing }}" y="{{ 0.5 * spacing }}">{{ i }}</text>
+              <text x="{{ i * spacing }}" y="{{ 0.5 * spacing }}">{{ data.header.chart.x_reflect_sum - i if data.header.chart.x_reflect_sum is defined else i }}</text>
             {%- endfor %}
           </g>
           <g id="y-ticks" class="y-tick">
@@ -548,7 +548,7 @@
           element.setAttribute("transform", `translate(${xTranslate} 0)`);
         });
         document.querySelectorAll("#x-ticks text").forEach((element) => {
-          const xCoord = parseInt(element.textContent) * spacing;
+          const xCoord = {{ "(" ~ data.header.chart.x_reflect_sum ~ " - parseInt(element.textContent))" if data.header.chart.x_reflect_sum is defined else "parseInt(element.textContent)" }} * spacing;
           element.setAttribute("x", xCoord * scale);
         });
         document.querySelectorAll("#y-ticks").forEach((element) => {

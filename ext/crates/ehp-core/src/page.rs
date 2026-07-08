@@ -1,4 +1,5 @@
 use fp::matrix::Matrix;
+use fp::vector::FpVector;
 use hashbrown::HashMap;
 
 use crate::element::Element;
@@ -48,6 +49,54 @@ impl MapTable {
     /// Set the matrix at a tridegree.
     pub fn set_matrix(&mut self, t: Tridegree, mat: Matrix) {
         self.matrices.insert(t, std::sync::Arc::new(mat));
+    }
+}
+
+/// Borrowed / virtual result of a map-matrix lookup — see
+/// [`SATPage::map_matrix_ref`]. `Stored` borrows the real matrix;
+/// `Identity(n)` and `Zero(src_dim, tgt_dim)` are the un-materialized
+/// defaults (rows = source basis, columns = target, `v * M` convention).
+pub enum MapMatrixRef<'a> {
+    Stored(&'a Matrix),
+    Identity(usize),
+    Zero(usize, usize),
+}
+
+impl MapMatrixRef<'_> {
+    /// Materialize — exactly what [`SATPage::map_matrix`] used to return.
+    pub fn to_matrix(&self) -> Matrix {
+        match *self {
+            MapMatrixRef::Stored(m) => m.clone(),
+            MapMatrixRef::Identity(n) => mat_identity(n),
+            MapMatrixRef::Zero(src, tgt) => mat_zero(src, tgt),
+        }
+    }
+
+    /// Materialize the TRANSPOSE without building the un-transposed default
+    /// first (columns = source basis, i.e. the Python `.T` convention used by
+    /// the naturality/Leibniz generators).
+    pub fn to_matrix_transposed(&self) -> Matrix {
+        match *self {
+            MapMatrixRef::Stored(m) => mat_transpose(m),
+            MapMatrixRef::Identity(n) => mat_identity(n),
+            MapMatrixRef::Zero(src, tgt) => mat_zero(tgt, src),
+        }
+    }
+
+    /// Apply to a source-coordinate vector (`v * M`), matching
+    /// `mat_vec_mul(&self.to_matrix(), v)` without materializing defaults.
+    pub fn apply_vec(&self, v: &FpVector) -> FpVector {
+        match *self {
+            MapMatrixRef::Stored(m) => mat_vec_mul(m, v),
+            MapMatrixRef::Identity(n) => {
+                assert_eq!(n, v.len());
+                v.clone()
+            }
+            MapMatrixRef::Zero(src, tgt) => {
+                assert_eq!(src, v.len());
+                vec_zero(tgt)
+            }
+        }
     }
 }
 
@@ -167,15 +216,25 @@ impl SATPage {
     /// no-data degrees instead of defaulting silently drops naturality/Leibniz
     /// constraints of the form `d·φ = 0` (the original always constrains).
     pub fn map_matrix(&self, kind: MapKind, t: Tridegree) -> Matrix {
+        self.map_matrix_ref(kind, t).to_matrix()
+    }
+
+    /// Allocation-free form of [`SATPage::map_matrix`]: most lookups hit the
+    /// zero/identity DEFAULT branch, and materializing a padded tile-aligned
+    /// `Matrix` per call dominated constraint generation at large max_t
+    /// (posix_memalign churn was ~65% of a t=80 startup profile). Callers
+    /// match on the default cases instead of multiplying by a materialized
+    /// zero/identity; `to_matrix()` reproduces the old behavior exactly.
+    pub fn map_matrix_ref(&self, kind: MapKind, t: Tridegree) -> MapMatrixRef<'_> {
         if let Some(m) = self.maps.get(&kind).and_then(|mt| mt.matrix_at(t)) {
-            return m.clone();
+            return MapMatrixRef::Stored(m);
         }
         let src_dim = self.dim_at(t);
         let tgt_dim = self.dim_at(kind.target_degree(t));
         if kind == MapKind::E && t.n > t.s + 1 && src_dim == tgt_dim {
-            mat_identity(src_dim)
+            MapMatrixRef::Identity(src_dim)
         } else {
-            mat_zero(src_dim, tgt_dim)
+            MapMatrixRef::Zero(src_dim, tgt_dim)
         }
     }
 

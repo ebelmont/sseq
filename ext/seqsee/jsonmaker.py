@@ -72,7 +72,10 @@ def edge_offset(edge_type, arrow_length=1):
     elif edge_type == "nulldif":
         offset = {"x": -1, "y": 2}
     elif edge_type == "E":
-        offset = {"x": 1, "y": 0}  # E-type edges (stems mode only)
+        # E-type edges (stem mode only). Stem charts are mirrored so that n
+        # increases right-to-left; a suspension continuing past the stable
+        # edge therefore points LEFT (toward the stable range).
+        offset = {"x": -1, "y": 0}
     else:
         raise ValueError
     for key in offset:
@@ -128,7 +131,27 @@ def build_hit_map(df):
     return hit
 
 
-def extract_node_attributes(row, view_mode="sphere", hit_map=None):
+def build_uncertain_target_set(df):
+    """Set of node names appearing in some row's `nulldif` list.
+
+    `nulldif` holds the possible targets of an UNCERTAIN differential, so
+    these nodes are uncertain-targets. Mirrors build_hit_map: precomputed
+    once from the full frame (a stem-k chart's uncertain targets come from
+    stem-(k+1) sources), stem mode only.
+    """
+    targets = set()
+    for _, row in df.iterrows():
+        nd = row.get("nulldif")
+        if not nd or str(nd) == "nan" or nd == "":
+            continue
+        for t in str(nd).split(";"):
+            t = t.strip()
+            if t:
+                targets.add(t)
+    return targets
+
+
+def extract_node_attributes(row, view_mode="sphere", hit_map=None, uncertain_targets=None):
     ret = []
     if row.get("tautorsion", []):
         torsion = int(row["tautorsion"])
@@ -151,6 +174,15 @@ def extract_node_attributes(row, view_mode="sphere", hit_map=None):
         elif hit_map and node_name in hit_map:
             # Node is hit by a differential — filled circle in the d_r color
             ret.append(f"diff_d{hit_map[node_name]}_filled")
+
+        # "?" uncertainty markers (stem mode only): a node whose row has a
+        # nonempty nulldif may support an uncertain differential; a node
+        # listed in some other row's nulldif may be hit by one.
+        nd = row.get("nulldif")
+        if nd and str(nd) != "nan" and str(nd).strip() != "":
+            ret.append("uncertain_src")
+        if uncertain_targets and node_name in uncertain_targets:
+            ret.append("uncertain_tgt")
 
     return ret
 
@@ -294,6 +326,7 @@ def deduplicate_name(name):
 def nodes_to_json(df, view_mode="sphere", filter_value=None, highlight_mode=None, highlight_targets=None):
     nodes = {}
     hit_map = build_hit_map(df) if view_mode == "stem" else None
+    uncertain_targets = build_uncertain_target_set(df) if view_mode == "stem" else None
     for _, row in df.iterrows():
         # Process node information
         node_name, is_duplicate = deduplicate_name(row["name"])
@@ -340,7 +373,7 @@ def nodes_to_json(df, view_mode="sphere", filter_value=None, highlight_mode=None
         if try_get_key(row, "shift", None):
             node_data["position"] = int(row["shift"])
         
-        if attributes := extract_node_attributes(row, view_mode, hit_map):
+        if attributes := extract_node_attributes(row, view_mode, hit_map, uncertain_targets):
             # Only add an attributes key if there are attributes to add
             node_data["attributes"] = attributes
 

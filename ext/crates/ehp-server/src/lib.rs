@@ -228,12 +228,59 @@ pub fn load_known_diffs(
     r: i32,
     file: Option<&str>,
 ) -> Result<hashbrown::HashMap<DiffVar, bool>, Box<dyn std::error::Error>> {
+    load_known_diffs_inner(r, file, None)
+}
+
+/// Page-aware form of [`load_known_diffs`]: outside-knowledge-base rows are
+/// pruned to Python parity for THIS page (see
+/// `ehp_core::constraints::prune_outside_diffs`) — rows at excluded /
+/// over-kept / edge degrees, whose recorded `[row, col]` coordinates cannot
+/// be trusted in this pipeline's basis, are dropped with a warning instead of
+/// force-enforced (which made E4 UNSAT at t=80 with correct data).
+/// `EHP_OUTSIDE_PARITY=0` disables the pruning. Explicit per-page files and
+/// hardcoded diffs are never pruned (they are asserted in THIS pipeline's
+/// basis).
+pub fn load_known_diffs_for_page(
+    page: &ehp_core::page::SATPage,
+    file: Option<&str>,
+) -> Result<hashbrown::HashMap<DiffVar, bool>, Box<dyn std::error::Error>> {
+    load_known_diffs_inner(page.r, file, Some(page))
+}
+
+fn load_known_diffs_inner(
+    r: i32,
+    file: Option<&str>,
+    page: Option<&ehp_core::page::SATPage>,
+) -> Result<hashbrown::HashMap<DiffVar, bool>, Box<dyn std::error::Error>> {
     // Externally recorded differentials (the Python pipeline's
     // `outside_diffs` knowledge base): every CSV in $EHP_OUTSIDE_DIFFS is
     // scanned for rows `[r, n, s, f, row, col, value]` matching this page.
     // These load first; a page-specific file (below) overrides on conflict.
     let mut diffs = match std::env::var("EHP_OUTSIDE_DIFFS") {
-        Ok(dir) if !dir.is_empty() => load_outside_diffs(r, &dir)?,
+        Ok(dir) if !dir.is_empty() => {
+            let mut d = load_outside_diffs(r, &dir)?;
+            let parity = std::env::var("EHP_OUTSIDE_PARITY").map_or(true, |v| v != "0");
+            if let (Some(page), true) = (page, parity) {
+                let total = d.len();
+                let dropped = ehp_core::constraints::prune_outside_diffs(page, &mut d);
+                if !dropped.is_empty() {
+                    warn!(
+                        "EHP_OUTSIDE_DIFFS: {} of {} E_{} rows NOT enforced — their [row,col] \
+                         coordinates are unreliable on this page (EHP_OUTSIDE_PARITY=0 forces them):",
+                        dropped.len(),
+                        total,
+                        r,
+                    );
+                    for (dv, val, rsn) in &dropped {
+                        warn!(
+                            "  d_{}({},{},{})[{},{}] = {} — {}",
+                            r, dv.n, dv.s, dv.f, dv.row, dv.col, *val as u8, rsn,
+                        );
+                    }
+                }
+            }
+            d
+        }
         _ => hashbrown::HashMap::new(),
     };
 
@@ -288,10 +335,32 @@ pub fn load_outside_diffs(
             return Ok(diffs);
         }
     };
+    // Files to skip, comma-separated substrings matched against the file
+    // name (env `EHP_OUTSIDE_SKIP`). Defaults to "stable_Dan": the user has
+    // ruled its rows out as an input source. Set EHP_OUTSIDE_SKIP="" to load
+    // everything.
+    let skip_patterns: Vec<String> = std::env::var("EHP_OUTSIDE_SKIP")
+        .unwrap_or_else(|_| "stable_Dan".to_string())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     let mut files = 0;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("csv") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if let Some(pat) = skip_patterns.iter().find(|p| name.contains(p.as_str())) {
+            info!(
+                "EHP_OUTSIDE_DIFFS: skipping {} (matches EHP_OUTSIDE_SKIP pattern \"{}\")",
+                name, pat,
+            );
             continue;
         }
         let Ok(content) = std::fs::read_to_string(&path) else {

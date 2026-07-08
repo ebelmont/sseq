@@ -113,18 +113,22 @@ impl ConstraintSystem {
     }
 }
 
-/// Kill-switch for the target-only exclusion relaxation (env
-/// `EHP_RELAX_TARGET_EXCLUDE`, read once). Default ON; set to `0` to restore
-/// the strict behavior: excluded degrees never get differential variables and
-/// every Leibniz pair touching an excluded degree is skipped. When ON, a
-/// degree excluded *only* as the target of an unknown incoming differential
-/// (see [`crate::page::SATPage::target_only_exclude`]) still gets its
-/// outgoing d_r variables, and Leibniz pairs may treat it as the constrained
-/// product degree.
+/// Opt-in switch for the target-only exclusion relaxation (env
+/// `EHP_RELAX_TARGET_EXCLUDE`, read once). **Default OFF** (strict: excluded
+/// degrees never get differential variables and every Leibniz pair touching
+/// an excluded degree is skipped) — the relaxation was the enabling change
+/// for the t=80 outside-diffs E4 UNSAT (2026-07-07 certificate,
+/// notes/CHANGES_2026-07-07.md §11–12c), and its validation gauntlet (§8a)
+/// was never completed, so the user chose strict-by-default. Set to `1` to
+/// enable: a degree excluded *only* as the target of an unknown incoming
+/// differential (see [`crate::page::SATPage::target_only_exclude`]) still
+/// gets its outgoing d_r variables, and Leibniz pairs may treat it as the
+/// constrained product degree (guarded by the e_d_deg2 exclusion check in
+/// `make_leibniz_constraint_single`).
 pub fn relax_target_exclude() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FLAG.get_or_init(|| {
-        std::env::var("EHP_RELAX_TARGET_EXCLUDE").map_or(true, |v| v != "0")
+        std::env::var("EHP_RELAX_TARGET_EXCLUDE").map_or(false, |v| v == "1")
     })
 }
 
@@ -430,8 +434,8 @@ pub fn make_naturality_constraint_single(
 
     // Get map matrices (transposed, per Python convention). Missing data means
     // the zero map (or stable-E identity) — the square still constrains.
-    let phi_source = mat_transpose(&page.map_matrix(map_kind, src));
-    let phi_target = mat_transpose(&page.map_matrix(map_kind, diff_src));
+    let phi_source = page.map_matrix_ref(map_kind, src).to_matrix_transposed();
+    let phi_target = page.map_matrix_ref(map_kind, diff_src).to_matrix_transposed();
 
     // Check dimensions
     if phi_source.rows() != tgt_dim || phi_source.columns() != src_dim {
@@ -544,8 +548,40 @@ pub fn make_leibniz_constraint_single(
         return Vec::new();
     }
 
+    // The degree of d(E(deg2)) — consulted by the RHS1 Ytilde columns and by
+    // the E-naturality substitution d(E y) = E(d y), but historically absent
+    // from `all_trideg` in BOTH pipelines (latent in the original because
+    // every pair reaching it also has an excluded prod_deg and dies there in
+    // strict mode). The relax carve-out must therefore check it explicitly:
+    // the t=80 outside-diffs E4 UNSAT certificate's contradicting row was a
+    // relaxed pair whose e_d_deg2 was excluded (unknown d3-out) — its data
+    // there is not trustworthy. Only the carve-out consults this (strict
+    // mode stays byte-identical).
+    // The 8th consulted degree: e_d_deg2 = where d(E(y)) lives. The RHS1
+    // Ytilde columns are products into its basis and the d(Ey) = E(dy)
+    // substitution contracts through its coordinates — but it was
+    // historically ABSENT from all_trideg in BOTH pipelines (d_deg2 is
+    // checked; unstably its E-shift is a different degree). That leak let
+    // pairs consult over-kept coordinates / silently-zeroed product blocks
+    // at an excluded degree even in strict mode — the mechanism behind the
+    // t=80 outside-diffs E4 UNSAT certificate (notes/CHANGES_2026-07-07.md
+    // §12b) and consistent with the strict-mode d4(3,32,9) UNSAT-on-assert
+    // (§8b). Checked unconditionally since 2026-07-08 (user decision: every
+    // consulted degree with prior-page uncertainty must skip the pair).
+    let e_d_deg2 = e_deg2.diff_target(r);
+
     let relax = relax_target_exclude();
     let mut excluded_any = false;
+    let record = |td: Tridegree, excluded_out: &mut Option<&mut ExcludedLeibniz>| {
+        if let Some(map) = excluded_out.as_deref_mut() {
+            let rep = if td.n > td.s + 2 {
+                Tridegree::new(td.s + 2, td.s, td.f)
+            } else {
+                td
+            };
+            map.entry(rep).or_default().push((deg1, deg2));
+        }
+    };
     for (i, &td) in all_trideg.iter().enumerate() {
         if page.is_excluded(td) {
             // Position 5 = prod_deg, the source of the differential this pair
@@ -553,24 +589,21 @@ pub fn make_leibniz_constraint_single(
             // basis is real but possibly over-kept, and forcing the (lifted)
             // differential on an over-kept class is at worst gauge-fixing a
             // phantom — never wrong about surviving classes — provided every
-            // OTHER participating degree is clean (checked here: any other
-            // excluded participant still skips the pair). Such pairs are
-            // emitted, so they are deliberately NOT recorded in
-            // `excluded_out` (nothing to re-activate, and replaying them
-            // after an un-exclusion could re-emit in changed coordinates).
+            // OTHER participating degree is clean (checked here and in the
+            // unconditional e_d_deg2 check below). Such pairs are emitted, so
+            // they are deliberately NOT recorded in `excluded_out` (nothing
+            // to re-activate, and replaying them after an un-exclusion could
+            // re-emit in changed coordinates).
             if relax && i == 5 && page.is_excluded_target_only(td) {
                 continue;
             }
             excluded_any = true;
-            if let Some(map) = excluded_out.as_deref_mut() {
-                let rep = if td.n > td.s + 2 {
-                    Tridegree::new(td.s + 2, td.s, td.f)
-                } else {
-                    td
-                };
-                map.entry(rep).or_default().push((deg1, deg2));
-            }
+            record(td, &mut excluded_out);
         }
+    }
+    if page.is_excluded(e_d_deg2) {
+        excluded_any = true;
+        record(e_d_deg2, &mut excluded_out);
     }
     if excluded_any {
         return Vec::new();
@@ -584,17 +617,35 @@ pub fn make_leibniz_constraint_single(
         return Vec::new();
     }
 
+    // Product-support fast path: the only product blocks this relation can
+    // consult are (deg1, e_deg2) for the LHS, (deg1, d(E(deg2))) for RHS1,
+    // and (d_deg1, deg2) for RHS2. `ProductTable::multiply` returns zero for
+    // an absent block, so with all three missing every term below is zero
+    // and `equals_rel` emits nothing (the `skip()` paths only trigger on
+    // nonzero products). Three hash lookups replace the whole (i1, i2) loop;
+    // most surviving pairs at large max_t have no product data at all.
+    // (Placed AFTER the exclusion recording above so `excluded_out`
+    // bookkeeping is unchanged; `e_d_deg2` is defined before the exclusion
+    // loop.)
+    if !page.products.has_block(deg1, e_deg2)
+        && !page.products.has_block(deg1, e_d_deg2)
+        && !page.products.has_block(d_deg1, deg2)
+    {
+        return Vec::new();
+    }
+
     let mut all_constraints = Vec::new();
 
     // Get E map matrix at deg2 (zero / stable-identity when no data — the
-    // relation still constrains the other terms)
-    let e_matrix = page.map_matrix(MapKind::E, deg2);
+    // relation still constrains the other terms). Borrowed/virtual form:
+    // materializing the default per pair dominated t=80 startup.
+    let e_matrix = page.map_matrix_ref(MapKind::E, deg2);
 
     for i2 in 0..dim2 {
         let elt2_vec = vec_basis(dim2, i2);
 
         // Compute E(elt2)
-        let e_elt2_vec = mat_vec_mul(&e_matrix, &elt2_vec);
+        let e_elt2_vec = e_matrix.apply_vec(&elt2_vec);
 
         for i1 in 0..dim1 {
             // Compute product elt1 * E(elt2)
@@ -661,6 +712,13 @@ pub fn make_leibniz_constraint_single(
                     ytil_cols.push(col_prod);
                 }
 
+                // All-zero products ⇒ Ytilde is the zero matrix ⇒ same result
+                // as the mat_is_zero branch below — skip WITHOUT building the
+                // matrix (the build was ~85% of a t=80 startup profile; most
+                // pairs have all-zero products).
+                if ytil_cols.iter().all(|c| c.is_zero()) {
+                    vec![vec![]; prod_dr_dim]
+                } else {
                 // Build Ytil matrix (prod_dr_dim rows × tgt_dim cols)
                 let mut ytil_rows = Vec::with_capacity(prod_dr_dim);
                 for row in 0..prod_dr_dim {
@@ -679,7 +737,8 @@ pub fn make_leibniz_constraint_single(
                 } else {
                     // Get E matrix at d_deg2 (transposed); zero when no data —
                     // the constraint lhs = rhs2 must still be emitted.
-                    let e_mat_at_d = mat_transpose(&page.map_matrix(MapKind::E, d_deg2));
+                    let e_mat_at_d =
+                        page.map_matrix_ref(MapKind::E, d_deg2).to_matrix_transposed();
 
                     // Ytil * E_mat gives the combined matrix
                     let combined = mat_mul(&ytil, &e_mat_at_d);
@@ -696,6 +755,7 @@ pub fn make_leibniz_constraint_single(
                         Some(v) => v,
                         None => return skip(),
                     }
+                }
                 }
             };
 
@@ -719,6 +779,11 @@ pub fn make_leibniz_constraint_single(
                     ytil2_cols.push(col_prod);
                 }
 
+                // Same all-zero early-out as rhs1: zero Ytilde ⇒ identical
+                // result to the mat_is_zero branch, without the matrix build.
+                if ytil2_cols.iter().all(|c| c.is_zero()) {
+                    vec![vec![]; prod_dr_dim]
+                } else {
                 let mut ytil2_rows = Vec::with_capacity(prod_dr_dim);
                 for row in 0..prod_dr_dim {
                     let mut r_vec = vec_zero(tgt_dim2);
@@ -746,6 +811,7 @@ pub fn make_leibniz_constraint_single(
                         Some(v) => v,
                         None => return skip(),
                     }
+                }
                 }
             };
 
@@ -900,6 +966,103 @@ fn add_known_diff_vars(page: &SATPage, known: &HashMap<DiffVar, bool>, vars: &mu
             }
         }
     }
+}
+
+/// Why an outside-knowledge-base differential row was not enforced — see
+/// [`prune_outside_diffs`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutsideDropReason {
+    /// Source or target degree is hard-excluded (unknown lower-page
+    /// differentials): Rust's basis there is a PARTIAL quotient, so recorded
+    /// `[row, col]` coordinates (taken in the recording pipeline's fully
+    /// quotiented basis) may index a different class.
+    Excluded,
+    /// Source or target degree is target-only excluded: the basis is real but
+    /// possibly over-kept, so coordinates are equally unreliable — and under
+    /// `EHP_RELAX_TARGET_EXCLUDE` these variables participate in Leibniz
+    /// constraints, where one mis-indexed pin makes the page UNSAT.
+    TargetOnlyExcluded,
+    /// s+f is within the per-page cutoff margin of the data edge — the
+    /// original pipeline creates no variables there (page max_t decrements
+    /// per turn, minus an extra r−1), because the E_r basis near the edge is
+    /// computed from incomplete differential data.
+    BeyondMargin,
+    /// Source or target outside the computed polygon.
+    OutsidePolygon,
+    /// Zero-dimensional source or target, or row/col beyond the current dims.
+    NoVariable,
+}
+
+impl std::fmt::Display for OutsideDropReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            OutsideDropReason::Excluded => "degree excluded (partial-quotient basis)",
+            OutsideDropReason::TargetOnlyExcluded => {
+                "degree target-only excluded (over-kept basis)"
+            }
+            OutsideDropReason::BeyondMargin => "within cutoff margin of the data edge",
+            OutsideDropReason::OutsidePolygon => "outside computed polygon",
+            OutsideDropReason::NoVariable => "zero dims or row/col out of range",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Python-parity gate for the outside-diffs knowledge base: remove rows whose
+/// `[row, col]` coordinates cannot be trusted on THIS page and return them
+/// with the reason.
+///
+/// Rationale: outside rows were recorded against the reference (Python)
+/// pipeline's fully quotiented E_r bases. The reference pipeline enforces a
+/// row only if its variable already exists (`make_known_constraints` skips
+/// otherwise); variables exist only away from exclusions and a per-page
+/// cutoff margin. Rust instead force-creates variable blocks for every known
+/// diff (`add_known_diff_vars`) — right for interactive user asserts made
+/// against the CURRENT chart, but wrong for bulk-imported rows: at excluded /
+/// over-kept / edge degrees Rust's basis differs from the recording basis, so
+/// a mathematically correct row can pin the wrong matrix entry, and (under
+/// the relaxed target exclusion) collide with sound Leibniz constraints —
+/// observed as E4 UNSAT at EHP_MAX_T=80 with verified-correct data.
+///
+/// The margin uses the reference rule (page max_t decrements per turn, then
+/// r−1 more): rows with s+f > max_t − (2r − 3) are dropped. Set
+/// `EHP_OUTSIDE_PARITY=0` to disable pruning entirely (restores
+/// force-enforcement of every row).
+pub fn prune_outside_diffs(
+    page: &SATPage,
+    diffs: &mut HashMap<DiffVar, bool>,
+) -> Vec<(DiffVar, bool, OutsideDropReason)> {
+    let r = page.r;
+    let margin_cutoff = page.max_t.map(|m| m - (2 * r - 3));
+    let mut dropped = Vec::new();
+    diffs.retain(|dv, val| {
+        let src = Tridegree::new(dv.n.min(dv.s + 2), dv.s, dv.f);
+        let tgt = src.diff_target(r);
+        let reason = if page.is_excluded(src) || page.is_excluded(tgt) {
+            Some(OutsideDropReason::Excluded)
+        } else if page.is_excluded_target_only(src) || page.is_excluded_target_only(tgt) {
+            Some(OutsideDropReason::TargetOnlyExcluded)
+        } else if margin_cutoff.is_some_and(|c| src.s + src.f > c) {
+            Some(OutsideDropReason::BeyondMargin)
+        } else if !page.is_in_computed_polygon_source(src) || !page.is_in_computed_polygon(tgt)
+        {
+            Some(OutsideDropReason::OutsidePolygon)
+        } else if (dv.row as usize) >= page.dim_at(tgt) || (dv.col as usize) >= page.dim_at(src)
+        {
+            Some(OutsideDropReason::NoVariable)
+        } else {
+            None
+        };
+        match reason {
+            Some(rsn) => {
+                dropped.push((*dv, *val, rsn));
+                false
+            }
+            None => true,
+        }
+    });
+    dropped.sort_by_key(|(dv, _, _)| (dv.s + dv.f, dv.n, dv.s, dv.f, dv.row, dv.col));
+    dropped
 }
 
 #[cfg(test)]

@@ -470,6 +470,13 @@ def generate_nodes_svg(data):
 
     nodes_svg = '<g id="nodes-group">\n'
 
+    # Radius of a default node, used to size the stem-mode "?" uncertainty
+    # glyph. Only consulted when a node carries an uncertain_* attribute
+    # (stem mode only), so sphere charts are unaffected.
+    default_node_radius = scale * get_value_or_schema_default(
+        data, ["header", "chart", "nodeSize"]
+    )
+
     for node_id, node in data.get("nodes", {}).items():
         cx = node["absoluteX"] * scale
         cy = node["absoluteY"] * scale
@@ -511,6 +518,25 @@ def generate_nodes_svg(data):
                 jmap_str = str(jmap_value)
             jmap_attr = f' data-jmap="{jmap_str}"'
 
+        # Stem-mode "?" uncertainty markers: nodes flagged uncertain_src /
+        # uncertain_tgt by jsonmaker get a data-uncertain attribute (the
+        # contract with the chart's injected JS) and a question-mark glyph
+        # centered on the node. jsonmaker only emits these attributes in
+        # stem mode, so sphere charts are byte-identical.
+        uncertain_attr = ""
+        uncertain_mark = ""
+        unc_src = "uncertain_src" in attributes
+        unc_tgt = "uncertain_tgt" in attributes
+        if unc_src or unc_tgt:
+            kind = "both" if (unc_src and unc_tgt) else ("src" if unc_src else "tgt")
+            uncertain_attr = f' data-uncertain="{kind}"'
+            mark_font_size = 1.1 * default_node_radius
+            uncertain_mark = (
+                f'<text class="uncertain-mark" x="{cx}" y="{cy}" text-anchor="middle" '
+                f'dominant-baseline="central" font-size="{mark_font_size}px" '
+                f'pointer-events="none">?</text>\n'
+            )
+
         # Generate appropriate SVG element based on shape
         if node_shape in ["square", "rectangle"]:
             # Use provided dimensions or defaults
@@ -519,14 +545,16 @@ def generate_nodes_svg(data):
 
             # Position rectangle using the same Y coordinate reference as text (center-based)
             # Both rect and text will use y="{cy}" so they get identical coordinate transformations
-            nodes_svg += f'<rect id="{node_id}" class="defaultNode {aliases}" x="{cx-width/2}" y="{cy-height/2}" width="{width}" height="{height}" {style} data-label="{label}"{jmap_attr}></rect>\n'
+            nodes_svg += f'<rect id="{node_id}" class="defaultNode {aliases}" x="{cx-width/2}" y="{cy-height/2}" width="{width}" height="{height}" {style} data-label="{label}"{jmap_attr}{uncertain_attr}></rect>\n'
 
             # Add visible text if present
             if visible_text:
                 nodes_svg += f'<text x="{cx}" y="{cy}" text-anchor="middle" dominant-baseline="central" fill="white" font-size="8" class="node-text">{visible_text}</text>\n'
+            nodes_svg += uncertain_mark
         else:
             # Default circle behavior (backward compatible)
-            nodes_svg += f'<circle id="{node_id}" class="defaultNode {aliases}" cx="{cx}" cy="{cy}" {style} data-label="{label}"{jmap_attr}></circle>\n'
+            nodes_svg += f'<circle id="{node_id}" class="defaultNode {aliases}" cx="{cx}" cy="{cy}" {style} data-label="{label}"{jmap_attr}{uncertain_attr}></circle>\n'
+            nodes_svg += uncertain_mark
 
     nodes_svg += "</g>\n"
     return nodes_svg
@@ -824,6 +852,19 @@ def generate_css_styles(data, theme="light"):
             }
         }
 
+    # Stem-mode only: the "?" uncertainty glyph drawn on uncertain_src /
+    # uncertain_tgt nodes. --text-color contrasts with both open (bg-filled)
+    # and filled (d_r-colored) nodes in every theme; it is how all other
+    # chart text (ticks, axes) is colored. Gated on viewMode so sphere
+    # charts stay byte-identical.
+    if data.get("header", {}).get("metadata", {}).get("viewMode") == "stem":
+        global_css += {
+            ".uncertain-mark": {
+                "fill": "var(--text-color)",
+                "font-weight": "bold",
+            }
+        }
+
     # Add faded class for highlighting mode
     global_css += {
         ".faded": {"opacity": 0.3}
@@ -861,6 +902,22 @@ def process_json(input_file, output_file, theme="light", view_mode="sphere", fil
     
     data["header"]["metadata"]["viewMode"] = view_mode
     data["header"]["metadata"]["filterValue"] = filter_value
+
+    # Stem mode only: reflect the x-axis so n increases right-to-left and the
+    # stable range sits on the left edge. Chart bounds are computed first
+    # (compute_chart_dimensions is idempotent — the later call inside
+    # generate_html is then a no-op), every node's x is replaced by
+    # (x_min + x_max) - x, and header.chart.x_reflect_sum tells the template
+    # to print reflected tick labels. Everything else (edges, absolute
+    # positions, the "?" glyphs) is positioned from node coordinates, so it
+    # follows automatically. Sphere charts never enter this branch.
+    if view_mode == "stem":
+        compute_chart_dimensions(data)
+        chart_width = data["header"]["chart"]["width"]
+        x_reflect_sum = chart_width["min"] + chart_width["max"]
+        for node in data.get("nodes", {}).values():
+            node["x"] = x_reflect_sum - node["x"]
+        data["header"]["chart"]["x_reflect_sum"] = x_reflect_sum
 
     # Generate HTML
     html_content = generate_html(data, theme)
