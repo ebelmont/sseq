@@ -47,7 +47,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let t_build = t1.elapsed().as_secs_f64();
         let num_vars = system.num_vars;
         let t2 = Instant::now();
-        let result = solver::solve(&system);
+        let result = solver::solve_with_d2(&current_page, &system).map(|(res, d2n)| {
+            if d2n > 0 {
+                eprintln!("E_{}: d2-linearization determined {} more entries", r, d2n);
+            }
+            res
+        });
         let t_solve = t2.elapsed().as_secs_f64();
 
         match result {

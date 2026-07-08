@@ -968,6 +968,127 @@ fn add_known_diff_vars(page: &SATPage, known: &HashMap<DiffVar, bool>, vars: &mu
     }
 }
 
+/// Opt-out switch for the d²=0 one-leg linearization (env `EHP_D2_LINEAR`,
+/// read once; set to `0` to disable). See [`make_d2_linear_rows`].
+pub fn d2_linearize_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("EHP_D2_LINEAR").map_or(true, |v| v != "0"))
+}
+
+/// d²=0, linearized against the current solve: for composable degrees
+/// A → B → C on this page (`B = A.diff_target(r)`, `C = B.diff_target(r)`),
+/// the relation `Σⱼ d(B)[k,j]·d(A)[j,i] = 0` is quadratic in general, but
+/// the moment one leg is determined it becomes LINEAR in the other:
+///
+/// - column `i` of `d(A)` fully determined with support `S` ⇒ for every `k`:
+///   `Σ_{j∈S} d(B)[k,j] = 0`;
+/// - row `k` of `d(B)` fully determined with support `T` ⇒ for every `i`:
+///   `Σ_{j∈T} d(A)[j,i] = 0`.
+///
+/// These rows are true consequences of d∘d = 0 and the (trustworthy,
+/// clean-degree) determined values, so adding them is sound. Emitted only
+/// when A, B and C are all unexcluded, in the computed polygon, and
+/// nonzero-dimensional — the uncertainty-tracking contract: never build a
+/// constraint through a degree with prior-page uncertainty.
+///
+/// Returns sparse rows `(variable indices, rhs)` ready for
+/// [`crate::interpage::update_sat_result`]. Rows whose XOR support is empty
+/// (all-zero determined leg) are skipped — they are `0 = 0`.
+pub fn make_d2_linear_rows(
+    page: &SATPage,
+    res: &crate::result::SATResult,
+) -> Vec<(Vec<usize>, bool)> {
+    let r = page.r;
+    let entry = |t: Tridegree, row: u16, col: u16| -> Option<bool> {
+        let n_var = t.n.min(t.s + 2);
+        let idx = *res.var_index.get(&DiffVar::new(n_var, t.s, t.f, row, col))?;
+        if res.unknown.contains(&idx) {
+            None
+        } else {
+            Some(res.offset.entry(idx) != 0)
+        }
+    };
+    let var_of = |t: Tridegree, row: u16, col: u16| -> Option<usize> {
+        let n_var = t.n.min(t.s + 2);
+        res.var_index
+            .get(&DiffVar::new(n_var, t.s, t.f, row, col))
+            .copied()
+    };
+
+    let mut rows: Vec<(Vec<usize>, bool)> = Vec::new();
+    let mut degrees: Vec<Tridegree> = page
+        .dimension
+        .iter()
+        .filter(|(_, &d)| d > 0)
+        .map(|(&t, _)| t)
+        .collect();
+    degrees.sort();
+
+    for &a_deg in &degrees {
+        // Stable copies share the representative's differential — generating
+        // their rows would duplicate the rep's (in identical variables).
+        if a_deg.n > a_deg.s + 2 {
+            continue;
+        }
+        let b_deg = a_deg.diff_target(r);
+        let c_deg = b_deg.diff_target(r);
+        let (a, b, c) = (page.dim_at(a_deg), page.dim_at(b_deg), page.dim_at(c_deg));
+        if a == 0 || b == 0 || c == 0 {
+            continue;
+        }
+        if page.is_excluded(a_deg) || page.is_excluded(b_deg) || page.is_excluded(c_deg) {
+            continue;
+        }
+        if !page.is_in_computed_polygon_source(a_deg)
+            || !page.is_in_computed_polygon_source(b_deg)
+            || !page.is_in_computed_polygon(c_deg)
+        {
+            continue;
+        }
+
+        // Direction 1: a fully determined column of d(A) constrains d(B).
+        for i in 0..a as u16 {
+            let support: Option<Vec<u16>> = (0..b as u16)
+                .map(|j| entry(a_deg, j, i).map(|v| (j, v)))
+                .collect::<Option<Vec<_>>>()
+                .map(|col| col.into_iter().filter(|&(_, v)| v).map(|(j, _)| j).collect());
+            let Some(s) = support else { continue };
+            if s.is_empty() {
+                continue;
+            }
+            for k in 0..c as u16 {
+                let idxs: Option<Vec<usize>> =
+                    s.iter().map(|&j| var_of(b_deg, k, j)).collect();
+                if let Some(mut idxs) = idxs {
+                    idxs.sort_unstable();
+                    rows.push((idxs, false));
+                }
+            }
+        }
+
+        // Direction 2: a fully determined row of d(B) constrains d(A).
+        for k in 0..c as u16 {
+            let support: Option<Vec<u16>> = (0..b as u16)
+                .map(|j| entry(b_deg, k, j).map(|v| (j, v)))
+                .collect::<Option<Vec<_>>>()
+                .map(|row| row.into_iter().filter(|&(_, v)| v).map(|(j, _)| j).collect());
+            let Some(t) = support else { continue };
+            if t.is_empty() {
+                continue;
+            }
+            for i in 0..a as u16 {
+                let idxs: Option<Vec<usize>> =
+                    t.iter().map(|&j| var_of(a_deg, j, i)).collect();
+                if let Some(mut idxs) = idxs {
+                    idxs.sort_unstable();
+                    rows.push((idxs, false));
+                }
+            }
+        }
+    }
+    rows
+}
+
 /// Why an outside-knowledge-base differential row was not enforced — see
 /// [`prune_outside_diffs`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

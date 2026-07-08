@@ -50,14 +50,24 @@ def try_get_key(row, key, default=None):
     Get a key from a row.
 
     Return a default value if the key is not present or the value is `nan`.
+    Container values (e.g. a node's `attributes` list) are returned as-is:
+    `pd.isna` on a list is element-wise, and truth-testing the resulting
+    array raises once the list has 2+ elements (it only ever "worked" for
+    the 0/1-element lists stem nodes used to have).
     """
 
     try:
-        if pd.isna(row[key]):
-            return default
-        return row[key]
+        val = row[key]
     except KeyError:
         return default
+    if isinstance(val, (list, tuple, set, dict)):
+        return val
+    try:
+        if pd.isna(val):
+            return default
+    except (TypeError, ValueError):
+        return val
+    return val
 
 
 def edge_offset(edge_type, arrow_length=1):

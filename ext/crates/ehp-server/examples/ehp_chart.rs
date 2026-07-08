@@ -137,7 +137,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let cutoff = current_page.max_s.unwrap_or(0);
         let system = constraints::build_constraint_system(&current_page, cutoff, &known_diffs);
         let num_vars = system.num_vars;
-        let result = solver::solve(&system);
+        let result = solver::solve_with_d2(&current_page, &system).map(|(res, d2n)| {
+            if d2n > 0 {
+                eprintln!("  E_{}: d\u{b2}=0 linearization determined {} more entries", r, d2n);
+            }
+            res
+        });
 
         if let Some(ref res) = result {
             let determined = num_vars - res.unknown.len();
@@ -676,7 +681,12 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
         let system =
             constraints::build_constraint_system(&pages[i].page, cutoff, &pages[i].known_diffs);
         let num_vars = system.num_vars;
-        let result = solver::solve(&system);
+        let result = solver::solve_with_d2(&pages[i].page, &system).map(|(res, d2n)| {
+            if d2n > 0 {
+                eprintln!("  E_{}: d\u{b2}=0 linearization determined {} more entries", r, d2n);
+            }
+            res
+        });
 
         if let Some(ref res) = result {
             let determined = num_vars - res.unknown.len();
@@ -2348,7 +2358,7 @@ fn solve_and_export(
 ) -> Option<SATResult> {
     let cutoff = page.max_s.unwrap_or(0);
     let system = constraints::build_constraint_system(page, cutoff, known_diffs);
-    let result = solver::solve(&system);
+    let result = solver::solve_with_d2(page, &system).map(|(res, _)| res);
 
     if let Some(ref res) = result {
         let determined = system.num_vars - res.unknown.len();

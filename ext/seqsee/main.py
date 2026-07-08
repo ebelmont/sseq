@@ -918,6 +918,10 @@ def process_json(input_file, output_file, theme="light", view_mode="sphere", fil
         for node in data.get("nodes", {}).values():
             node["x"] = x_reflect_sum - node["x"]
         data["header"]["chart"]["x_reflect_sum"] = x_reflect_sum
+        # Stem charts line up same-bidegree classes DIAGONALLY (45°) instead
+        # of the schema-default horizontal (nodeSlope 0). An explicit
+        # nodeSlope in the input JSON still wins.
+        data["header"]["chart"].setdefault("nodeSlope", 1)
 
     # Generate HTML
     html_content = generate_html(data, theme)
