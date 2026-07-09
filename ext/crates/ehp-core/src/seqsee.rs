@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::constraints::DiffVar;
-use crate::gf2::{mat_get, vec_get};
+use crate::gf2::vec_get;
 use crate::map::MapKind;
 use crate::page::SATPage;
 use crate::result::SATResult;
@@ -406,9 +406,12 @@ pub fn map_target_names(page: &SATPage, kind: MapKind, src_t: Tridegree, col: us
     // mat_vec_mul uses v^T * M, but for individual basis vector we just read
     // row `col` directly.
     let mut names = Vec::new();
-    for j in 0..tgt_dim {
-        if col < mat.rows() && j < mat.columns() && mat_get(mat, col, j) {
-            names.push(gen_name(tgt_t.n, tgt_t.s, tgt_t.f, j, tgt_dim));
+    if col < mat.rows() {
+        let row = mat.row_vec(col);
+        for j in 0..tgt_dim.min(mat.tgt_dim as usize) {
+            if vec_get(&row, j) {
+                names.push(gen_name(tgt_t.n, tgt_t.s, tgt_t.f, j, tgt_dim));
+            }
         }
     }
     names

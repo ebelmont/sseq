@@ -200,7 +200,7 @@ fn reconstruct_provenance(
         ));
     }
     for (i, (indices, rhs, _)) in rows.iter().enumerate() {
-        let real: Vec<usize> = vec_support(&sys.rows[i]).collect();
+        let real: Vec<usize> = sys.rows[i].iter().map(|&j| j as usize).collect();
         if &real != indices || sys.rhs[i] != *rhs {
             return Err(format!(
                 "row {} mismatch: reconstructed {:?} rhs={} vs real {:?} rhs={}",
@@ -247,7 +247,7 @@ fn xor_merge(a: &[u32], b: &[u32]) -> Vec<u32> {
 fn tracked_certificate(sys: &ConstraintSystem) -> Option<Vec<usize>> {
     let n = sys.rows.len();
     let ncols = sys.num_vars;
-    let mut coeffs: Vec<FpVector> = sys.rows.clone();
+    let mut coeffs: Vec<FpVector> = (0..sys.rows.len()).map(|i| sys.row_vec(i)).collect();
     let mut rhs: Vec<bool> = sys.rhs.clone();
     let mut combos: Vec<Vec<u32>> = (0..n).map(|i| vec![i as u32]).collect();
 
@@ -293,7 +293,7 @@ fn tracked_certificate(sys: &ConstraintSystem) -> Option<Vec<usize>> {
         let mut acc = vec_zero(ncols);
         let mut racc = false;
         for &i in cert {
-            acc += &sys.rows[i];
+            acc += &sys.row_vec(i);
             racc ^= sys.rhs[i];
         }
         assert!(
@@ -447,7 +447,7 @@ fn product_block_status(
                 pm.dim1, pm.dim2, pm.tgt_dim,
                 if dim_ok { "" } else { "  <<< tgt_dim MISMATCH — multiply() silently returns ZERO" }
             );
-            print!("{}", mat_str(&pm.matrix, "        "));
+            print!("{}", mat_str(&pm.to_matrix(), "        "));
         }
         None => {
             println!(
@@ -744,7 +744,7 @@ fn analyze(
 
     println!("\n--- UNSAT CERTIFICATE (XOR of these constraints = [0 = 1]) ---");
     for &idx in &cert {
-        let vars: Vec<String> = vec_support(&sys.rows[idx])
+        let vars: Vec<String> = sys.rows[idx].iter().map(|&j| j as usize)
             .map(|i| {
                 let v = sys.vars[i];
                 format!("d{}({},{},{})[{},{}]", page.r, v.n, v.s, v.f, v.row, v.col)

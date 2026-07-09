@@ -121,13 +121,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("  theme:  {}", theme);
     eprintln!();
 
+    // 0. Warm-start cache (EHP_CACHE=0 disables): the startup chain is a
+    // deterministic function of the data + semantics flags; a hash match
+    // loads pages/results and skips load+build+solve+turn entirely.
+    let cache_hash = ehp_core::cache::config_hash(&data_path, start_r, max_t, max_r);
+    let cache_mode = ehp_core::cache::cache_mode();
+    let mut pages: Vec<PageState> = Vec::new();
+    if cache_mode == ehp_core::cache::CacheMode::Use {
+        if let Some(cached) = ehp_core::cache::load_startup_cache(&cache_hash, start_r, max_r) {
+            let t0 = Instant::now();
+            for cp in cached {
+                let n_values: BTreeSet<i32> = cp
+                    .page
+                    .dimension
+                    .iter()
+                    .filter(|(_, &d)| d > 0)
+                    .map(|(&t, _)| t.n)
+                    .filter(|&n| n < max_t)
+                    .collect();
+                let stem_values: BTreeSet<i32> = cp
+                    .page
+                    .dimension
+                    .iter()
+                    .filter(|(&t, &d)| d > 0 && t.n <= t.s + 2)
+                    .map(|(&t, _)| t.s)
+                    .collect();
+                let unsat_reason = if cp.result.is_some() {
+                    None
+                } else {
+                    Some(format!("cached E_{} has no solve result", cp.page.r))
+                };
+                let r = cp.page.r;
+                if let Some(ref res) = cp.result {
+                    eprintln!(
+                        "E_{}: {}/{} vars determined (cached)",
+                        r,
+                        res.vars.len() - res.unknown.len(),
+                        res.vars.len(),
+                    );
+                }
+                pages.push(PageState {
+                    page: cp.page,
+                    result: cp.result,
+                    known_diffs: cp.known_diffs,
+                    n_values,
+                    stem_values,
+                    turned: None,
+                    excluded_leibniz: cp.excluded_leibniz,
+                    unsat_reason,
+                });
+            }
+            eprintln!(
+                "Warm-start cache HIT ({}): {} pages in {:.2}s",
+                cache_hash,
+                pages.len(),
+                t0.elapsed().as_secs_f64(),
+            );
+        } else {
+            eprintln!("Warm-start cache miss ({}) — cold startup", cache_hash);
+        }
+    }
+    let from_cache = !pages.is_empty();
+
+    if !from_cache {
     // 1. Load starting page
     let t0 = Instant::now();
     let page = io::load_page(&data_path, start_r, max_t)?;
     eprintln!("Loaded E_{} in {:.2}s", start_r, t0.elapsed().as_secs_f64());
 
     // 2. Build all pages: solve, turn, solve, turn, ...
-    let mut pages: Vec<PageState> = Vec::new();
     let mut current_page = page;
 
     loop {
@@ -230,6 +292,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         current_page = next_page;
     }
 
+    if cache_mode != ehp_core::cache::CacheMode::Off
+        && pages.iter().all(|ps| ps.result.is_some())
+    {
+        let cached: Vec<ehp_core::cache::CachedPage> = pages
+            .iter()
+            .map(|ps| ehp_core::cache::CachedPage {
+                page: ps.page.clone(),
+                result: ps.result.clone(),
+                known_diffs: ps.known_diffs.clone(),
+                excluded_leibniz: ps.excluded_leibniz.clone(),
+            })
+            .collect();
+        match ehp_core::cache::save_startup_cache(&cache_hash, &cached) {
+            Ok(()) => eprintln!("Warm-start cache saved ({})", cache_hash),
+            Err(e) => eprintln!("Warm-start cache save failed: {}", e),
+        }
+    }
+    } // end cold startup
+
     eprintln!();
     eprintln!(
         "Computed {} pages: E_{} through E_{}",
@@ -266,14 +347,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let charts_dir = out_dir.join("charts");
     std::fs::create_dir_all(&charts_dir)?;
 
+    // Chart freshness stamp: charts on disk were generated from a specific
+    // startup state + display config. On a warm-start cache hit with a
+    // matching stamp, the charts already depict exactly this state — skip
+    // clearing and regeneration entirely. The stamp is deleted on the first
+    // applied mutation (regen_affected_charts), so post-mutation states
+    // always regenerate.
+    let want_mapviews = std::env::var("EHP_MAPVIEWS").map(|v| v != "0").unwrap_or(true);
+    let stamp_path = charts_dir.join(".state_stamp");
+    let expected_stamp = format!(
+        "{}|theme={}|mapviews={}",
+        cache_hash, theme, want_mapviews
+    );
+    let charts_fresh = from_cache
+        && std::fs::read_to_string(&stamp_path)
+            .map(|c| c.trim() == expected_stamp)
+            .unwrap_or(false);
+    if charts_fresh {
+        eprintln!("Charts on disk match this state (stamp) — skipping regeneration.");
+    }
+
     // Remove chart artifacts from previous runs. Files are keyed only by
     // (sphere, page), so anything this run doesn't regenerate — a different
     // max_t, fewer pages, or a failed sphere — would otherwise linger and be
     // reachable via the index and WASD navigation.
+    if !charts_fresh {
     let stale = clean_charts_dir(&charts_dir);
     if stale > 0 {
         eprintln!("Cleared {} chart files from previous runs", stale);
     }
+    } // end !charts_fresh (clear)
 
     // Canonicalize paths
     let csv_paths: Vec<PathBuf> = csv_paths
@@ -300,6 +403,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 5. Generate charts for all pages (sphere + stem views)
+    if !charts_fresh {
     let mut all_chart_files: Vec<(i32, i32, PathBuf)> = Vec::new(); // (r, n, path)
     let mut all_stem_files: Vec<(i32, i32)> = Vec::new(); // (r, k)
     for (i, ps) in pages.iter().enumerate() {
@@ -356,7 +460,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Pre-generate the split-screen map views (J-map style) so the e/h/p
     // keys and WASD work immediately. EHP_MAPVIEWS=0 skips this.
-    let want_mapviews = std::env::var("EHP_MAPVIEWS").map(|v| v != "0").unwrap_or(true);
     if want_mapviews && seqsee_dir.join("ehp_batch.py").exists() {
         let r_range = (
             pages.first().map(|p| p.page.r).unwrap_or(2),
@@ -393,6 +496,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Generate combined index page
     generate_index_html(&charts_dir, &all_chart_files, &all_stem_files, start_r, max_t, &theme, &pages)?;
+
+    // Stamp the charts as depicting exactly this startup state.
+    let _ = std::fs::write(&stamp_path, &expected_stamp);
+    } // end !charts_fresh (generate)
 
     // 6. Open browser
     let index_path = charts_dir.join("index.html");
@@ -621,7 +728,7 @@ fn page_content_equal(a: &SATPage, b: &SATPage) -> bool {
         if pa.dim1 != pb.dim1 || pa.dim2 != pb.dim2 || pa.tgt_dim != pb.tgt_dim {
             return false;
         }
-        if !mat_eq(&pa.matrix, &pb.matrix) {
+        if pa != pb {
             return false;
         }
     }
@@ -634,7 +741,7 @@ fn page_content_equal(a: &SATPage, b: &SATPage) -> bool {
         }
         for (t, mat_a) in &ma.matrices {
             let Some(mat_b) = mb.matrices.get(t) else { return false };
-            if !mat_eq(mat_a, mat_b) {
+            if mat_a.as_ref() != mat_b.as_ref() {
                 return false;
             }
         }
@@ -2640,6 +2747,9 @@ fn regen_affected_charts(
     seqsee_dir: &Path,
     theme: &str,
 ) -> usize {
+    // The charts no longer depict the cached startup state: drop the
+    // freshness stamp so the next warm start regenerates.
+    let _ = std::fs::remove_file(charts_dir.join(".state_stamp"));
     // Collect (page idx, spheres, stems) worth regenerating.
     let mut plan: Vec<(usize, BTreeSet<i32>, BTreeSet<i32>)> = Vec::new();
     let mut total = 0usize;

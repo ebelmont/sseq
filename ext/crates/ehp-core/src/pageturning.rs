@@ -637,10 +637,12 @@ pub fn build_page_from_turned(
         for (t, mat) in matrices {
             map_table.set_matrix(t, mat);
         }
+        map_table.dedup_shared();
     }
 
     // Compute induced products
-    let induced_products = compute_induced_products(old_page, &next, turned);
+    let mut induced_products = compute_induced_products(old_page, &next, turned);
+    induced_products.dedup_shared_blocks();
     next.products = induced_products;
 
     next
@@ -704,7 +706,7 @@ pub fn make_next_exclude_set(
     let mut exclude = hashbrown::HashSet::new();
     let mut hard = hashbrown::HashSet::new();
     let mut targets_of_unknown = hashbrown::HashSet::new();
-    let mut insert_pair = |deg: Tridegree,
+    let insert_pair = |deg: Tridegree,
                            from_unknown: bool,
                            exclude: &mut hashbrown::HashSet<Tridegree>,
                            hard: &mut hashbrown::HashSet<Tridegree>,

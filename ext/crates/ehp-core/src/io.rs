@@ -84,7 +84,8 @@ pub fn load_from_csv(prefix: &str, r: i32, max_t: i32) -> io::Result<SATPage> {
     // Load products
     eprintln!("Loading multiplication table from {}...", relations_file);
     let product_count = load_products(&relations_file, &mut page)?;
-    eprintln!("  Loaded {} products", product_count);
+    let shared = page.products.dedup_shared_blocks();
+    eprintln!("  Loaded {} products ({} duplicate blocks share storage)", product_count, shared);
 
     // Load maps
     for (kind, file) in [
@@ -93,9 +94,10 @@ pub fn load_from_csv(prefix: &str, r: i32, max_t: i32) -> io::Result<SATPage> {
         (MapKind::P, &p_file),
     ] {
         match load_map_csv(file, kind, &page) {
-            Ok((map_table, count)) => {
+            Ok((mut map_table, count)) => {
+                let shared = map_table.dedup_shared();
                 page.maps.insert(kind, map_table);
-                eprintln!("  {} map: {} entries", kind.name(), count);
+                eprintln!("  {} map: {} entries ({} share storage)", kind.name(), count, shared);
             }
             Err(_) => {
                 eprintln!("  {} map: file not found, using empty table", kind.name());
@@ -447,7 +449,7 @@ pub fn save_page_json(page: &SATPage, directory: &str) -> io::Result<()> {
                 let src_dim = page.dim_at(src_t);
                 let tgt_t = kind.target_degree(src_t);
                 for i in 0..src_dim {
-                    let row = mat.row(i).to_owned();
+                    let row = mat.row_vec(i);
                     let elem_str = if src_dim == 1 {
                         format!("{}_{}_{}", src_t.n, src_t.s, src_t.f)
                     } else {
@@ -486,15 +488,20 @@ const SECTION_MAP_E: u32 = 3;
 const SECTION_MAP_H: u32 = 4;
 const SECTION_MAP_P: u32 = 5;
 const SECTION_NAMES: u32 = 6;
+const SECTION_PRODUCTS_V2: u32 = 7;
+const SECTION_MAP_E_V2: u32 = 8;
+const SECTION_MAP_H_V2: u32 = 9;
+const SECTION_MAP_P_V2: u32 = 10;
 
 fn section_type_for_map(kind: MapKind) -> u32 {
     match kind {
-        MapKind::E => SECTION_MAP_E,
-        MapKind::H => SECTION_MAP_H,
-        MapKind::P => SECTION_MAP_P,
+        MapKind::E => SECTION_MAP_E_V2,
+        MapKind::H => SECTION_MAP_H_V2,
+        MapKind::P => SECTION_MAP_P_V2,
     }
 }
 
+/// Legacy fp-limb map sections (old .ehp files).
 fn map_kind_for_section(section_type: u32) -> Option<MapKind> {
     match section_type {
         SECTION_MAP_E => Some(MapKind::E),
@@ -504,27 +511,37 @@ fn map_kind_for_section(section_type: u32) -> Option<MapKind> {
     }
 }
 
+/// Compact V2 map sections (raw block words).
+fn map_kind_for_section_v2(section_type: u32) -> Option<MapKind> {
+    match section_type {
+        SECTION_MAP_E_V2 => Some(MapKind::E),
+        SECTION_MAP_H_V2 => Some(MapKind::H),
+        SECTION_MAP_P_V2 => Some(MapKind::P),
+        _ => None,
+    }
+}
+
 // --- Binary write helpers ---
 
-fn write_u16(w: &mut Vec<u8>, v: u16) {
+pub(crate) fn write_u16(w: &mut Vec<u8>, v: u16) {
     w.extend_from_slice(&v.to_le_bytes());
 }
 
-fn write_u32(w: &mut Vec<u8>, v: u32) {
+pub(crate) fn write_u32(w: &mut Vec<u8>, v: u32) {
     w.extend_from_slice(&v.to_le_bytes());
 }
 
-fn write_i32(w: &mut Vec<u8>, v: i32) {
+pub(crate) fn write_i32(w: &mut Vec<u8>, v: i32) {
     w.extend_from_slice(&v.to_le_bytes());
 }
 
-fn write_u64(w: &mut Vec<u8>, v: u64) {
+pub(crate) fn write_u64(w: &mut Vec<u8>, v: u64) {
     w.extend_from_slice(&v.to_le_bytes());
 }
 
 // --- Binary read helpers ---
 
-fn read_u16(data: &[u8], pos: &mut usize) -> io::Result<u16> {
+pub(crate) fn read_u16(data: &[u8], pos: &mut usize) -> io::Result<u16> {
     if *pos + 2 > data.len() {
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "read_u16"));
     }
@@ -533,7 +550,7 @@ fn read_u16(data: &[u8], pos: &mut usize) -> io::Result<u16> {
     Ok(v)
 }
 
-fn read_u32(data: &[u8], pos: &mut usize) -> io::Result<u32> {
+pub(crate) fn read_u32(data: &[u8], pos: &mut usize) -> io::Result<u32> {
     if *pos + 4 > data.len() {
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "read_u32"));
     }
@@ -542,7 +559,7 @@ fn read_u32(data: &[u8], pos: &mut usize) -> io::Result<u32> {
     Ok(v)
 }
 
-fn read_i32(data: &[u8], pos: &mut usize) -> io::Result<i32> {
+pub(crate) fn read_i32(data: &[u8], pos: &mut usize) -> io::Result<i32> {
     if *pos + 4 > data.len() {
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "read_i32"));
     }
@@ -551,7 +568,7 @@ fn read_i32(data: &[u8], pos: &mut usize) -> io::Result<i32> {
     Ok(v)
 }
 
-fn read_u64(data: &[u8], pos: &mut usize) -> io::Result<u64> {
+pub(crate) fn read_u64(data: &[u8], pos: &mut usize) -> io::Result<u64> {
     if *pos + 8 > data.len() {
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "read_u64"));
     }
@@ -596,16 +613,18 @@ pub fn save_to_binary(page: &SATPage, path: &str) -> io::Result<()> {
             write_u16(&mut buf, pm.dim1);
             write_u16(&mut buf, pm.dim2);
             write_u16(&mut buf, pm.tgt_dim);
-            let words = mat_raw_words(&pm.matrix);
+            // Compact layout: the block's bit-packed words verbatim (no fp
+            // Matrix round trip — that cost more than the CSV parse).
+            let words = pm.raw_words();
             write_u32(&mut buf, words.len() as u32);
-            for &w in &words {
+            for &w in words {
                 write_u64(&mut buf, w);
             }
         }
-        sections.push((SECTION_PRODUCTS, buf));
+        sections.push((SECTION_PRODUCTS_V2, buf));
     }
 
-    // Sections 3/4/5: MAP_E/H/P
+    // Sections 8/9/10: MAP_E/H/P (compact V2 — raw block words verbatim)
     for kind in MapKind::all() {
         if let Some(map_table) = page.maps.get(&kind) {
             if map_table.matrices.is_empty() {
@@ -618,11 +637,11 @@ pub fn save_to_binary(page: &SATPage, path: &str) -> io::Result<()> {
                 write_i32(&mut buf, t.n);
                 write_i32(&mut buf, t.s);
                 write_i32(&mut buf, t.f);
-                write_u16(&mut buf, mat.rows() as u16);
-                write_u16(&mut buf, mat.columns() as u16);
-                let words = mat_raw_words(mat);
+                write_u16(&mut buf, mat.dim1);
+                write_u16(&mut buf, mat.tgt_dim);
+                let words = mat.raw_words();
                 write_u32(&mut buf, words.len() as u32);
-                for &w in &words {
+                for &w in words {
                     write_u64(&mut buf, w);
                 }
             }
@@ -766,6 +785,41 @@ pub fn load_from_binary(path: &str, filter_max_t: Option<i32>) -> io::Result<SAT
                 }
             }
 
+            SECTION_PRODUCTS_V2 => {
+                let block_count = read_u32(section, &mut sp)? as usize;
+                for _ in 0..block_count {
+                    let n1 = read_i32(section, &mut sp)?;
+                    let s1 = read_i32(section, &mut sp)?;
+                    let f1 = read_i32(section, &mut sp)?;
+                    let n2 = read_i32(section, &mut sp)?;
+                    let s2 = read_i32(section, &mut sp)?;
+                    let f2 = read_i32(section, &mut sp)?;
+                    let dim1 = read_u16(section, &mut sp)?;
+                    let dim2 = read_u16(section, &mut sp)?;
+                    let tgt_dim = read_u16(section, &mut sp)?;
+                    let num_words = read_u32(section, &mut sp)? as usize;
+                    if let Some(mt) = filter_max_t {
+                        if s1 + f1 > mt || s2 + f2 > mt {
+                            sp += num_words * 8;
+                            continue;
+                        }
+                    }
+                    let mut words = Vec::with_capacity(num_words);
+                    for _ in 0..num_words {
+                        words.push(read_u64(section, &mut sp)?);
+                    }
+                    let pm = ProductMatrix::from_raw_parts(dim1, dim2, tgt_dim, words)
+                        .ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::InvalidData, "bad product block")
+                        })?;
+                    page.products.insert_block(
+                        Tridegree::new(n1, s1, f1),
+                        Tridegree::new(n2, s2, f2),
+                        pm,
+                    );
+                }
+            }
+
             SECTION_PRODUCTS => {
                 let pair_count = read_u32(section, &mut sp)? as usize;
                 for _ in 0..pair_count {
@@ -794,12 +848,40 @@ pub fn load_from_binary(path: &str, filter_max_t: Option<i32>) -> io::Result<SAT
                     let matrix = mat_from_raw_words(nrows, tgt_dim as usize, words);
                     let deg1 = Tridegree::new(n1, s1, f1);
                     let deg2 = Tridegree::new(n2, s2, f2);
-                    page.products.insert_block(deg1, deg2, ProductMatrix {
-                        dim1,
-                        dim2,
-                        tgt_dim,
-                        matrix,
-                    });
+                    page.products.insert_block(
+                        deg1,
+                        deg2,
+                        ProductMatrix::from_matrix(dim1, dim2, tgt_dim, &matrix),
+                    );
+                }
+            }
+
+            st if map_kind_for_section_v2(st).is_some() => {
+                let kind = map_kind_for_section_v2(st).unwrap();
+                let entry_count = read_u32(section, &mut sp)? as usize;
+                let map_table = page.maps.entry(kind).or_insert_with(|| MapTable::new(kind));
+                for _ in 0..entry_count {
+                    let n = read_i32(section, &mut sp)?;
+                    let s = read_i32(section, &mut sp)?;
+                    let f = read_i32(section, &mut sp)?;
+                    let rows = read_u16(section, &mut sp)?;
+                    let tgt = read_u16(section, &mut sp)?;
+                    let num_words = read_u32(section, &mut sp)? as usize;
+                    if let Some(mt) = filter_max_t {
+                        if s + f > mt {
+                            sp += num_words * 8;
+                            continue;
+                        }
+                    }
+                    let mut words = Vec::with_capacity(num_words);
+                    for _ in 0..num_words {
+                        words.push(read_u64(section, &mut sp)?);
+                    }
+                    let block = ProductMatrix::from_raw_parts(rows, 1, tgt, words)
+                        .ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::InvalidData, "bad map block")
+                        })?;
+                    map_table.set_block(Tridegree::new(n, s, f), block);
                 }
             }
 

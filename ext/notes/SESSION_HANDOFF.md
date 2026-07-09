@@ -272,3 +272,54 @@ is a symlink — shared repo, edit surgically).
   navigator/multi-chart/extract_fresh scripts (still light/dark only).
 - Charts must be regenerated once (new binary) + hard reload, per the usual
   injected-JS gotcha.
+
+## July 8 2026 session — soundness, performance, and the t=130 path
+
+Read notes/CHANGES_2026-07-07.md §11–§20 for every change with mechanisms,
+measurements and revert instructions. Compressed map:
+
+**Soundness (all experimentally confirmed):**
+- E4-UNSAT-with-correct-data root-caused and fixed: outside-diffs rows are
+  basis-dependent for r≥3; rows at excluded ("partial-quotient") / edge
+  degrees are now pruned at load with per-row warnings (EHP_OUTSIDE_PARITY=0
+  forces). stable_Dan.csv skipped by default (EHP_OUTSIDE_SKIP).
+- Exclusion LEAK fixed in make_leibniz_constraint_single: e_d_deg2 (where
+  d(E y) lives) was missing from the participation checks in BOTH pipelines;
+  now checked unconditionally. This resolved §8b: asserting d4(3,32,9)=1 is
+  now SAT + enforced (+152 determinations). The uncertainty contract (user):
+  every consulted degree with prior-page uncertainty must skip the pair.
+- EHP_RELAX_TARGET_EXCLUDE default OFF (opt-in =1).
+- Orbit-fold lookup dedup FALSIFIED in vivo (§19c) — never re-attempt key-
+  presence changes while multiply() treats absent blocks as zero.
+
+**Performance stack (all byte-identical on the 672-trial diag_sweep_verify
+harness; identical per-page counts t=50/80):** compact product blocks (E2
+load 74s→1.4s), sparse constraint rows (1.28 GB→4.6 MB at t=80), parallel
+constraint generation (build 12.8s→0.24s at t=50), content-sharing dedup
+(products + maps; ~90% of blocks share), d²=0 one-leg linearization
+(EHP_D2_LINEAR; +129/+59/+53 entries at t=80), solver dispatch EHP_SOLVER:
+classic (default) | dense (M4RI) | uf (parity union-find; E2@t=80 0.02s vs
+70.65s) | verify / verify-uf, warm-start cache EHP_CACHE (t=80 pages warm in
+1.08s; REPL chart stamp skips regeneration on unchanged state).
+
+**Features:** `why <r> <n> <s> <f>` (explains un/determined status, traces
+exclusions to their lower-page unknowns), shift-tap zero gesture, stem-view
+"?" markers + cross-stem add flow + reflected axis + diagonal stacking +
+viewport persistence, regen cap removed, seqsee python probe fix.
+
+**Open items, in priority order:**
+1. verify-uf at t=100 (user running) — if clean, flip uf to default.
+2. §12b certificate math adjudication (user): which datum along the
+   d4(33,31,8)→d4(3,32,9) chain is wrong if naturality-through-excluded-
+   degrees reasoning were admitted (engine no longer asks; the question
+   remains). notes/unsat_cert_t80_2026-07-07.log.
+3. d² fixpoint cost at t=100 (~43s on E2) — optimization candidate.
+4. Outside-pruning margin calibration (t=50 drops a few previously-enforced
+   edge rows; user decision).
+5. Deferred designs in CHANGES: block-driven pair enumeration (§ plan file),
+   incremental cascade builds, product arena/mmap, Tier-2 SAT backbone
+   sweep, basis-aligned translation for pruned outside rows.
+6. Peak-RSS attribution at t=100/130 (dedup helps steady-state, not peak).
+7. Pre-existing gaps: mapview staleness after mutations; Rust has no
+   per-page-turn cutoff decrement for ITS OWN edge determinations (Python
+   does) — unaudited.

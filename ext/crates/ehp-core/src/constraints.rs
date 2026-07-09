@@ -47,8 +47,12 @@ pub struct ConstraintSystem {
     pub vars: Vec<DiffVar>,
     /// Reverse map: DiffVar -> global index.
     pub var_index: HashMap<DiffVar, usize>,
-    /// Constraint rows (each is an FpVector of length num_vars).
-    pub rows: Vec<FpVector>,
+    /// Constraint rows, SPARSE: sorted variable indices per row (the
+    /// generators all emit small index lists — dense full-width rows cost
+    /// ~1 GB at t=80 and tens of GB at t=130 for ~2 bits of payload each).
+    /// XOR-cancel semantics: an index appearing twice cancels (matching the
+    /// old vec_flip densification).
+    pub rows: Vec<Box<[u32]>>,
     /// RHS values.
     pub rhs: Vec<bool>,
     /// Leibniz pairs skipped due to excluded degrees (see [`ExcludedLeibniz`]).
@@ -71,13 +75,31 @@ impl ConstraintSystem {
     }
 
     /// Add a constraint: XOR of variables at given indices equals rhs_val.
+    /// A repeated index cancels (XOR), matching the old vec_flip semantics.
     pub fn add_constraint_indices(&mut self, indices: &[usize], rhs_val: bool) {
-        let mut row = vec_zero(self.num_vars);
-        for &i in indices {
-            vec_flip(&mut row, i);
+        let mut sorted: Vec<u32> = indices.iter().map(|&i| i as u32).collect();
+        sorted.sort_unstable();
+        let mut out: Vec<u32> = Vec::with_capacity(sorted.len());
+        let mut it = sorted.into_iter().peekable();
+        while let Some(i) = it.next() {
+            if it.peek() == Some(&i) {
+                it.next(); // pair cancels
+            } else {
+                out.push(i);
+            }
         }
-        self.rows.push(row);
+        self.rows.push(out.into_boxed_slice());
         self.rhs.push(rhs_val);
+    }
+
+    /// A row materialized as a dense FpVector of length num_vars (bridge for
+    /// diagnostics and the classic solver path).
+    pub fn row_vec(&self, i: usize) -> FpVector {
+        let mut row = vec_zero(self.num_vars);
+        for &j in self.rows[i].iter() {
+            vec_set(&mut row, j as usize, true);
+        }
+        row
     }
 
     /// Add a constraint from a list of DiffVars.
@@ -99,10 +121,16 @@ impl ConstraintSystem {
         self.rows.len()
     }
 
-    /// Build the coefficient matrix A and RHS vector b.
+    /// Build the coefficient matrix A and RHS vector b (dense — only at
+    /// solve time; the stored rows stay sparse).
     pub fn to_matrix(&self) -> (Matrix, FpVector) {
         let nrows = self.rows.len();
-        let a = mat_from_rows(self.rows.clone(), self.num_vars);
+        let mut a = mat_zero(nrows, self.num_vars);
+        for (i, row) in self.rows.iter().enumerate() {
+            for &j in row.iter() {
+                a.row_mut(i).set_entry(j as usize, 1);
+            }
+        }
         let mut b = vec_zero(nrows);
         for (i, &rhs) in self.rhs.iter().enumerate() {
             if rhs {
@@ -494,14 +522,25 @@ pub fn make_naturality_constraints(
     // representative's variables, and map data is only stored at the
     // representative — with missing-data-means-zero semantics, generating
     // their squares directly would emit wrong constraints.
-    for s in 0..=cutoff {
-        for f in 0..=(cutoff - s) {
+    // Parallel over (s, f) with ordered collect — byte-identical to the
+    // serial loop (no shared mutable state here at all).
+    use rayon::prelude::*;
+    let outer: Vec<(i32, i32)> = (0..=cutoff)
+        .flat_map(|s| (0..=(cutoff - s)).map(move |f| (s, f)))
+        .collect();
+    let chunks: Vec<Vec<Vec<usize>>> = outer
+        .par_iter()
+        .map(|&(s, f)| {
+            let mut local: Vec<Vec<usize>> = Vec::new();
             for n in 2..=(s + 2) {
                 let t = Tridegree::new(n, s, f);
-                let new = make_naturality_constraint_single(page, t, map_kind, var_index);
-                constraints.extend(new);
+                local.extend(make_naturality_constraint_single(page, t, map_kind, var_index));
             }
-        }
+            local
+        })
+        .collect();
+    for c in chunks {
+        constraints.extend(c);
     }
 
     // Deduplicate
@@ -860,8 +899,21 @@ pub fn make_leibniz_constraints(
         .max()
         .unwrap_or(cutoff);
 
-    for s3 in 0..=cutoff {
-        for f3 in 1..=(cutoff - s3) {
+    // Parallel over the (s3, f3) outer pairs; each task runs the inner loops
+    // in the exact serial order against the SHARED degrees_by_n, and the
+    // ordered collect + ordered merge below reproduce the serial output
+    // byte-for-byte (rows in the same sequence; each excluded-degree Vec is
+    // the concatenation of per-chunk visit orders in chunk order — exactly
+    // the serial per-key visit order).
+    use rayon::prelude::*;
+    let outer: Vec<(i32, i32)> = (0..=cutoff)
+        .flat_map(|s3| (1..=(cutoff - s3)).map(move |f3| (s3, f3)))
+        .collect();
+    let chunk_results: Vec<(Vec<Vec<usize>>, ExcludedLeibniz)> = outer
+        .par_iter()
+        .map(|&(s3, f3)| {
+            let mut local_cons: Vec<Vec<usize>> = Vec::new();
+            let mut local_exc = ExcludedLeibniz::new();
             for th1 in 2..=max_data_n {
                 let source_degrees = match degrees_by_n.get(&th1) {
                     Some(v) => v,
@@ -884,11 +936,18 @@ pub fn make_leibniz_constraints(
                         deg1,
                         deg2,
                         var_index,
-                        Some(&mut excluded),
+                        Some(&mut local_exc),
                     );
-                    constraints.extend(new);
+                    local_cons.extend(new);
                 }
             }
+            (local_cons, local_exc)
+        })
+        .collect();
+    for (cons, exc) in chunk_results {
+        constraints.extend(cons);
+        for (k, v) in exc {
+            excluded.entry(k).or_default().extend(v);
         }
     }
 

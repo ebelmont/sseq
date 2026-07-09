@@ -9,17 +9,20 @@ use crate::products::ProductTable;
 use crate::tridegree::Tridegree;
 
 /// Map table: stores the matrix of a map (E, H, or P) at each source tridegree.
-/// The matrix has dimensions src_dim × tgt_dim (maps source basis vectors to target).
+/// The matrix has dimensions src_dim × tgt_dim (maps source basis vectors to
+/// target) and is stored as a compact bit-block (`ProductMatrix` with
+/// dim1 = src_dim, dim2 = 1): ~200k map entries across the cached pages made
+/// per-entry fp matrices the dominant cache-load cost, exactly like products.
 ///
-/// Matrices are behind `Arc` so cloning a table (the interpage overlay clones
-/// the whole page per trial) shares the fp storage instead of deep-copying it.
+/// Blocks are behind `Arc` so cloning a table (the interpage overlay clones
+/// the whole page per trial) shares storage instead of deep-copying it.
 #[derive(Clone)]
 pub struct MapTable {
     pub kind: MapKind,
-    /// Matrix of the map at each source tridegree.
+    /// Bit-block of the map at each source tridegree.
     /// Convention: rows = source basis vectors, columns = target coordinates.
     /// So applying the map to element v gives v * matrix.
-    pub matrices: HashMap<Tridegree, std::sync::Arc<Matrix>>,
+    pub matrices: HashMap<Tridegree, std::sync::Arc<crate::products::ProductMatrix>>,
 }
 
 impl MapTable {
@@ -33,22 +36,64 @@ impl MapTable {
     /// Apply the map to an element.
     pub fn apply(&self, elem: &Element, target_dim: usize) -> Element {
         let target_deg = self.kind.target_degree(elem.degree);
-        if let Some(mat) = self.matrices.get(&elem.degree) {
-            let result = mat_vec_mul(mat.as_ref(), &elem.vec);
+        if let Some(b) = self.matrices.get(&elem.degree) {
+            let mut result = vec_zero(b.tgt_dim as usize);
+            for i in vec_support(&elem.vec) {
+                if i < b.rows() {
+                    result += &b.row_vec(i);
+                }
+            }
             Element::new(target_deg, result)
         } else {
             Element::zero(target_deg, target_dim)
         }
     }
 
-    /// Get the matrix at a tridegree.
-    pub fn matrix_at(&self, t: Tridegree) -> Option<&Matrix> {
+    /// Get the block at a tridegree.
+    pub fn matrix_at(&self, t: Tridegree) -> Option<&crate::products::ProductMatrix> {
         self.matrices.get(&t).map(|a| a.as_ref())
     }
 
-    /// Set the matrix at a tridegree.
+    /// Set the matrix at a tridegree (fp form — converted to the compact
+    /// block; rows = source dim, cols = target dim).
     pub fn set_matrix(&mut self, t: Tridegree, mat: Matrix) {
-        self.matrices.insert(t, std::sync::Arc::new(mat));
+        let block = crate::products::ProductMatrix::from_matrix(
+            mat.rows() as u16,
+            1,
+            mat.columns() as u16,
+            &mat,
+        );
+        self.matrices.insert(t, std::sync::Arc::new(block));
+    }
+
+    /// Set a pre-built compact block (the binary V2 read path).
+    pub fn set_block(&mut self, t: Tridegree, block: crate::products::ProductMatrix) {
+        self.matrices.insert(t, std::sync::Arc::new(block));
+    }
+
+    /// Share storage between entries with IDENTICAL blocks (same pattern as
+    /// `ProductTable::dedup_shared_blocks`): stable-range map matrices are
+    /// overwhelmingly duplicates. Lookup behavior unchanged; entries are
+    /// read-only after construction (mutation replaces the Arc).
+    pub fn dedup_shared(&mut self) -> usize {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut by_content: HashMap<u64, Vec<std::sync::Arc<crate::products::ProductMatrix>>> =
+            HashMap::new();
+        let mut shared = 0usize;
+        for arc in self.matrices.values_mut() {
+            let mut h = DefaultHasher::new();
+            (arc.dim1, arc.dim2, arc.tgt_dim).hash(&mut h);
+            arc.raw_words().hash(&mut h);
+            let bucket = by_content.entry(h.finish()).or_default();
+            if let Some(existing) = bucket.iter().find(|e| e.as_ref() == arc.as_ref()) {
+                *arc = std::sync::Arc::clone(existing);
+                shared += 1;
+            } else {
+                bucket.push(std::sync::Arc::clone(arc));
+            }
+        }
+        shared
     }
 }
 
@@ -57,7 +102,7 @@ impl MapTable {
 /// `Identity(n)` and `Zero(src_dim, tgt_dim)` are the un-materialized
 /// defaults (rows = source basis, columns = target, `v * M` convention).
 pub enum MapMatrixRef<'a> {
-    Stored(&'a Matrix),
+    Stored(&'a crate::products::ProductMatrix),
     Identity(usize),
     Zero(usize, usize),
 }
@@ -66,7 +111,7 @@ impl MapMatrixRef<'_> {
     /// Materialize — exactly what [`SATPage::map_matrix`] used to return.
     pub fn to_matrix(&self) -> Matrix {
         match *self {
-            MapMatrixRef::Stored(m) => m.clone(),
+            MapMatrixRef::Stored(b) => b.to_matrix(),
             MapMatrixRef::Identity(n) => mat_identity(n),
             MapMatrixRef::Zero(src, tgt) => mat_zero(src, tgt),
         }
@@ -77,17 +122,35 @@ impl MapMatrixRef<'_> {
     /// the naturality/Leibniz generators).
     pub fn to_matrix_transposed(&self) -> Matrix {
         match *self {
-            MapMatrixRef::Stored(m) => mat_transpose(m),
+            MapMatrixRef::Stored(b) => {
+                let (rows, cols) = (b.rows(), b.tgt_dim as usize);
+                let mut m = mat_zero(cols, rows);
+                for r in 0..rows {
+                    let row = b.row_vec(r);
+                    for c in vec_support(&row) {
+                        m.row_mut(c).set_entry(r, 1);
+                    }
+                }
+                m
+            }
             MapMatrixRef::Identity(n) => mat_identity(n),
             MapMatrixRef::Zero(src, tgt) => mat_zero(tgt, src),
         }
     }
 
-    /// Apply to a source-coordinate vector (`v * M`), matching
-    /// `mat_vec_mul(&self.to_matrix(), v)` without materializing defaults.
+    /// Apply to a source-coordinate vector (`v * M`), matching the old
+    /// `mat_vec_mul(&self.to_matrix(), v)` (including its rows == len
+    /// assertion) without materializing defaults.
     pub fn apply_vec(&self, v: &FpVector) -> FpVector {
         match *self {
-            MapMatrixRef::Stored(m) => mat_vec_mul(m, v),
+            MapMatrixRef::Stored(b) => {
+                assert_eq!(b.rows(), v.len());
+                let mut result = vec_zero(b.tgt_dim as usize);
+                for i in vec_support(v) {
+                    result += &b.row_vec(i);
+                }
+                result
+            }
             MapMatrixRef::Identity(n) => {
                 assert_eq!(n, v.len());
                 v.clone()

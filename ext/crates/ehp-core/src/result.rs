@@ -11,6 +11,7 @@ use crate::tridegree::Tridegree;
 ///
 /// Stores a particular solution (offset) and the kernel basis,
 /// along with which variables are free (unknown).
+#[derive(Clone)]
 pub struct SATResult {
     /// Particular solution vector.
     pub offset: FpVector,

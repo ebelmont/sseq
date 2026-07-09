@@ -5,6 +5,7 @@ pub mod map;
 pub mod products;
 pub mod page;
 pub mod differentials;
+pub mod cache;
 pub mod constraints;
 pub mod solver;
 pub mod result;

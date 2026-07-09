@@ -51,10 +51,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut touching = 0;
         let mut sizes = Vec::new();
         for (i, row) in sys.rows.iter().enumerate() {
-            if vec_get(row, idx) {
+            if row.contains(&(idx as u32)) {
                 touching += 1;
                 if sizes.len() < 12 {
-                    sizes.push((i, vec_popcount(row), sys.rhs[i]));
+                    sizes.push((i, row.len(), sys.rhs[i]));
                 }
             }
         }
