@@ -1,3 +1,6 @@
+pub mod lift_space;
+pub mod ops;
+
 use std::{io, sync::Arc};
 
 use algebra::{
@@ -27,6 +30,15 @@ use crate::{
     resolution_homomorphism::ResolutionHomomorphism,
     save::{SaveDirectory, SaveFile, SaveKind},
 };
+
+/// Get the E3 page data at a bidegree.
+///
+/// This returns the subquotient at the bidegree on the E3 page (or the last available page
+/// if fewer than 3 differentials have been computed).
+pub fn e3_page_data(sseq: &sseq::Sseq<2, sseq::Adams>, b: Bidegree) -> &fp::matrix::Subquotient {
+    let d = sseq.page_data(b);
+    &d[std::cmp::min(3, d.len() - 1)]
+}
 
 pub static LAMBDA_BIDEGREE: Bidegree = Bidegree::n_s(0, 1);
 
@@ -666,10 +678,10 @@ pub struct SecondaryResolution<CC: FreeChainComplex>
 where
     CC::Algebra: PairAlgebra,
 {
-    underlying: Arc<CC>,
+    pub(crate) underlying: Arc<CC>,
     /// s -> t -> idx -> homotopy
     pub(crate) homotopies: OnceBiVec<SecondaryHomotopy<CC::Algebra>>,
-    intermediates: DashMap<BidegreeGenerator, FpVector>,
+    pub(crate) intermediates: DashMap<BidegreeGenerator, FpVector>,
 }
 
 impl<CC: FreeChainComplex> SecondaryLift for SecondaryResolution<CC>

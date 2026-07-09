@@ -18,6 +18,7 @@ pub struct HomModule<M: Module> {
     algebra: Arc<Field>,
     source: Arc<FreeModule<M::Algebra>>,
     target: Arc<M>,
+    max_degree: i32,
     pub block_structures: OnceBiVec<BlockStructure>,
 }
 
@@ -29,17 +30,26 @@ impl<M: Module> std::fmt::Display for HomModule<M> {
 
 impl<M: Module> HomModule<M> {
     pub fn new(source: Arc<FreeModule<M::Algebra>>, target: Arc<M>) -> Self {
+        let max_degree = target
+            .max_degree()
+            .expect("HomModule requires target to be bounded; use new_with_max for unbounded targets");
+        Self::new_with_max(source, target, max_degree)
+    }
+
+    /// Create a `HomModule` with an explicit max degree for the target.
+    ///
+    /// This is useful when the target module is unbounded but you want to truncate
+    /// at a given degree.
+    pub fn new_with_max(source: Arc<FreeModule<M::Algebra>>, target: Arc<M>, max_degree: i32) -> Self {
         let p = source.prime();
         let algebra = Arc::new(Field::new(p));
-        let min_degree = source.min_degree()
-            - target
-                .max_degree()
-                .expect("HomModule requires target to be bounded");
+        let min_degree = source.min_degree() - max_degree;
         Self {
             algebra,
             source,
             target,
-            block_structures: OnceBiVec::new(min_degree), // fn_degree -> blocks
+            max_degree,
+            block_structures: OnceBiVec::new(min_degree),
         }
     }
 
@@ -64,15 +74,15 @@ impl<M: Module> Module for HomModule<M> {
     }
 
     fn max_computed_degree(&self) -> i32 {
-        self.source.max_computed_degree() - self.target.max_degree().unwrap()
+        self.source.max_computed_degree() - self.max_degree
     }
 
     fn compute_basis(&self, degree: i32) {
         self.source
-            .compute_basis(degree + self.target.max_degree().unwrap());
+            .compute_basis(degree + self.max_degree);
         self.block_structures.extend(degree, |d| {
             let mut block_sizes = BiVec::new(self.target.min_degree() + d);
-            block_sizes.extend_with(self.target.max_degree().unwrap() + d, |gen_deg| {
+            block_sizes.extend_with(self.max_degree + d, |gen_deg| {
                 vec![
                     self.target.dimension(gen_deg - d);
                     if self.source.max_computed_degree() >= gen_deg {
