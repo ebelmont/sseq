@@ -855,35 +855,28 @@ pub fn make_leibniz_constraints(
         }
     }
 
-    // Sphere bounds must come from the DATA, not the stem cutoff: the second
-    // factor of a Ytilde pair lives at th2 = th1 + s1 - 1, so h_i-multiplication
-    // pairs (h_i at sphere ≈ n + s) sit far beyond the stem cutoff. Bounding
-    // th1/th2 by `cutoff` silently dropped every such pair — losing exactly
-    // the h0/h1 Leibniz forcings — whenever n + s exceeded max_t. (The Python
-    // original has the same guard, but its production runs used tot ≈ 130 so
-    // it never triggered.) High spheres carry only tiny stems, so the wider
-    // loop is cheap.
-    let max_data_n = page
-        .dimension
-        .iter()
-        .filter(|(_, &d)| d > 0)
-        .map(|(t, _)| t.n)
-        .max()
-        .unwrap_or(cutoff);
-
+    // max_t is a bound on t = s + f only — never on n/th (user decision,
+    // 2026-07-25): for a fixed t, every relevant n is assumed present in the
+    // data, so no n-derived cutoff (neither the stem cutoff nor a
+    // data-derived max n) belongs here at all. th1 therefore ranges over
+    // every n that actually has source degrees (no range bound needed); th2
+    // needs no explicit bound either, since deg2's own t = s2 + f2 is
+    // automatically <= cutoff by construction (s3 + f3 <= cutoff, s1 + f1 >=
+    // 0) — page.dim_at(deg2) == 0 / is_in_computed_polygon* inside
+    // make_leibniz_constraint_single already reject any degree the data
+    // doesn't actually have.
     for s3 in 0..=cutoff {
         for f3 in 1..=(cutoff - s3) {
-            for th1 in 2..=max_data_n {
-                let source_degrees = match degrees_by_n.get(&th1) {
-                    Some(v) => v,
-                    None => continue,
-                };
+            for (&th1, source_degrees) in &degrees_by_n {
                 for &(s1, f1) in source_degrees {
                     let th2 = th1 + s1 - 1;
                     let f2 = f3 - f1;
                     let s2 = s3 - s1;
 
-                    if th2 > max_data_n {
+                    // Python's _leibniz_helper also skips s2 < 1 — this was
+                    // missing here, letting degenerate deg2 (s <= 0) pairs
+                    // through that Python never considers.
+                    if s2 < 1 {
                         continue;
                     }
 
