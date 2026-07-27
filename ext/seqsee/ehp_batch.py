@@ -21,6 +21,8 @@ number (0-based).
 import json
 import sys
 
+import pandas as pd
+
 import jsonmaker
 import main as seqsee_main
 
@@ -34,15 +36,17 @@ def _report(ok, ident, err=None):
 
 def run_slices(mode, csv_path, out_dir, theme, r, values):
     prefix = "S" if mode == "sphere" else "stem"
+    # Load once per batch process instead of once per sphere/stem: with
+    # hundreds of values sharing one CSV, re-parsing it from disk on every
+    # iteration (as process_csv does by default) was the dominant cost of
+    # "batched" chart generation, dwarfing the interpreter-startup savings
+    # the batching was meant to capture.
+    df = pd.read_csv(csv_path)
     for v in values:
         json_path = f"{out_dir}/{prefix}{v}_E{r}.json"
         html_path = f"{out_dir}/{prefix}{v}_E{r}.html"
         try:
-            try:
-                jsonmaker.process_csv(csv_path, json_path, mode, v, quiet=True)
-            except TypeError:
-                # older process_csv without the quiet kwarg
-                jsonmaker.process_csv(csv_path, json_path, mode, v)
+            jsonmaker.process_csv(csv_path, json_path, mode, v, quiet=True, df=df)
             seqsee_main.process_json(json_path, html_path, theme, mode, v)
             _report(True, v)
         except KeyboardInterrupt:

@@ -253,6 +253,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let t_csv = Instant::now();
     let mut csv_paths: Vec<PathBuf> = Vec::new();
     for ps in &pages {
         let r = ps.page.r;
@@ -261,7 +262,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         seqsee::write_ehp_csv(&ps.page, ps.result.as_ref(), &mut file)?;
         csv_paths.push(csv_path);
     }
-    eprintln!("Wrote {} CSV files to output/", csv_paths.len());
+    eprintln!(
+        "Wrote {} CSV files to output/ ({:.2}s)",
+        csv_paths.len(),
+        t_csv.elapsed().as_secs_f64(),
+    );
 
     let charts_dir = out_dir.join("charts");
     std::fs::create_dir_all(&charts_dir)?;
@@ -305,6 +310,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, ps) in pages.iter().enumerate() {
         let r = ps.page.r;
         eprintln!("Generating E_{} charts...", r);
+        let t_charts = Instant::now();
         let chart_files = generate_all_charts(
             &ps.n_values,
             &csv_paths[i],
@@ -326,10 +332,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Inject minimap data (E/H/P maps per sphere)
         let map_count = inject_map_info(&charts_dir, &ps.page, &ps.n_values, r);
         eprintln!(
-            "  {} sphere charts ({} with map info), {} stem charts",
+            "  {} sphere charts ({} with map info), {} stem charts ({:.2}s)",
             chart_files.len(),
             map_count,
             ok_stems.len(),
+            t_charts.elapsed().as_secs_f64(),
         );
         let failed = ps.n_values.len().saturating_sub(chart_files.len());
         if failed > 0 {

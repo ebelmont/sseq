@@ -4,7 +4,7 @@
 //! - **JSON**: `sat_page_to_seqsee_json()` for the interactive WebSocket viewer
 //! - **CSV**: `write_ehp_csv()` for the SeqSee pipeline (jsonmaker.py → main.py → HTML)
 
-use std::io;
+use std::io::{self, Write as _};
 
 use hashbrown::HashMap;
 use serde::Serialize;
@@ -414,81 +414,36 @@ pub fn map_target_names(page: &SATPage, kind: MapKind, src_t: Tridegree, col: us
     names
 }
 
-/// Collect differential target names for a generator from the solve result.
-pub fn diff_target_names(
+/// Collect both determined-nonzero and unknown differential target names for
+/// a generator in a single pass over the target basis (fuses what used to be
+/// three separate scans: `diff_target_names`, `null_diff_target_names`, and
+/// a redundant `has_nonzero_diff` — the first return value's emptiness is
+/// exactly what `has_nonzero_diff` was recomputing).
+fn diff_and_null_target_names(
     page: &SATPage,
     result: &SATResult,
     t: Tridegree,
     col: usize,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<String>) {
     let tgt_t = t.diff_target(page.r);
     let tgt_dim = page.dim_at(tgt_t);
     if tgt_dim == 0 {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let n_var = t.n.min(t.s + 2);
-    let mut names = Vec::new();
-    for row in 0..tgt_dim {
-        let dv = DiffVar::new(n_var, t.s, t.f, row as u16, col as u16);
-        if let Some(&idx) = result.var_index.get(&dv) {
-            let is_unknown = result.unknown.contains(&idx);
-            let is_nonzero = !is_unknown && vec_get(&result.offset, idx);
-            if is_nonzero {
-                names.push(gen_name(tgt_t.n, tgt_t.s, tgt_t.f, row, tgt_dim));
-            }
-        }
-    }
-    names
-}
-
-/// Collect differential target names for *unknown* (undetermined) entries.
-/// These appear in the `nulldif` CSV column and are drawn as dashed lines.
-pub fn null_diff_target_names(
-    page: &SATPage,
-    result: &SATResult,
-    t: Tridegree,
-    col: usize,
-) -> Vec<String> {
-    let tgt_t = t.diff_target(page.r);
-    let tgt_dim = page.dim_at(tgt_t);
-    if tgt_dim == 0 {
-        return Vec::new();
-    }
-    let n_var = t.n.min(t.s + 2);
-    let mut names = Vec::new();
+    let mut targets = Vec::new();
+    let mut nulls = Vec::new();
     for row in 0..tgt_dim {
         let dv = DiffVar::new(n_var, t.s, t.f, row as u16, col as u16);
         if let Some(&idx) = result.var_index.get(&dv) {
             if result.unknown.contains(&idx) {
-                names.push(gen_name(tgt_t.n, tgt_t.s, tgt_t.f, row, tgt_dim));
+                nulls.push(gen_name(tgt_t.n, tgt_t.s, tgt_t.f, row, tgt_dim));
+            } else if vec_get(&result.offset, idx) {
+                targets.push(gen_name(tgt_t.n, tgt_t.s, tgt_t.f, row, tgt_dim));
             }
         }
     }
-    names
-}
-
-/// Check whether a generator has any nonzero (determined) differential entry.
-fn has_nonzero_diff(
-    page: &SATPage,
-    result: &SATResult,
-    t: Tridegree,
-    col: usize,
-) -> bool {
-    let tgt_t = t.diff_target(page.r);
-    let tgt_dim = page.dim_at(tgt_t);
-    if tgt_dim == 0 {
-        return false;
-    }
-    let n_var = t.n.min(t.s + 2);
-    for row in 0..tgt_dim {
-        let dv = DiffVar::new(n_var, t.s, t.f, row as u16, col as u16);
-        if let Some(&idx) = result.var_index.get(&dv) {
-            if !result.unknown.contains(&idx) && vec_get(&result.offset, idx) {
-                return true;
-            }
-        }
-    }
-    false
+    (targets, nulls)
 }
 
 /// Write EHP spectral sequence data as SeqSee E2-format CSV.
@@ -504,6 +459,10 @@ pub fn write_ehp_csv<W: io::Write>(
     result: Option<&SATResult>,
     writer: &mut W,
 ) -> io::Result<()> {
+    // Every call site passes a raw File; without buffering each writeln!
+    // below is its own write(2) syscall.
+    let mut writer = io::BufWriter::new(writer);
+    let writer = &mut writer;
     writeln!(
         writer,
         "name,n,stem,Adams filtration,shift,\
@@ -556,9 +515,8 @@ pub fn write_ehp_csv<W: io::Write>(
                         .collect();
                     (None, Vec::new(), nulls)
                 } else {
-                    let targets = diff_target_names(page, res, t, idx);
-                    let nulls = null_diff_target_names(page, res, t, idx);
-                    if !targets.is_empty() || has_nonzero_diff(page, res, t, idx) {
+                    let (targets, nulls) = diff_and_null_target_names(page, res, t, idx);
+                    if !targets.is_empty() {
                         (Some(page.r), targets, nulls)
                     } else if !nulls.is_empty() {
                         (None, Vec::new(), nulls)
@@ -592,5 +550,5 @@ pub fn write_ehp_csv<W: io::Write>(
         }
     }
 
-    Ok(())
+    writer.flush()
 }

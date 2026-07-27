@@ -593,12 +593,15 @@ def extract_highlight_targets(df, highlight_mode, source_n):
 
 
 
-def process_csv(input_file, output_file, view_mode="sphere", filter_value=None, highlight_mode=None, source_csv=None, quiet=False):
+def process_csv(input_file, output_file, view_mode="sphere", filter_value=None, highlight_mode=None, source_csv=None, quiet=False, df=None):
     # Define the JSON schema
     schema = load_schema()
 
-    # Load CSV data
-    df = pd.read_csv(input_file)
+    # Load CSV data (callers processing many slices of the same CSV, e.g.
+    # ehp_batch.py's per-sphere/stem loop, can pass an already-loaded
+    # DataFrame to skip re-parsing the file on every call).
+    if df is None:
+        df = pd.read_csv(input_file)
 
     # Build a minimal header - let main.py handle theming
     header = {}

@@ -5,6 +5,7 @@ import math
 import sys
 import os
 from collections import defaultdict
+from functools import lru_cache
 from jsonschema.exceptions import ValidationError
 from jinja2 import Environment, FileSystemLoader
 
@@ -238,6 +239,7 @@ def build_theme_css(initial_theme="light"):
     return "\n".join(blocks)
 
 
+@lru_cache(maxsize=1)
 def load_schema():
     schema_path = os.path.join(os.path.dirname(__file__), "input_schema.json")
     with open(schema_path, "r") as f:
@@ -248,6 +250,11 @@ def load_schema():
 schema = load_schema()
 
 
+# Batch generation (ehp_batch.py) calls process_json / load_template once per
+# sphere/stem within a single process — cache the compiled Jinja environment
+# and template so repeated calls don't re-read and re-compile the template
+# file from disk each time.
+@lru_cache(maxsize=1)
 def load_template():
     env = Environment(loader=FileSystemLoader(searchpath=os.path.dirname(__file__)))
     template = env.get_template("template.html.jinja")
