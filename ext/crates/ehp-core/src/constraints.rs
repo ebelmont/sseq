@@ -378,9 +378,17 @@ pub fn make_naturality_constraint_single(
 ) -> Vec<Vec<usize>> {
     let r = page.r;
 
-    if !map_kind.domain_check(t) {
-        return Vec::new();
-    }
+    // No domain_check gate here: the Python reference's STANDARD_MAPS
+    // domain_check lambdas (e.g. P's `n >= 5 && n % 2 == 1`) are never
+    // actually wired up at runtime — SATPage.initialize_maps() constructs
+    // each Map(name, n_transform, s_transform, f_transform) without passing
+    // domain_check, so every map's check silently defaults to `lambda: True`
+    // (see Map.__init__ in lib.py). Confirmed by direct repro against
+    // ext/data/E2: Python emits real P constraints at e.g. t=(18,56,19),
+    // which MapKind::P::domain_check's formula would (correctly, per the
+    // *documented* math) reject. The real domain restrictions Python
+    // actually enforces are the explicit checks below (E's stable-range
+    // skip, P's `f - 2 < 0 || s - n < 0`), not this dead lambda.
 
     // For E map: skip stable range (naturality is trivial when n >= s+2)
     if map_kind == MapKind::E && t.n >= t.s + 2 {
