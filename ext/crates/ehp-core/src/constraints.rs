@@ -428,9 +428,12 @@ pub fn make_naturality_constraint_single(
     let tgt_dim = page.dim_at(tgt);
     let diff_tgt_dim = page.dim_at(diff_tgt);
 
-    if src_dim == 0 || diff_src_dim == 0 || tgt_dim == 0 || diff_tgt_dim == 0 {
-        return Vec::new();
-    }
+    // No early return on a zero dimension here (the original has none either):
+    // when e.g. tgt_dim == 0, the RHS (D[tgt] * phi_source) is trivially zero
+    // while the LHS (phi_target * D[src]) can still be nonzero, forcing those
+    // src-differential entries to zero — a real constraint, not a no-op. The
+    // matrix_mult_left/right helpers below already degrade correctly to empty
+    // output on a zero dimension, so skipping here just discarded constraints.
 
     // Get map matrices (transposed, per Python convention). Missing data means
     // the zero map (or stable-E identity) — the square still constrains.
