@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let r = current.r;
         let known = ehp_server::load_known_diffs(r, None)?;
-        let cutoff = current.max_s.unwrap_or(0);
+        let cutoff = current.max_t.unwrap_or(0);
         let sys = constraints::build_constraint_system(&current, cutoff, &known);
         let num_vars = sys.num_vars;
         let excluded_leibniz = sys.excluded_leibniz.clone();

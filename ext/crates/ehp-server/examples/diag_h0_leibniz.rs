@@ -21,8 +21,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Loading E_2 (max_t={max_t})...");
     let e2 = io::load_page(&data, 2, max_t)?;
     let known = ehp_server::load_known_diffs(2, None)?;
-    let cutoff = e2.max_s.unwrap_or(0);
-    eprintln!("cutoff (max_s) = {cutoff}");
+    let cutoff = e2.max_t.unwrap_or(0);
+    eprintln!("cutoff (max_t) = {cutoff}");
 
     let sys = constraints::build_constraint_system(&e2, cutoff, &known);
     let res = solver::solve(&sys).expect("E_2 should be SAT");
@@ -185,7 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let known3 = ehp_server::load_known_diffs(3, None)?;
-    let cutoff3 = e3.max_s.unwrap_or(0);
+    let cutoff3 = e3.max_t.unwrap_or(0);
     let sys3 = constraints::build_constraint_system(&e3, cutoff3, &known3);
     let dv3 = DiffVar::new(46, 44, 10, 0, 0);
     match sys3.var_index.get(&dv3) {

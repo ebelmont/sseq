@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("Loading E_2 (max_t={max_t}, expand={expand})...");
     let page = io::load_page(&data, 2, max_t)?;
-    let cutoff = page.max_s.unwrap_or(0);
+    let cutoff = page.max_t.unwrap_or(0);
 
     // Base solve (empty known diffs).
     let known: HashMap<DiffVar, bool> = HashMap::new();

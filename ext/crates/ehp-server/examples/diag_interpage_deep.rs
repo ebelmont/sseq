@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let sys4 = {
         let known = ehp_server::load_known_diffs(4, None)?;
-        constraints::build_constraint_system(&e4, e4.max_s.unwrap_or(0), &known)
+        constraints::build_constraint_system(&e4, e4.max_t.unwrap_or(0), &known)
     };
     let excl_leib4: ExcludedLeibniz = sys4.excluded_leibniz.clone();
     let res4 = solver::solve(&sys4).expect("E4 SAT");
@@ -247,7 +247,7 @@ fn solve_and_turn(
     page: &SATPage,
 ) -> Result<(SATPage, SATResult, HashMap<Tridegree, TurnedBidegree>), Box<dyn std::error::Error>> {
     let known = ehp_server::load_known_diffs(page.r, None)?;
-    let sys = constraints::build_constraint_system(page, page.max_s.unwrap_or(0), &known);
+    let sys = constraints::build_constraint_system(page, page.max_t.unwrap_or(0), &known);
     let res = solver::solve(&sys).expect("SAT");
     eprintln!(
         "E_{}: {}/{} determined",

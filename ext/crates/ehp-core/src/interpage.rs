@@ -725,9 +725,9 @@ pub fn build_overlay_page(
     // enumeration in compute_induced_products uses) *before* collecting the
     // turned degrees the surviving triples need, so rejected triples never
     // cost a page turn.
-    let max_s = overlay.max_s.unwrap_or(i32::MAX);
+    let max_t = overlay.max_t.unwrap_or(i32::MAX);
     candidates.retain(|&(x, y)| {
-        if x.n > max_s || (x.s == 0 && x.f == 0) {
+        if x.n > max_t || (x.s == 0 && x.f == 0) {
             return false;
         }
         let xy = Tridegree::new(x.n, x.s + y.s, x.f + y.f);

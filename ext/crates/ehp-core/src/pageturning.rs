@@ -498,12 +498,12 @@ pub fn compute_induced_products(
         by_n.entry(t.n).or_default().push(t);
     }
 
-    let max_s = next_page.max_s.unwrap_or(i32::MAX);
+    let max_t = next_page.max_t.unwrap_or(i32::MAX);
 
     let mut product_triples = Vec::new();
 
     for &x in next_page.page.keys() {
-        if x.n > max_s {
+        if x.n > max_t {
             continue;
         }
         if x.s == 0 && x.f == 0 {

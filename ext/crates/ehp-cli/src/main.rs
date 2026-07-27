@@ -213,7 +213,7 @@ fn cmd_compute(prefix: &str, r: i32, max_total: i32, _output: &str, known_diffs_
     ));
 
     // Build constraint system
-    let cutoff = page.max_s.unwrap_or(0);
+    let cutoff = page.max_t.unwrap_or(0);
     eprintln!("cutoff = {}", cutoff);
 
     let pb = ProgressBar::new_spinner();
@@ -274,7 +274,7 @@ fn cmd_turn_page(prefix: &str, r: i32, max_total: i32, output: &str, known_diffs
     let page = io::load_page(prefix, r, max_total)?;
 
     // Build and solve constraint system
-    let cutoff = page.max_s.unwrap_or(0);
+    let cutoff = page.max_t.unwrap_or(0);
 
     let known_diffs = load_known_diffs_for_page(r, known_diffs_file)?;
 
@@ -343,10 +343,7 @@ fn cmd_info(prefix: &str, r: i32, max_total: i32) -> Result<(), Box<dyn std::err
 
     println!("Page: E_{}", r);
     println!("Max total degree: {}", max_total);
-    println!(
-        "Max values: n={:?}, s={:?}, f={:?}, t={:?}",
-        page.max_n, page.max_s, page.max_f, page.max_t
-    );
+    println!("Max t (s+f cutoff): {:?}", page.max_t);
 
     let nonzero = page.dimension.values().filter(|&&d| d > 0).count();
     let total_dim: usize = page.dimension.values().sum();

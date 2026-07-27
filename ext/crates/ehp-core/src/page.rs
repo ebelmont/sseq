@@ -122,10 +122,11 @@ pub struct SATPage {
     /// ~13% of startup. Call [`SATPage::build_pairs`] explicitly if a future
     /// consumer needs it.
     pub pairs: HashMap<Tridegree, Vec<Tridegree>>,
-    /// Maximum values for bounds checking.
-    pub max_n: Option<i32>,
-    pub max_s: Option<i32>,
-    pub max_f: Option<i32>,
+    /// Cutoff on total degree `t = s + f`: the single bound used throughout
+    /// (matches the Python reference's `SATPage.max_t` / `in_bounds`, which
+    /// checks only `s + f <= max_t`; the old `max_n`/`max_s`/`max_f` fields
+    /// were dead weight there too — computed and printed but never gating
+    /// anything — so they've been dropped here as well).
     pub max_t: Option<i32>,
     /// Excluded tridegrees.
     pub exclude_set: hashbrown::HashSet<Tridegree>,
@@ -154,9 +155,6 @@ impl SATPage {
             maps,
             names: HashMap::new(),
             pairs: HashMap::new(),
-            max_n: None,
-            max_s: None,
-            max_f: None,
             max_t: None,
             exclude_set: hashbrown::HashSet::new(),
             target_only_exclude: hashbrown::HashSet::new(),
@@ -178,9 +176,6 @@ impl SATPage {
             maps: self.maps.clone(),
             names: HashMap::new(),
             pairs: HashMap::new(),
-            max_n: self.max_n,
-            max_s: self.max_s,
-            max_f: self.max_f,
             max_t: self.max_t,
             exclude_set: self.exclude_set.clone(),
             target_only_exclude: self.target_only_exclude.clone(),
@@ -247,32 +242,15 @@ impl SATPage {
         self.polygon_check(t, true)
     }
 
-    fn polygon_check(&self, t: Tridegree, source: bool) -> bool {
+    fn polygon_check(&self, t: Tridegree, _source: bool) -> bool {
         if t.n < -1 || t.s < -1 || t.f < -1 {
             return false;
         }
-        let max_f = match self.max_f {
-            Some(v) => v,
-            None => return true,
-        };
-        let max_s = match self.max_s {
-            Some(v) => v,
-            None => return true,
-        };
         let max_t = match self.max_t {
             Some(v) => v,
             None => return true,
         };
-        if t.f > max_f || t.s > max_s || t.s + t.f > max_t {
-            return false;
-        }
-        if let Some(max_n) = self.max_n {
-            let bound = if source { 2 * max_n - 3 } else { max_n };
-            if t.n > bound {
-                return false;
-            }
-        }
-        true
+        t.s + t.f <= max_t
     }
 
     pub fn is_excluded(&self, t: Tridegree) -> bool {
@@ -299,32 +277,18 @@ impl SATPage {
         self.polygon_check(t, false)
     }
 
-    /// Compute max_n, max_s, max_f, max_t from dimensions.
+    /// Compute max_t (the s+f cutoff) from dimensions, if not already set.
     pub fn compute_max_values(&mut self) {
-        let mut mn = 0i32;
-        let mut ms = 0i32;
-        let mut mf = 0i32;
+        if self.max_t.is_some() {
+            return;
+        }
         let mut mt = 0i32;
         for (&t, &d) in &self.dimension {
             if d > 0 {
-                mn = mn.max(t.n);
-                ms = ms.max(t.s);
-                mf = mf.max(t.f);
                 mt = mt.max(t.s + t.f);
             }
         }
-        if self.max_n.is_none() {
-            self.max_n = Some(mn - 2);
-        }
-        if self.max_s.is_none() {
-            self.max_s = Some(ms - 2);
-        }
-        if self.max_f.is_none() {
-            self.max_f = Some(mf - 2);
-        }
-        if self.max_t.is_none() {
-            self.max_t = Some(mt - 2);
-        }
+        self.max_t = Some(mt - 2);
     }
 
     /// Build multiplication pairs (which tridegrees multiply together).
@@ -336,13 +300,13 @@ impl SATPage {
             by_n.entry(t.n).or_default().push(t);
         }
 
-        let max_s = self.max_s.unwrap_or(i32::MAX);
+        let max_t = self.max_t.unwrap_or(i32::MAX);
 
         let mut keys: Vec<Tridegree> = self.page.keys().copied().collect();
         keys.sort();
 
         for x in &keys {
-            if x.n > max_s {
+            if x.n > max_t {
                 continue;
             }
             if x.s == 0 && x.f == 0 {

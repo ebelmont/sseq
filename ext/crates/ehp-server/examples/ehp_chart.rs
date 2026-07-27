@@ -134,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let r = current_page.r;
         let t1 = Instant::now();
         let known_diffs = ehp_server::load_known_diffs_for_page(&current_page, None)?;
-        let cutoff = current_page.max_s.unwrap_or(0);
+        let cutoff = current_page.max_t.unwrap_or(0);
         let system = constraints::build_constraint_system(&current_page, cutoff, &known_diffs);
         let num_vars = system.num_vars;
         let result = solver::solve_with_d2(&current_page, &system).map(|(res, d2n)| {
@@ -684,7 +684,7 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
         let old_result = pages[i].result.take();
 
         // Re-solve
-        let cutoff = pages[i].page.max_s.unwrap_or(0);
+        let cutoff = pages[i].page.max_t.unwrap_or(0);
         let system =
             constraints::build_constraint_system(&pages[i].page, cutoff, &pages[i].known_diffs);
         let num_vars = system.num_vars;
@@ -1265,7 +1265,7 @@ fn process_stdin_cmd(
         "status" => {
             for ps in pages.iter() {
                 let r = ps.page.r;
-                let cutoff = ps.page.max_s.unwrap_or(0);
+                let cutoff = ps.page.max_t.unwrap_or(0);
                 let system =
                     constraints::build_constraint_system(&ps.page, cutoff, &ps.known_diffs);
                 let num_vars = system.num_vars;
@@ -1856,7 +1856,7 @@ fn bisect_inconsistent_mutations(
     base_known: &HashMap<DiffVar, bool>,
     muts: &[(DiffVar, Option<bool>)],
 ) -> Option<String> {
-    let cutoff = page.max_s.unwrap_or(0);
+    let cutoff = page.max_t.unwrap_or(0);
     // true = the system with these known diffs is INCONSISTENT.
     let inconsistent_with = |known: &HashMap<DiffVar, bool>| -> bool {
         let system = constraints::build_constraint_system(page, cutoff, known);
@@ -2363,7 +2363,7 @@ fn solve_and_export(
     r: i32,
     csv_path: &Path,
 ) -> Option<SATResult> {
-    let cutoff = page.max_s.unwrap_or(0);
+    let cutoff = page.max_t.unwrap_or(0);
     let system = constraints::build_constraint_system(page, cutoff, known_diffs);
     let result = solver::solve_with_d2(page, &system).map(|(res, _)| res);
 

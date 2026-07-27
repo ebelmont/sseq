@@ -548,7 +548,7 @@ fn build_chain(
         for (dv, val) in extra_known.get(&r).into_iter().flatten() {
             known.insert(*dv, *val);
         }
-        let cutoff = current.max_s.unwrap_or(0);
+        let cutoff = current.max_t.unwrap_or(0);
         let sys = constraints::build_constraint_system(&current, cutoff, &known);
         let num_vars = sys.num_vars;
         let result = solver::solve(&sys)
@@ -623,7 +623,7 @@ fn incremental_cascade_step(
     turned: &mut HashMap<Tridegree, TurnedBidegree>,
 ) -> Result<SATResult, String> {
     let r = prev_page.r;
-    let cutoff = prev_page.max_s.unwrap_or(0);
+    let cutoff = prev_page.max_t.unwrap_or(0);
     let sys = constraints::build_constraint_system(prev_page, cutoff, known);
     let new_res = solver::solve(&sys)
         .ok_or_else(|| format!("E_{r} re-solve INCONSISTENT during incremental replay"))?;
@@ -672,9 +672,9 @@ fn analyze(
     println!("\n=================================================================");
     println!("SCENARIO {label}");
     println!("=================================================================");
-    let cutoff = page.max_s.unwrap_or(0);
+    let cutoff = page.max_t.unwrap_or(0);
     println!(
-        "E_{} page: cutoff(max_s)={} max_t={:?}, {} known diffs:",
+        "E_{} page: cutoff(max_t)={} max_t={:?}, {} known diffs:",
         page.r, cutoff, page.max_t, known.len()
     );
     let mut kv: Vec<_> = known.iter().collect();

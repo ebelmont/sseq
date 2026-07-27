@@ -23,13 +23,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Loading E_2 (max_t={max_t})...");
     let e2 = io::load_page(&data, 2, max_t)?;
     let e2_known = ehp_server::load_known_diffs(2, None)?;
-    let c2 = e2.max_s.unwrap_or(0);
+    let c2 = e2.max_t.unwrap_or(0);
     let sys2 = constraints::build_constraint_system(&e2, c2, &e2_known);
     let res2: SATResult = solver::solve(&sys2).expect("E_2 SAT");
     eprintln!("E_2 solved: {} unknown vars", res2.unknown.len());
 
     let (e3, _t) = pageturning::build_next_page(&e2, &res2).expect("E_2 d^2 = 0");
-    let cutoff = e3.max_s.unwrap_or(0);
+    let cutoff = e3.max_t.unwrap_or(0);
     eprintln!("E_3 turned (cutoff={cutoff}, exclude_set={}).\n", e3.exclude_set.len());
 
     let vars = make_basis(&e3, cutoff);

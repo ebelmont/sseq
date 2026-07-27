@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let t1 = Instant::now();
         let known_diffs = ehp_server::load_known_diffs_for_page(&current_page, None)?;
         let n_known = known_diffs.len();
-        let cutoff = current_page.max_s.unwrap_or(0);
+        let cutoff = current_page.max_t.unwrap_or(0);
         let system = constraints::build_constraint_system(&current_page, cutoff, &known_diffs);
         let t_build = t1.elapsed().as_secs_f64();
         let num_vars = system.num_vars;

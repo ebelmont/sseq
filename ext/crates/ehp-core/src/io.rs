@@ -18,9 +18,6 @@ use crate::tridegree::Tridegree;
 #[derive(Serialize, Deserialize)]
 pub struct PageManifest {
     pub r: i32,
-    pub max_n: Option<i32>,
-    pub max_s: Option<i32>,
-    pub max_f: Option<i32>,
     pub max_t: Option<i32>,
     pub dimensions: Vec<DimensionEntry>,
 }
@@ -67,6 +64,12 @@ pub fn load_from_csv(prefix: &str, r: i32, max_t: i32) -> io::Result<SATPage> {
     // Load dimensions
     eprintln!("Loading dimensions from {}...", rank_file);
     load_dimensions(&rank_file, &mut page, max_t)?;
+    // Set the cutoff explicitly (matching the Python reference's `run.py`,
+    // which assigns `ss.max_t = cutoff` directly) rather than letting
+    // `compute_max_values` guess it from the loaded data — that fallback is
+    // meant only for pages loaded with no cutoff in mind, and silently
+    // produces a smaller effective cutoff than the one requested.
+    page.max_t = Some(max_t);
     page.compute_max_values();
     let tridegree_count = page.dimension.values().filter(|&&d| d > 0).count();
     eprintln!("  Loaded {} tridegrees with non-zero dimension", tridegree_count);
@@ -382,9 +385,6 @@ pub fn save_page_json(page: &SATPage, directory: &str) -> io::Result<()> {
     // Write manifest
     let manifest = PageManifest {
         r: page.r,
-        max_n: page.max_n,
-        max_s: page.max_s,
-        max_f: page.max_f,
         max_t: page.max_t,
         dimensions: page
             .dimension
@@ -477,7 +477,9 @@ pub fn save_page_json(page: &SATPage, directory: &str) -> io::Result<()> {
 // =============================================================================
 
 const BINARY_MAGIC: &[u8; 4] = b"EHPB";
-const BINARY_VERSION: u32 = 1;
+// Bumped from 1: header dropped the dead max_n/max_s/max_f fields (see
+// SATPage::max_t doc comment) in favor of a single max_t cutoff.
+const BINARY_VERSION: u32 = 2;
 
 // Section type constants
 const SECTION_DIMENSIONS: u32 = 1;
@@ -645,21 +647,18 @@ pub fn save_to_binary(page: &SATPage, path: &str) -> io::Result<()> {
     // Now build the file
     let num_sections = sections.len() as u32;
 
-    // Header: 32 bytes
-    let mut header = Vec::with_capacity(32);
+    // Header: 20 bytes
+    let mut header = Vec::with_capacity(20);
     header.extend_from_slice(BINARY_MAGIC);     // 4
     write_u32(&mut header, BINARY_VERSION);      // 4
     write_i32(&mut header, page.r);              // 4
-    write_i32(&mut header, page.max_n.unwrap_or(0)); // 4
-    write_i32(&mut header, page.max_s.unwrap_or(0)); // 4
-    write_i32(&mut header, page.max_f.unwrap_or(0)); // 4
     write_i32(&mut header, page.max_t.unwrap_or(0)); // 4
     write_u32(&mut header, num_sections);         // 4
-    assert_eq!(header.len(), 32);
+    assert_eq!(header.len(), 20);
 
     // Directory: 20 bytes per section
     let dir_size = num_sections as usize * 20;
-    let data_start = 32 + dir_size;
+    let data_start = 20 + dir_size;
 
     let mut directory = Vec::with_capacity(dir_size);
     let mut offset = data_start as u64;
@@ -687,7 +686,7 @@ pub fn load_from_binary(path: &str, filter_max_t: Option<i32>) -> io::Result<SAT
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
 
-    if data.len() < 32 {
+    if data.len() < 20 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "file too short for header"));
     }
 
@@ -704,16 +703,10 @@ pub fn load_from_binary(path: &str, filter_max_t: Option<i32>) -> io::Result<SAT
         ));
     }
     let r = read_i32(&data, &mut pos)?;
-    let max_n = read_i32(&data, &mut pos)?;
-    let max_s = read_i32(&data, &mut pos)?;
-    let max_f = read_i32(&data, &mut pos)?;
     let max_t = read_i32(&data, &mut pos)?;
     let num_sections = read_u32(&data, &mut pos)?;
 
     let mut page = SATPage::new(r);
-    page.max_n = Some(max_n);
-    page.max_s = Some(max_s);
-    page.max_f = Some(max_f);
     page.max_t = Some(max_t);
 
     // Parse section directory

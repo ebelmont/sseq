@@ -114,7 +114,7 @@ impl ServerState {
         page: &SATPage,
         known_diffs: &hashbrown::HashMap<DiffVar, bool>,
     ) -> Option<SATResult> {
-        let cutoff = page.max_s.unwrap_or(0);
+        let cutoff = page.max_t.unwrap_or(0);
         info!("Building constraint system (cutoff={})...", cutoff);
 
         let system = constraints::build_constraint_system(page, cutoff, known_diffs);
