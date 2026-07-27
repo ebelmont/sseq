@@ -724,10 +724,10 @@ pub fn build_overlay_page(
     // Apply the cheap product filters (identical to the ones the full
     // enumeration in compute_induced_products uses) *before* collecting the
     // turned degrees the surviving triples need, so rejected triples never
-    // cost a page turn.
-    let max_t = overlay.max_t.unwrap_or(i32::MAX);
+    // cost a page turn. No n-based bound here (matches Python and the fixed
+    // compute_induced_products): max_t bounds t = s + f only, never n.
     candidates.retain(|&(x, y)| {
-        if x.n > max_t || (x.s == 0 && x.f == 0) {
+        if x.s == 0 && x.f == 0 {
             return false;
         }
         let xy = Tridegree::new(x.n, x.s + y.s, x.f + y.f);

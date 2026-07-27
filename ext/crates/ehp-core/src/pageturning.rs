@@ -498,14 +498,14 @@ pub fn compute_induced_products(
         by_n.entry(t.n).or_default().push(t);
     }
 
-    let max_t = next_page.max_t.unwrap_or(i32::MAX);
-
     let mut product_triples = Vec::new();
 
     for &x in next_page.page.keys() {
-        if x.n > max_t {
-            continue;
-        }
+        // No n-based bound here (matches the Python original, which has
+        // none): max_t bounds t = s + f only, never n — a previous version
+        // of this code compared x.n against max_t directly, wrongly
+        // excluding high-n/low-t product triples (e.g. many s=0, high-n
+        // stable-range products).
         if x.s == 0 && x.f == 0 {
             continue;
         }
