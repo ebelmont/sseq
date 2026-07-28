@@ -523,11 +523,6 @@ pub fn compute_induced_products(
                     continue;
                 }
 
-                let shifted = Tridegree::new(y.n - 1, y.s, y.f);
-                if !next_page.page.contains_key(&shifted) {
-                    continue;
-                }
-
                 let sources = [x, y, xy];
                 if !sources
                     .iter()
