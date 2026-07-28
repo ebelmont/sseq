@@ -580,7 +580,16 @@ pub fn build_page_from_turned(
     turned: &HashMap<Tridegree, TurnedBidegree>,
 ) -> SATPage {
     let new_r = old_page.r + 1;
-    let new_max_t = old_page.max_t.map(|t| t - 1);
+    // Matches the Python reference's `run.py` per-page cutoff schedule
+    // (`max_t -= i - 2` for `i` in `3..=r`, which nets to a decrement of
+    // `old_page.r - 1` per turn — 80→79→77→74… for r=2,3,4,5 — not a flat
+    // `-1`). A flat `-1` only coincides with this on the very first turn
+    // (r=2, decrement=1); every later turn would leave Rust's cutoff too
+    // permissive relative to Python's, letting near-the-old-boundary
+    // degrees (whose true differential is genuinely unknown, just
+    // untracked) leak into real constraint generation instead of being
+    // excluded the way Python's shrunk window excludes them.
+    let new_max_t = old_page.max_t.map(|t| t - (old_page.r - 1));
 
     let mut next = SATPage::new(new_r);
     next.max_t = new_max_t;
@@ -742,7 +751,10 @@ pub fn build_next_page(
     sat_result: &SATResult,
 ) -> Result<(SATPage, HashMap<Tridegree, TurnedBidegree>), D2Error> {
     let new_r = page.r + 1;
-    let new_max_t = page.max_t.map(|t| t - 1);
+    // See the matching comment in `build_page_from_turned` — decrement by
+    // `page.r - 1`, matching Python's `run.py` cutoff schedule, not a flat
+    // `-1`.
+    let new_max_t = page.max_t.map(|t| t - (page.r - 1));
 
     // Turn the page (compute homology)
     let turned = turn_page(page, sat_result, new_r, new_max_t)?;
