@@ -200,7 +200,7 @@ fn reconstruct_provenance(
         ));
     }
     for (i, (indices, rhs, _)) in rows.iter().enumerate() {
-        let real: Vec<usize> = vec_support(&sys.rows[i]).collect();
+        let real: Vec<usize> = sys.rows[i].clone();
         if &real != indices || sys.rhs[i] != *rhs {
             return Err(format!(
                 "row {} mismatch: reconstructed {:?} rhs={} vs real {:?} rhs={}",
@@ -214,6 +214,17 @@ fn reconstruct_provenance(
 // =============================================================================
 // Tracked Gaussian elimination → UNSAT certificate
 // =============================================================================
+
+/// `ConstraintSystem.rows` is now stored sparsely (`Vec<usize>` per row);
+/// this diagnostic's tracked elimination still works over dense `FpVector`s,
+/// so convert at the boundary.
+fn sparse_row_to_dense(row: &[usize], ncols: usize) -> FpVector {
+    let mut v = vec_zero(ncols);
+    for &i in row {
+        v.set_entry(i, 1);
+    }
+    v
+}
 
 /// Sorted-set XOR (symmetric difference).
 fn xor_merge(a: &[u32], b: &[u32]) -> Vec<u32> {
@@ -247,7 +258,11 @@ fn xor_merge(a: &[u32], b: &[u32]) -> Vec<u32> {
 fn tracked_certificate(sys: &ConstraintSystem) -> Option<Vec<usize>> {
     let n = sys.rows.len();
     let ncols = sys.num_vars;
-    let mut coeffs: Vec<FpVector> = sys.rows.clone();
+    let mut coeffs: Vec<FpVector> = sys
+        .rows
+        .iter()
+        .map(|r| sparse_row_to_dense(r, ncols))
+        .collect();
     let mut rhs: Vec<bool> = sys.rhs.clone();
     let mut combos: Vec<Vec<u32>> = (0..n).map(|i| vec![i as u32]).collect();
 
@@ -293,7 +308,7 @@ fn tracked_certificate(sys: &ConstraintSystem) -> Option<Vec<usize>> {
         let mut acc = vec_zero(ncols);
         let mut racc = false;
         for &i in cert {
-            acc += &sys.rows[i];
+            acc += &sparse_row_to_dense(&sys.rows[i], ncols);
             racc ^= sys.rhs[i];
         }
         assert!(
@@ -744,8 +759,9 @@ fn analyze(
 
     println!("\n--- UNSAT CERTIFICATE (XOR of these constraints = [0 = 1]) ---");
     for &idx in &cert {
-        let vars: Vec<String> = vec_support(&sys.rows[idx])
-            .map(|i| {
+        let vars: Vec<String> = sys.rows[idx]
+            .iter()
+            .map(|&i| {
                 let v = sys.vars[i];
                 format!("d{}({},{},{})[{},{}]", page.r, v.n, v.s, v.f, v.row, v.col)
             })

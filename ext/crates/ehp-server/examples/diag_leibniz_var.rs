@@ -147,7 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let touching = sys
                     .rows
                     .iter()
-                    .filter(|row_vec| vec_get(row_vec, idx))
+                    .filter(|row_vec| row_vec.contains(&idx))
                     .count();
                 eprintln!(
                     "  var d_{r}{rep}[{row},{col}] = #{idx}: {status}; {touching} constraints touch it"
@@ -586,7 +586,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let touching = sys2
                                 .rows
                                 .iter()
-                                .filter(|row_vec| vec_get(row_vec, idx))
+                                .filter(|row_vec| row_vec.contains(&idx))
                                 .count();
                             if res2.unknown.contains(&idx) {
                                 eprintln!(

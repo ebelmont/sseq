@@ -76,15 +76,13 @@ fn solve_classic(system: &ConstraintSystem) -> Option<SATResult> {
         return None;
     }
 
-    let (a, b) = system.to_matrix();
-
     info!(
         "solve: {} variables, {} constraints",
         system.num_vars,
         system.num_constraints()
     );
 
-    let result = gauss_solve(&a, &b);
+    let result = sparse_gauss_solve(&system.rows, &system.rhs, system.num_vars);
 
     if !result.consistent {
         info!("solve: system is INCONSISTENT (no solution)");
@@ -227,7 +225,7 @@ fn solve_dense(system: &ConstraintSystem) -> Option<SATResult> {
     let mut aug = mat_zero(nrows, ncols + 1);
     for (i, row) in system.rows.iter().enumerate() {
         let mut r = vec_zero(ncols + 1);
-        for j in vec_support(row) {
+        for &j in row {
             r.set_entry(j, 1);
         }
         if system.rhs[i] {
@@ -333,11 +331,7 @@ mod dense_solver_tests {
             (vec![4], true),
             (vec![3, 5], false),
         ] {
-            let mut row = vec_zero(6);
-            for i in idxs {
-                row.set_entry(i, 1);
-            }
-            sys.rows.push(row);
+            sys.rows.push(idxs);
             sys.rhs.push(rhs);
         }
         let c = solve_classic(&sys).expect("classic SAT");
@@ -347,9 +341,7 @@ mod dense_solver_tests {
         assert_eq!(c.unknown, d.unknown);
 
         // Inconsistent variant agrees too.
-        let mut bad = vec_zero(6);
-        bad.set_entry(4, 1);
-        sys.rows.push(bad);
+        sys.rows.push(vec![4]);
         sys.rhs.push(false); // x4 = 1 and x4 = 0
         assert!(solve_classic(&sys).is_none());
         assert!(solve_dense(&sys).is_none());

@@ -565,6 +565,121 @@ pub fn gauss_solve(a: &Matrix, b: &FpVector) -> GaussResult {
     }
 }
 
+/// Solve the sparse system Ax = b over GF(2), where `rows[i]` is the sorted
+/// list of nonzero-coefficient column indices for constraint `i` (matching
+/// `ConstraintSystem.rows`'s representation) and `rhs[i]` is that row's target
+/// bit. Returns the same `GaussResult` shape as [`gauss_solve`] (this is the
+/// sparse-storage counterpart used when the dense `num_constraints x ncols`
+/// matrix would be too large to materialize -- see `ConstraintSystem`'s doc
+/// comment).
+///
+/// Uses the standard augmented-nullspace trick instead of hand-rolled RREF:
+/// build `M = [A | b]` (b as one extra column, index `ncols`), and take
+/// `M.nullspace()` (via the `sparse-bin-mat` crate). Nullspace vectors `(x,
+/// y)` satisfy `A*x = b*y` (since `M*(x,y) = A*x + b*y = 0` over GF(2), i.e.
+/// `A*x = b*y`): vectors with `y = 1` are exactly the particular solutions to
+/// `Ax = b`, and vectors with `y = 0` are exactly `ker(A)`. Consistency:
+/// solvable iff at least one nullspace basis vector has `y = 1` (the
+/// nullspace's `y`-projection is linear, so if every basis vector has `y =
+/// 0`, so does every vector in their span).
+///
+/// `pivot_cols`/`free_cols` are left empty -- not computed by this path, and
+/// (per audit) not read by any current caller of `gauss_solve`/this function.
+pub fn sparse_gauss_solve(rows: &[Vec<usize>], rhs: &[bool], ncols: usize) -> GaussResult {
+    assert_eq!(rows.len(), rhs.len());
+
+    let aug_rows: Vec<Vec<usize>> = rows
+        .iter()
+        .zip(rhs)
+        .map(|(r, &b)| {
+            let mut row = r.clone();
+            if b {
+                // Every index in r is < ncols (a valid variable index), so
+                // appending ncols keeps the row sorted.
+                row.push(ncols);
+            }
+            row
+        })
+        .collect();
+
+    let aug = sparse_bin_mat::SparseBinMat::new(ncols + 1, aug_rows);
+    let ns = aug.nullspace();
+
+    let mut y0_rows: Vec<Vec<usize>> = Vec::new();
+    let mut y1_rows: Vec<Vec<usize>> = Vec::new();
+    for i in 0..ns.number_of_rows() {
+        let Some(row) = ns.row(i) else { continue };
+        let positions = row.as_slice();
+        if positions.last() == Some(&ncols) {
+            y1_rows.push(positions[..positions.len() - 1].to_vec());
+        } else {
+            y0_rows.push(positions.to_vec());
+        }
+    }
+
+    if y1_rows.is_empty() {
+        return GaussResult {
+            solution: None,
+            kernel: Vec::new(),
+            pivot_cols: Vec::new(),
+            free_cols: Vec::new(),
+            rank: aug.rank(),
+            consistent: false,
+        };
+    }
+
+    let particular = y1_rows.remove(0);
+    let mut kernel_sparse = y0_rows;
+    for row in y1_rows {
+        kernel_sparse.push(xor_sorted(&row, &particular));
+    }
+
+    let solution = sparse_positions_to_fpvector(&particular, ncols);
+    let kernel: Vec<FpVector> = kernel_sparse
+        .iter()
+        .map(|positions| sparse_positions_to_fpvector(positions, ncols))
+        .collect();
+
+    GaussResult {
+        solution: Some(solution),
+        kernel,
+        pivot_cols: Vec::new(),
+        free_cols: Vec::new(),
+        rank: aug.rank(),
+        consistent: true,
+    }
+}
+
+fn sparse_positions_to_fpvector(positions: &[usize], len: usize) -> FpVector {
+    let mut v = vec_zero(len);
+    for &p in positions {
+        v.set_entry(p, 1);
+    }
+    v
+}
+
+/// Symmetric difference of two sorted, deduplicated index lists (GF(2) XOR
+/// of the sparse vectors they represent).
+fn xor_sorted(a: &[usize], b: &[usize]) -> Vec<usize> {
+    let mut result = Vec::with_capacity(a.len() + b.len());
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            i += 1;
+            j += 1;
+        } else if a[i] < b[j] {
+            result.push(a[i]);
+            i += 1;
+        } else {
+            result.push(b[j]);
+            j += 1;
+        }
+    }
+    result.extend_from_slice(&a[i..]);
+    result.extend_from_slice(&b[j..]);
+    result
+}
+
 /// Right kernel of A: vectors x such that Ax = 0.
 pub fn gauss_right_kernel(a: &Matrix) -> Vec<FpVector> {
     let b = vec_zero(a.rows());

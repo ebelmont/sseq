@@ -47,12 +47,35 @@ pub struct ConstraintSystem {
     pub vars: Vec<DiffVar>,
     /// Reverse map: DiffVar -> global index.
     pub var_index: HashMap<DiffVar, usize>,
-    /// Constraint rows (each is an FpVector of length num_vars).
-    pub rows: Vec<FpVector>,
+    /// Constraint rows: each is the sorted, deduplicated list of variable
+    /// indices with a nonzero (1) coefficient. Sparse by construction --
+    /// individual constraints (Leibniz/naturality relations) only ever touch
+    /// a handful of variables, so storing a dense `num_vars`-bit row per
+    /// constraint here would cost `num_constraints * num_vars` bits (measured
+    /// 16GB+ at EHP_MAX_T=100 on just page E_2 before the fix).
+    pub rows: Vec<Vec<usize>>,
     /// RHS values.
     pub rhs: Vec<bool>,
     /// Leibniz pairs skipped due to excluded degrees (see [`ExcludedLeibniz`]).
     pub excluded_leibniz: ExcludedLeibniz,
+}
+
+/// Build the sorted, deduplicated sparse row (indices with coefficient 1) for
+/// a constraint given as a list of variable indices, replicating the
+/// GF(2)-XOR/toggle semantics of repeatedly flipping bits: an index appearing
+/// an even number of times cancels out to 0, odd number of times leaves 1.
+fn sparse_row_from_indices(indices: &[usize]) -> Vec<usize> {
+    let mut parity: HashMap<usize, bool> = HashMap::new();
+    for &i in indices {
+        let e = parity.entry(i).or_insert(false);
+        *e = !*e;
+    }
+    let mut row: Vec<usize> = parity
+        .into_iter()
+        .filter_map(|(i, set)| set.then_some(i))
+        .collect();
+    row.sort_unstable();
+    row
 }
 
 impl ConstraintSystem {
@@ -72,11 +95,7 @@ impl ConstraintSystem {
 
     /// Add a constraint: XOR of variables at given indices equals rhs_val.
     pub fn add_constraint_indices(&mut self, indices: &[usize], rhs_val: bool) {
-        let mut row = vec_zero(self.num_vars);
-        for &i in indices {
-            vec_flip(&mut row, i);
-        }
-        self.rows.push(row);
+        self.rows.push(sparse_row_from_indices(indices));
         self.rhs.push(rhs_val);
     }
 
@@ -99,18 +118,6 @@ impl ConstraintSystem {
         self.rows.len()
     }
 
-    /// Build the coefficient matrix A and RHS vector b.
-    pub fn to_matrix(&self) -> (Matrix, FpVector) {
-        let nrows = self.rows.len();
-        let a = mat_from_rows(&self.rows, self.num_vars);
-        let mut b = vec_zero(nrows);
-        for (i, &rhs) in self.rhs.iter().enumerate() {
-            if rhs {
-                vec_set(&mut b, i, true);
-            }
-        }
-        (a, b)
-    }
 }
 
 /// Opt-in switch for the target-only exclusion relaxation (env
