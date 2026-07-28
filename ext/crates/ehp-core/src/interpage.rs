@@ -156,7 +156,7 @@ pub fn update_sat_result(
         }
     }
 
-    let m = mat_from_rows(m_rows, kaug.len());
+    let m = mat_from_rows(&m_rows, kaug.len());
     let g = gauss_solve(&m, &rhs);
     if !g.consistent {
         return None;
@@ -223,7 +223,7 @@ pub fn update_sat_result(
     let kernel = if new_kernel_rows.is_empty() {
         mat_zero(0, total_n)
     } else {
-        mat_from_rows(new_kernel_rows, total_n)
+        mat_from_rows(&new_kernel_rows, total_n)
     };
 
     let result = SATResult {

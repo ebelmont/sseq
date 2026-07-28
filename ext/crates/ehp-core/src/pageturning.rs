@@ -143,7 +143,7 @@ pub fn turn_page_single(
     let b_echelon = if b_basis.is_empty() {
         Vec::new()
     } else {
-        let mut bmat = mat_from_rows(b_basis.clone(), old_dim);
+        let mut bmat = mat_from_rows(&b_basis, old_dim);
         let (rank, _pivot_cols) = mat_echelon_form(&mut bmat);
         (0..rank)
             .map(|i| mat_get_row(&bmat, i).to_owned())
@@ -168,7 +168,7 @@ pub fn turn_page_single(
         }
         q_rows.push(row);
     }
-    let quotient_map = mat_from_rows(q_rows, old_dim);
+    let quotient_map = mat_from_rows(&q_rows, old_dim);
 
     // Lift map: h_dim cols → old_dim rows
     // Maps standard basis vectors of H to representatives in old space
@@ -182,7 +182,7 @@ pub fn turn_page_single(
         }
         l_rows.push(row);
     }
-    let lift_map = mat_from_rows(l_rows, h_dim);
+    let lift_map = mat_from_rows(&l_rows, h_dim);
 
     let basis: Vec<Element> = (0..h_dim)
         .map(|i| Element::basis(degree, h_dim, i))

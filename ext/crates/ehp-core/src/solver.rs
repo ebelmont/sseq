@@ -110,7 +110,7 @@ fn solve_classic(system: &ConstraintSystem) -> Option<SATResult> {
     let kernel_matrix = if result.kernel.is_empty() {
         mat_zero(0, system.num_vars)
     } else {
-        mat_from_rows(result.kernel.clone(), system.num_vars)
+        mat_from_rows(&result.kernel, system.num_vars)
     };
 
     let determined = system.num_vars - unknown.len();
@@ -295,7 +295,7 @@ fn solve_dense(system: &ConstraintSystem) -> Option<SATResult> {
     let kernel_matrix = if kernel.is_empty() {
         mat_zero(0, ncols)
     } else {
-        mat_from_rows(kernel, ncols)
+        mat_from_rows(&kernel, ncols)
     };
 
     info!(

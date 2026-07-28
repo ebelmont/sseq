@@ -102,7 +102,7 @@ impl ConstraintSystem {
     /// Build the coefficient matrix A and RHS vector b.
     pub fn to_matrix(&self) -> (Matrix, FpVector) {
         let nrows = self.rows.len();
-        let a = mat_from_rows(self.rows.clone(), self.num_vars);
+        let a = mat_from_rows(&self.rows, self.num_vars);
         let mut b = vec_zero(nrows);
         for (i, &rhs) in self.rhs.iter().enumerate() {
             if rhs {
@@ -741,7 +741,7 @@ pub fn make_leibniz_constraint_single(
                     }
                     ytil_rows.push(r_vec);
                 }
-                let ytil = mat_from_rows(ytil_rows, tgt_dim);
+                let ytil = mat_from_rows(&ytil_rows, tgt_dim);
 
                 if mat_is_zero(&ytil) {
                     vec![vec![]; prod_dr_dim]
@@ -805,7 +805,7 @@ pub fn make_leibniz_constraint_single(
                     }
                     ytil2_rows.push(r_vec);
                 }
-                let ytil2 = mat_from_rows(ytil2_rows, tgt_dim2);
+                let ytil2 = mat_from_rows(&ytil2_rows, tgt_dim2);
 
                 if mat_is_zero(&ytil2) {
                     vec![vec![]; prod_dr_dim]
