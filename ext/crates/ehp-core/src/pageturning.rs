@@ -54,6 +54,29 @@ impl TurnedBidegree {
         reduced
     }
 
+    /// Is `v` actually a cycle (in the domain `quotient_map` was built for,
+    /// i.e. in the kernel Z of the outgoing differential)?
+    ///
+    /// `quotient_map` is a genuine linear map defined on the *whole*
+    /// old-page space (it reads off h-basis pivot coordinates), not
+    /// restricted to Z. Feeding it a vector that isn't actually a cycle
+    /// silently returns a basis-dependent phantom value instead of
+    /// correctly reporting "no image" -- Python's `compute_induced_map_single`
+    /// / `compute_induced_products_single` guard exactly this
+    /// (`if map_reduced in tb_target.quotient_map.domain(): ...`).
+    /// `lift` is a right inverse of `quotient` restricted to Z, so a
+    /// lift∘quotient round trip is idempotent exactly on Z and moves `v`
+    /// for anything outside it -- reproduces Python's domain check without
+    /// needing to store the raw kernel basis. See
+    /// notes/UNCERTAIN_DEGREE_HANDLING_TODO.md for the full history (this
+    /// exact check was previously implemented for the maps call site only,
+    /// then deliberately left uncommitted; re-added here plus at the
+    /// products call site after confirming a real, currently-trusted
+    /// mismatch traced to exactly this gap, 2026-07-27).
+    pub fn is_cycle(&self, v: &FpVector) -> bool {
+        self.lift(&self.quotient(v)) == *v
+    }
+
     /// Dimension of the new page at this tridegree.
     pub fn dim(&self) -> usize {
         self.basis.len()
@@ -429,6 +452,15 @@ pub fn compute_induced_map_single_tb(
             continue;
         }
 
+        // Not actually a d_r-cycle at the target -- Python's domain check
+        // (`if map_reduced in tb_target.quotient_map.domain(): ...`) skips
+        // here; quotient_map has no domain restriction of its own and would
+        // silently return a basis-dependent phantom value instead. See
+        // notes/UNCERTAIN_DEGREE_HANDLING_TODO.md and TurnedBidegree::is_cycle.
+        if !tb_tgt.is_cycle(&map_reduced) {
+            continue;
+        }
+
         // Project to quotient
         let projected = tb_tgt.quotient(&map_reduced);
 
@@ -500,6 +532,14 @@ pub fn compute_induced_products_single(
                 results.push((x.clone(), y.clone(), tb_xy.zero()));
             } else {
                 let xy_reduced = tb_xy.reduce_against_boundaries(&xy_pre);
+                if !tb_xy.is_cycle(&xy_reduced) {
+                    // Not actually a d_r-cycle -- Python's `tb_xy.quotient(...)`
+                    // raises here (caught, entry left absent = zero downstream);
+                    // Rust's quotient_map has no domain restriction and would
+                    // silently return a basis-dependent phantom value instead.
+                    results.push((x.clone(), y.clone(), tb_xy.zero()));
+                    continue;
+                }
                 let xy_proj = tb_xy.quotient(&xy_reduced);
                 let result = Element::new(tb_xy.degree, xy_proj);
                 results.push((x.clone(), y.clone(), result));
