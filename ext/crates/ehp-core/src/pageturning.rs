@@ -518,6 +518,23 @@ pub fn compute_induced_products(
 ) -> ProductTable {
     let mut new_products = ProductTable::new();
 
+    // Products are bound by a FLAT decrement of the OLD page's own max_t
+    // (page.max_t - 1), NOT next_page.max_t (the recursively-decremented
+    // cutoff that governs next_page's own later d_r solve constraint
+    // generation -- a different, unrelated purpose/value). Confirmed
+    // against the Python reference (2026-07-26): products are computed
+    // during SATPage.next_page's one-time "build" phase, where the target
+    // page's max_t field is set via the flat `self.max_t - 1` (sat_ss.py),
+    // and `_induced_product_helper`'s `target_page.in_bounds(...)` check
+    // uses THAT flat value, not the recursive schedule a later, separate
+    // run.py invocation computes when reloading this page as input to
+    // solve ITS OWN d_r. Using next_page.max_t here (the recursive value)
+    // wrongly excluded real products at exactly next_page.max_t+1 through
+    // page.max_t-1 (confirmed: 11430 real E4 product mismatches, all at
+    // product-degree page.max_t-1, i.e. one past next_page.max_t=77 but
+    // within the flat bound=78).
+    let product_max_t = page.max_t.map(|t| t - 1);
+
     // Build index by n for the next page
     let mut by_n: HashMap<i32, Vec<Tridegree>> = HashMap::new();
     for &t in next_page.page.keys() {
@@ -552,7 +569,7 @@ pub fn compute_induced_products(
                 let sources = [x, y, xy];
                 if !sources
                     .iter()
-                    .all(|s| next_page.is_in_computed_polygon_source(*s))
+                    .all(|s| product_max_t.is_none_or(|mt| s.s + s.f <= mt))
                 {
                     continue;
                 }
