@@ -314,7 +314,33 @@ pub fn turn_page(
 ) -> Result<HashMap<Tridegree, TurnedBidegree>, D2Error> {
     let ctx = TurnContext::new(page, sat_result);
 
-    let tridegrees: Vec<Tridegree> = page.page.keys().copied().collect();
+    // Crop to the OLD page's own max_t before turning. `page.page` can
+    // (legitimately) extend past `page.max_t` -- the page that built it
+    // was itself built "generously" with no cap on its dimension table,
+    // matching the Python reference's own next_page (SATPage.next_page
+    // uses a flat max_t-1 there, deliberately not cropping the dimension
+    // table, so a later reload can serve a wider range of downstream
+    // max_t targets from the same saved data). Python enforces the real
+    // cap the ONE time it matters: whenever that saved page is reloaded
+    // as input for building the NEXT page, load_spectral_sequence filters
+    // `if s+f > tot: continue` with tot = this page's own (recursively
+    // decremented) max_t. Rust has no separate reload step, so this is
+    // where that crop has to happen instead -- otherwise an over-extended
+    // page (e.g. E3's dimension table legitimately reaching s+f=80, one
+    // past its own max_t=79) propagates its over-extension into every
+    // later page uncontrolled, producing real rust-vs-python rank
+    // mismatches at exactly the old over-extension boundary (confirmed
+    // 2026-07-26: 4372 E4_rank.csv mismatches, ALL at s+f=80, none
+    // elsewhere). `_max_t` (the NEW page's cutoff) is intentionally not
+    // used for this -- that would crop too early/differently from Python
+    // (see build_next_page's own max_t decrement comment for why the two
+    // schedules aren't interchangeable).
+    let tridegrees: Vec<Tridegree> = page
+        .page
+        .keys()
+        .copied()
+        .filter(|t| page.max_t.is_none_or(|mt| t.s + t.f <= mt))
+        .collect();
 
     info!("Turning page: {} tridegrees", tridegrees.len());
 
