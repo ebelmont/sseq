@@ -42,13 +42,14 @@ pub struct DimensionEntry {
 /// - `{prefix}_names.json` — element names
 pub fn load_from_csv(prefix: &str, r: i32, max_t: i32) -> io::Result<SATPage> {
     let is_dir = Path::new(prefix).is_dir();
-    let (rank_file, relations_file, e_file, h_file, p_file, names_file) = if is_dir {
+    let (rank_file, relations_file, e_file, h_file, p_file, lh0_file, names_file) = if is_dir {
         (
             format!("{}/E{}_rank.csv", prefix, r),
             format!("{}/E{}_relations.csv", prefix, r),
             format!("{}/E{}_E.csv", prefix, r),
             format!("{}/E{}_H.csv", prefix, r),
             format!("{}/E{}_P.csv", prefix, r),
+            format!("{}/E{}_lh0.csv", prefix, r),
             format!("{}/E{}_names.json", prefix, r),
         )
     } else {
@@ -58,6 +59,7 @@ pub fn load_from_csv(prefix: &str, r: i32, max_t: i32) -> io::Result<SATPage> {
             format!("{}_E.csv", prefix),
             format!("{}_H.csv", prefix),
             format!("{}_P.csv", prefix),
+            format!("{}_lh0.csv", prefix),
             format!("{}_names.json", prefix),
         )
     };
@@ -87,11 +89,14 @@ pub fn load_from_csv(prefix: &str, r: i32, max_t: i32) -> io::Result<SATPage> {
     let shared = page.products.dedup_shared_blocks();
     eprintln!("  Loaded {} products ({} duplicate blocks share storage)", product_count, shared);
 
-    // Load maps
+    // Load maps (E/H/P are the EHP triple; lh0 is the extra display/induced
+    // map — same element→image CSV shape, loaded here so page turns can
+    // induce it and the stem view can render it).
     for (kind, file) in [
         (MapKind::E, &e_file),
         (MapKind::H, &h_file),
         (MapKind::P, &p_file),
+        (MapKind::Lh0, &lh0_file),
     ] {
         match load_map_csv(file, kind, &page) {
             Ok((mut map_table, count)) => {
@@ -439,8 +444,8 @@ pub fn save_page_json(page: &SATPage, directory: &str) -> io::Result<()> {
         writeln!(rel_file, "\"{}\",\"{}\",\"{}\"", f1, f2, result_elem)?;
     }
 
-    // Write map CSVs
-    for kind in MapKind::all() {
+    // Write map CSVs (include lh0 so it round-trips through CSV save/load)
+    for kind in MapKind::all_with_lh0() {
         if let Some(map_table) = page.maps.get(&kind) {
             let map_path = format!("{}/E{}_{}.csv", directory, page.r, kind.name());
             let mut map_file = std::fs::File::create(&map_path)?;
@@ -492,12 +497,14 @@ const SECTION_PRODUCTS_V2: u32 = 7;
 const SECTION_MAP_E_V2: u32 = 8;
 const SECTION_MAP_H_V2: u32 = 9;
 const SECTION_MAP_P_V2: u32 = 10;
+const SECTION_MAP_LH0_V2: u32 = 11;
 
 fn section_type_for_map(kind: MapKind) -> u32 {
     match kind {
         MapKind::E => SECTION_MAP_E_V2,
         MapKind::H => SECTION_MAP_H_V2,
         MapKind::P => SECTION_MAP_P_V2,
+        MapKind::Lh0 => SECTION_MAP_LH0_V2,
     }
 }
 
@@ -517,6 +524,7 @@ fn map_kind_for_section_v2(section_type: u32) -> Option<MapKind> {
         SECTION_MAP_E_V2 => Some(MapKind::E),
         SECTION_MAP_H_V2 => Some(MapKind::H),
         SECTION_MAP_P_V2 => Some(MapKind::P),
+        SECTION_MAP_LH0_V2 => Some(MapKind::Lh0),
         _ => None,
     }
 }
@@ -624,8 +632,8 @@ pub fn save_to_binary(page: &SATPage, path: &str) -> io::Result<()> {
         sections.push((SECTION_PRODUCTS_V2, buf));
     }
 
-    // Sections 8/9/10: MAP_E/H/P (compact V2 — raw block words verbatim)
-    for kind in MapKind::all() {
+    // Sections 8/9/10/11: MAP_E/H/P/LH0 (compact V2 — raw block words verbatim)
+    for kind in MapKind::all_with_lh0() {
         if let Some(map_table) = page.maps.get(&kind) {
             if map_table.matrices.is_empty() {
                 continue;

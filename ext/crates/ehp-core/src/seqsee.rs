@@ -126,6 +126,7 @@ pub fn build_diff_overlay(page: &SATPage, result: &SATResult) -> DiffOverlay {
 pub fn compute_sphere_diff_edges(
     page: &SATPage,
     result: &SATResult,
+    known: &HashMap<DiffVar, bool>,
     sphere_n: i32,
 ) -> Vec<(String, String, bool)> {
     let mut edges = Vec::new();
@@ -505,6 +506,7 @@ fn has_nonzero_diff(
 pub fn write_ehp_csv<W: io::Write>(
     page: &SATPage,
     result: Option<&SATResult>,
+    known: &HashMap<DiffVar, bool>,
     writer: &mut W,
 ) -> io::Result<()> {
     writeln!(
@@ -552,12 +554,26 @@ pub fn write_ehp_csv<W: io::Write>(
                 if no_vars && (page.is_excluded(t) || page.is_excluded(tgt_t)) {
                     // Uncertainty-excluded: dash to every potential target
                     // (mirrors the original write_spheres) so exclusion is
-                    // never mistaken for a determined-zero differential.
+                    // never mistaken for a determined-zero differential —
+                    // EXCEPT entries asserted via known diffs (user `add`/
+                    // `zero`, or outside sources): those are recorded and take
+                    // effect in page turning even at excluded degrees, so
+                    // render them as determined (target for 1, nothing for 0).
                     let tgt_dim = page.dim_at(tgt_t);
-                    let nulls = (0..tgt_dim)
-                        .map(|j| gen_name(tgt_t.n, tgt_t.s, tgt_t.f, j, tgt_dim))
-                        .collect();
-                    (None, Vec::new(), nulls)
+                    let mut targets = Vec::new();
+                    let mut nulls = Vec::new();
+                    for j in 0..tgt_dim {
+                        let dv = DiffVar::new(n_var, t.s, t.f, j as u16, idx as u16);
+                        match known.get(&dv) {
+                            Some(false) => {}
+                            Some(true) => {
+                                targets.push(gen_name(tgt_t.n, tgt_t.s, tgt_t.f, j, tgt_dim))
+                            }
+                            None => nulls.push(gen_name(tgt_t.n, tgt_t.s, tgt_t.f, j, tgt_dim)),
+                        }
+                    }
+                    let dr_info = if targets.is_empty() { None } else { Some(page.r) };
+                    (dr_info, targets, nulls)
                 } else {
                     let targets = diff_target_names(page, res, t, idx);
                     let nulls = null_diff_target_names(page, res, t, idx);

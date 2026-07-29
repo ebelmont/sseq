@@ -171,6 +171,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     unsat_reason,
                 });
             }
+
+            // The cache doesn't store the turned-page chains (quotient/lift
+            // maps per tridegree), but `push_forward` needs them — without
+            // them the prior-page uncertainty overlays (faint dashed d_k
+            // edges on later pages) silently vanish from every chart rewrite
+            // in a warm-started session. Recompute them here; turning is the
+            // cheap part of startup (it's the solve and chart generation the
+            // cache exists to skip). The last page needs none (nothing is
+            // pushed past it).
+            let t_turn = Instant::now();
+            let n_pages = pages.len();
+            let turned_maps: Vec<_> = pages[..n_pages.saturating_sub(1)]
+                .par_iter()
+                .map(|ps| {
+                    let res = ps.result.as_ref()?;
+                    ehp_core::pageturning::turn_page(&ps.page, res, ps.page.r + 1, ps.page.max_t)
+                        .ok()
+                })
+                .collect();
+            for (ps, turned) in pages.iter_mut().zip(turned_maps) {
+                ps.turned = turned;
+            }
+            eprintln!(
+                "Recomputed turned-page chains in {:.2}s (prior-page uncertainty overlays)",
+                t_turn.elapsed().as_secs_f64(),
+            );
             eprintln!(
                 "Warm-start cache HIT ({}): {} pages in {:.2}s",
                 cache_hash,
@@ -339,7 +365,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let r = ps.page.r;
         let csv_path = out_dir.join(format!("ehp_E{}.csv", r));
         let mut file = std::fs::File::create(&csv_path)?;
-        seqsee::write_ehp_csv(&ps.page, ps.result.as_ref(), &mut file)?;
+        seqsee::write_ehp_csv(&ps.page, ps.result.as_ref(), &ps.known_diffs, &mut file)?;
         csv_paths.push(csv_path);
     }
     eprintln!("Wrote {} CSV files to output/", csv_paths.len());
@@ -2477,7 +2503,7 @@ fn solve_and_export(
     // Write updated CSV
     match std::fs::File::create(csv_path) {
         Ok(mut file) => {
-            if let Err(e) = seqsee::write_ehp_csv(page, result.as_ref(), &mut file) {
+            if let Err(e) = seqsee::write_ehp_csv(page, result.as_ref(), known_diffs, &mut file) {
                 eprintln!("  CSV write error: {}", e);
             }
         }
@@ -2794,7 +2820,7 @@ fn regen_affected_charts(
         // Fresh CSV first: the SeqSee pipeline reads it.
         match std::fs::File::create(&csv_paths[*idx]) {
             Ok(mut file) => {
-                if let Err(e) = seqsee::write_ehp_csv(&ps.page, ps.result.as_ref(), &mut file) {
+                if let Err(e) = seqsee::write_ehp_csv(&ps.page, ps.result.as_ref(), &ps.known_diffs, &mut file) {
                     eprintln!("  E_{}: CSV write error: {} — skipping chart regen", r, e);
                     continue;
                 }
@@ -3803,7 +3829,7 @@ fn fast_update_diffs(charts_dir: &Path, pages: &[PageState], idx: usize) -> usiz
             continue;
         }
 
-        let edges = seqsee::compute_sphere_diff_edges(&ps.page, res, n);
+        let edges = seqsee::compute_sphere_diff_edges(&ps.page, res, &ps.known_diffs, n);
         let mut data: Vec<serde_json::Value> = edges
             .iter()
             .map(|(s, t, d)| serde_json::json!([s, t, d, r]))
