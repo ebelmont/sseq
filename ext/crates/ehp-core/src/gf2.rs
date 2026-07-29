@@ -146,8 +146,9 @@ pub fn mat_identity(n: usize) -> Matrix {
     Matrix::identity(prime(), n)
 }
 
-/// Create a matrix from a Vec of FpVector rows.
-pub fn mat_from_rows(rows: Vec<FpVector>, ncols: usize) -> Matrix {
+/// Create a matrix from a slice of FpVector rows (borrowed: the rows are
+/// only read to copy them in, so call sites need no clone).
+pub fn mat_from_rows(rows: &[FpVector], ncols: usize) -> Matrix {
     let nrows = rows.len();
     let mut mat = mat_zero(nrows, ncols);
     for (i, row) in rows.iter().enumerate() {
@@ -592,7 +593,7 @@ pub fn gauss_relative_row_echelon(b_basis: &[FpVector], z_basis: &[FpVector]) ->
     let mut b_mat = if b_basis.is_empty() {
         mat_zero(0, dim)
     } else {
-        mat_from_rows(b_basis.to_vec(), dim)
+        mat_from_rows(b_basis, dim)
     };
     let (b_rank, b_pivots) = mat_echelon_form(&mut b_mat);
 
@@ -614,7 +615,7 @@ pub fn gauss_relative_row_echelon(b_basis: &[FpVector], z_basis: &[FpVector]) ->
     // Put result in echelon form
     if !result.is_empty() {
         let ncols = result[0].len();
-        let mut rmat = mat_from_rows(result, ncols);
+        let mut rmat = mat_from_rows(&result, ncols);
         let (rank, _) = mat_echelon_form(&mut rmat);
         result = (0..rank).map(|i| mat_get_row(&rmat, i)).collect();
     }
@@ -821,7 +822,7 @@ impl AffineSubspace {
             return (Vec::new(), offset);
         }
 
-        let mut mat = mat_from_rows(spanning, ambient_dim);
+        let mut mat = mat_from_rows(&spanning, ambient_dim);
         let (rank, _) = mat_echelon_form(&mut mat);
 
         let basis: Vec<FpVector> = (0..rank)

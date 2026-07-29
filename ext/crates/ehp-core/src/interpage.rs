@@ -156,7 +156,7 @@ pub fn update_sat_result(
         }
     }
 
-    let m = mat_from_rows(m_rows, kaug.len());
+    let m = mat_from_rows(&m_rows, kaug.len());
     let g = gauss_solve(&m, &rhs);
     if !g.consistent {
         return None;
@@ -223,7 +223,7 @@ pub fn update_sat_result(
     let kernel = if new_kernel_rows.is_empty() {
         mat_zero(0, total_n)
     } else {
-        mat_from_rows(new_kernel_rows, total_n)
+        mat_from_rows(&new_kernel_rows, total_n)
     };
 
     let result = SATResult {
@@ -724,23 +724,25 @@ pub fn build_overlay_page(
     // Apply the cheap product filters (identical to the ones the full
     // enumeration in compute_induced_products uses) *before* collecting the
     // turned degrees the surviving triples need, so rejected triples never
-    // cost a page turn.
-    let max_s = overlay.max_s.unwrap_or(i32::MAX);
+    // cost a page turn. No n-based bound here (matches Python and the fixed
+    // compute_induced_products): max_t bounds t = s + f only, never n; the
+    // product bound is the flat source_page.max_t - 1 (see the schedule
+    // comment on compute_induced_products), and there is no shifted-degree
+    // or polygon filter — the full enumeration dropped both, and a stricter
+    // pre-filter here would make overlay recomputes silently miss products
+    // a fresh page build now includes.
+    let product_max_t = source_page.max_t.map(|t| t - 1);
     candidates.retain(|&(x, y)| {
-        if x.n > max_s || (x.s == 0 && x.f == 0) {
+        if x.s == 0 && x.f == 0 {
             return false;
         }
         let xy = Tridegree::new(x.n, x.s + y.s, x.f + y.f);
         if !(is_recomputable(x) || is_recomputable(y) || is_recomputable(xy)) {
             return false;
         }
-        let shifted = Tridegree::new(y.n - 1, y.s, y.f);
-        if !overlay.page.contains_key(&shifted) {
-            return false;
-        }
         [x, y, xy]
             .iter()
-            .all(|s| overlay.is_in_computed_polygon_source(*s))
+            .all(|s| product_max_t.is_none_or(|mt| s.s + s.f <= mt))
     });
 
     // Turn every degree the recompute touches, freshly from the updated

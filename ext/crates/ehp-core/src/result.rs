@@ -106,7 +106,7 @@ impl SATResult {
 
         // Reduce uncertainty vectors to a basis
         if !uncertainty_vecs.is_empty() {
-            let mut mat = mat_from_rows(uncertainty_vecs, target_dim);
+            let mut mat = mat_from_rows(&uncertainty_vecs, target_dim);
             let (rank, _) = mat_echelon_form(&mut mat);
             uncertainty_vecs = (0..rank)
                 .map(|i| mat_get_row(&mat, i))

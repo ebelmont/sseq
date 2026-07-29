@@ -12,7 +12,8 @@ use fp::vector::FpVector;
 ///
 /// Returns None if the system is inconsistent.
 ///
-/// Solver selection (env `EHP_SOLVER`, read once): unset/other = the
+/// Solver selection (env `EHP_SOLVER`, read once): unset/other = the fast
+/// union-find `uf` solver (the default since 2026-07-20); `classic` = the
 /// original per-column elimination below; `dense` = one augmented
 /// `fp::Matrix` reduced with the M4RI-based `row_reduce` (experimental —
 /// same canonical RREF, so results are identical, but the reduction and
@@ -106,9 +107,14 @@ pub fn solve(system: &ConstraintSystem) -> Option<SATResult> {
             }
             return classic;
         }
+        // Explicit opt-out: force the original per-column elimination solver.
+        "classic" => return solve_classic(system),
         _ => {}
     }
-    solve_classic(system)
+    // Default (unset EHP_SOLVER, or any unknown value): the fast union-find
+    // solver. `EHP_SOLVER=classic` forces the original; the cache hash still
+    // records the value, so switching solvers still keys a distinct cache.
+    solve_uf(system)
 }
 
 fn solver_mode() -> &'static str {
@@ -157,7 +163,7 @@ fn solve_classic(system: &ConstraintSystem) -> Option<SATResult> {
     let kernel_matrix = if result.kernel.is_empty() {
         mat_zero(0, system.num_vars)
     } else {
-        mat_from_rows(result.kernel.clone(), system.num_vars)
+        mat_from_rows(&result.kernel, system.num_vars)
     };
 
     let determined = system.num_vars - unknown.len();
@@ -341,7 +347,7 @@ fn solve_dense(system: &ConstraintSystem) -> Option<SATResult> {
     let kernel_matrix = if kernel.is_empty() {
         mat_zero(0, ncols)
     } else {
-        mat_from_rows(kernel, ncols)
+        mat_from_rows(&kernel, ncols)
     };
 
     info!(
@@ -793,7 +799,7 @@ fn solve_uf(system: &ConstraintSystem) -> Option<SATResult> {
     let kernel_matrix = if kernel_rows.is_empty() {
         mat_zero(0, n)
     } else {
-        mat_from_rows(kernel_rows, n)
+        mat_from_rows(&kernel_rows, n)
     };
 
     info!(

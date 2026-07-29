@@ -399,15 +399,12 @@ impl SATPage {
             by_n.entry(t.n).or_default().push(t);
         }
 
-        let max_s = self.max_s.unwrap_or(i32::MAX);
-
         let mut keys: Vec<Tridegree> = self.page.keys().copied().collect();
         keys.sort();
 
         for x in &keys {
-            if x.n > max_s {
-                continue;
-            }
+            // No n-based bound here (matches Python and compute_induced_products):
+            // max_t bounds t = s + f only, never n.
             if x.s == 0 && x.f == 0 {
                 continue;
             }

@@ -30,7 +30,17 @@ use crate::page::SATPage;
 use crate::result::SATResult;
 use crate::tridegree::Tridegree;
 
-const CACHE_VERSION: u32 = 1;
+// v2 (2026-07-20): the default solver changed from `classic` to `uf`, so an
+// unset `EHP_SOLVER` now means uf. Old caches hashed unset==classic; bumping
+// the version invalidates them rather than silently reusing classic results
+// under the new uf default.
+// v3 (2026-07-20): pages now carry the lh0 map (new binary section 11) and
+// induce it on page turns; invalidate v2 caches that lack it.
+// 4: compare_with_python bug-fix consolidation (2026-07-29) — P-map/zero-dim
+// naturality gates removed, Leibniz pair enumeration fixed, r-1 max_t
+// schedule, turn_page crop, flat product bound, is_cycle guards. All cached
+// solves/page chains from version 3 are semantically stale.
+const CACHE_VERSION: u32 = 4;
 
 /// One page's cached startup state.
 pub struct CachedPage {
@@ -128,7 +138,9 @@ pub fn cache_mode() -> CacheMode {
     }
 }
 
-fn cache_dir(hash: &str) -> PathBuf {
+/// Warm-start cache directory for a config hash. Besides the serialized
+/// pages, the chart REPL archives its generated charts here (`charts/`).
+pub fn cache_dir(hash: &str) -> PathBuf {
     PathBuf::from("output").join(".ehp_cache").join(hash)
 }
 
@@ -341,8 +353,15 @@ fn read_sidecar(data: &[u8], page: &mut SATPage) -> io::Result<(
 
 /// Save the startup chain. Call after a successful cold startup.
 pub fn save_startup_cache(hash: &str, pages: &[CachedPage]) -> io::Result<()> {
-    let dir = cache_dir(hash);
-    std::fs::create_dir_all(&dir)?;
+    save_pages_to_dir(&cache_dir(hash), pages, Some(hash))
+}
+
+/// Serialize a solved page chain into an explicit directory (used by both the
+/// hash-keyed warm-start cache and the named snapshot system). `label` is
+/// recorded in `meta.txt` for provenance; pass the config hash for the cache,
+/// or `None` for a snapshot.
+pub fn save_pages_to_dir(dir: &Path, pages: &[CachedPage], label: Option<&str>) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
     for cp in pages {
         let r = cp.page.r;
         save_to_binary(&cp.page, dir.join(format!("page_E{}.ehp", r)).to_str().unwrap())?;
@@ -355,7 +374,7 @@ pub fn save_startup_cache(hash: &str, pages: &[CachedPage]) -> io::Result<()> {
         f,
         "pages: {}\nhash: {}\nversion: {}",
         pages.len(),
-        hash,
+        label.unwrap_or("-"),
         CACHE_VERSION,
     )?;
     Ok(())
@@ -364,7 +383,13 @@ pub fn save_startup_cache(hash: &str, pages: &[CachedPage]) -> io::Result<()> {
 /// Try to load the startup chain for this hash. Returns None if the cache is
 /// absent or unreadable (any error = cold startup, never a failure).
 pub fn load_startup_cache(hash: &str, start_r: i32, max_r: i32) -> Option<Vec<CachedPage>> {
-    let dir = cache_dir(hash);
+    load_pages_from_dir(&cache_dir(hash), start_r, max_r)
+}
+
+/// Load a solved page chain from an explicit directory (the counterpart to
+/// [`save_pages_to_dir`]). Returns None if absent or unreadable — callers
+/// treat that as "no cached state", never a hard failure.
+pub fn load_pages_from_dir(dir: &Path, start_r: i32, max_r: i32) -> Option<Vec<CachedPage>> {
     if !dir.join("meta.txt").exists() {
         return None;
     }

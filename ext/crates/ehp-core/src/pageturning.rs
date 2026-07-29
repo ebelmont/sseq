@@ -54,6 +54,29 @@ impl TurnedBidegree {
         reduced
     }
 
+    /// Is `v` actually a cycle (in the domain `quotient_map` was built for,
+    /// i.e. in the kernel Z of the outgoing differential)?
+    ///
+    /// `quotient_map` is a genuine linear map defined on the *whole*
+    /// old-page space (it reads off h-basis pivot coordinates), not
+    /// restricted to Z. Feeding it a vector that isn't actually a cycle
+    /// silently returns a basis-dependent phantom value instead of
+    /// correctly reporting "no image" -- Python's `compute_induced_map_single`
+    /// / `compute_induced_products_single` guard exactly this
+    /// (`if map_reduced in tb_target.quotient_map.domain(): ...`).
+    /// `lift` is a right inverse of `quotient` restricted to Z, so a
+    /// lift∘quotient round trip is idempotent exactly on Z and moves `v`
+    /// for anything outside it -- reproduces Python's domain check without
+    /// needing to store the raw kernel basis. See
+    /// notes/UNCERTAIN_DEGREE_HANDLING_TODO.md for the full history (this
+    /// exact check was previously implemented for the maps call site only,
+    /// then deliberately left uncommitted; re-added here plus at the
+    /// products call site after confirming a real, currently-trusted
+    /// mismatch traced to exactly this gap, 2026-07-27).
+    pub fn is_cycle(&self, v: &FpVector) -> bool {
+        self.lift(&self.quotient(v)) == *v
+    }
+
     /// Dimension of the new page at this tridegree.
     pub fn dim(&self) -> usize {
         self.basis.len()
@@ -120,7 +143,7 @@ pub fn turn_page_single(
     let b_echelon = if b_basis.is_empty() {
         Vec::new()
     } else {
-        let mut bmat = mat_from_rows(b_basis.clone(), old_dim);
+        let mut bmat = mat_from_rows(&b_basis, old_dim);
         let (rank, _pivot_cols) = mat_echelon_form(&mut bmat);
         (0..rank)
             .map(|i| mat_get_row(&bmat, i).to_owned())
@@ -145,7 +168,7 @@ pub fn turn_page_single(
         }
         q_rows.push(row);
     }
-    let quotient_map = mat_from_rows(q_rows, old_dim);
+    let quotient_map = mat_from_rows(&q_rows, old_dim);
 
     // Lift map: h_dim cols → old_dim rows
     // Maps standard basis vectors of H to representatives in old space
@@ -159,7 +182,7 @@ pub fn turn_page_single(
         }
         l_rows.push(row);
     }
-    let lift_map = mat_from_rows(l_rows, h_dim);
+    let lift_map = mat_from_rows(&l_rows, h_dim);
 
     let basis: Vec<Element> = (0..h_dim)
         .map(|i| Element::basis(degree, h_dim, i))
@@ -314,7 +337,33 @@ pub fn turn_page(
 ) -> Result<HashMap<Tridegree, TurnedBidegree>, D2Error> {
     let ctx = TurnContext::new(page, sat_result);
 
-    let tridegrees: Vec<Tridegree> = page.page.keys().copied().collect();
+    // Crop to the OLD page's own max_t before turning. `page.page` can
+    // (legitimately) extend past `page.max_t` -- the page that built it
+    // was itself built "generously" with no cap on its dimension table,
+    // matching the Python reference's own next_page (SATPage.next_page
+    // uses a flat max_t-1 there, deliberately not cropping the dimension
+    // table, so a later reload can serve a wider range of downstream
+    // max_t targets from the same saved data). Python enforces the real
+    // cap the ONE time it matters: whenever that saved page is reloaded
+    // as input for building the NEXT page, load_spectral_sequence filters
+    // `if s+f > tot: continue` with tot = this page's own (recursively
+    // decremented) max_t. Rust has no separate reload step, so this is
+    // where that crop has to happen instead -- otherwise an over-extended
+    // page (e.g. E3's dimension table legitimately reaching s+f=80, one
+    // past its own max_t=79) propagates its over-extension into every
+    // later page uncontrolled, producing real rust-vs-python rank
+    // mismatches at exactly the old over-extension boundary (confirmed
+    // 2026-07-26: 4372 E4_rank.csv mismatches, ALL at s+f=80, none
+    // elsewhere). `_max_t` (the NEW page's cutoff) is intentionally not
+    // used for this -- that would crop too early/differently from Python
+    // (see build_next_page's own max_t decrement comment for why the two
+    // schedules aren't interchangeable).
+    let tridegrees: Vec<Tridegree> = page
+        .page
+        .keys()
+        .copied()
+        .filter(|t| page.max_t.is_none_or(|mt| t.s + t.f <= mt))
+        .collect();
 
     info!("Turning page: {} tridegrees", tridegrees.len());
 
@@ -403,6 +452,15 @@ pub fn compute_induced_map_single_tb(
             continue;
         }
 
+        // Not actually a d_r-cycle at the target -- Python's domain check
+        // (`if map_reduced in tb_target.quotient_map.domain(): ...`) skips
+        // here; quotient_map has no domain restriction of its own and would
+        // silently return a basis-dependent phantom value instead. See
+        // notes/UNCERTAIN_DEGREE_HANDLING_TODO.md and TurnedBidegree::is_cycle.
+        if !tb_tgt.is_cycle(&map_reduced) {
+            continue;
+        }
+
         // Project to quotient
         let projected = tb_tgt.quotient(&map_reduced);
 
@@ -422,7 +480,11 @@ pub fn compute_induced_maps(
 ) -> HashMap<MapKind, Vec<(Element, Element)>> {
     let mut all_maps = HashMap::new();
 
-    for kind in MapKind::all() {
+    // Induce E/H/P AND lh0 the same way (lift → apply → reduce mod
+    // boundaries → project). lh0 lands in next.maps like the EHP maps but is
+    // only read at the display/export sites (all_with_lh0), never by the
+    // solver/fiber/interpage code (which iterate the EHP-only all()).
+    for kind in MapKind::all_with_lh0() {
         let domain: Vec<Tridegree> = page.map_domain(kind);
 
         let map_entries: Vec<(Element, Element)> = domain
@@ -474,6 +536,14 @@ pub fn compute_induced_products_single(
                 results.push((x.clone(), y.clone(), tb_xy.zero()));
             } else {
                 let xy_reduced = tb_xy.reduce_against_boundaries(&xy_pre);
+                if !tb_xy.is_cycle(&xy_reduced) {
+                    // Not actually a d_r-cycle -- Python's `tb_xy.quotient(...)`
+                    // raises here (caught, entry left absent = zero downstream);
+                    // Rust's quotient_map has no domain restriction and would
+                    // silently return a basis-dependent phantom value instead.
+                    results.push((x.clone(), y.clone(), tb_xy.zero()));
+                    continue;
+                }
                 let xy_proj = tb_xy.quotient(&xy_reduced);
                 let result = Element::new(tb_xy.degree, xy_proj);
                 results.push((x.clone(), y.clone(), result));
@@ -498,14 +568,31 @@ pub fn compute_induced_products(
         by_n.entry(t.n).or_default().push(t);
     }
 
-    let max_s = next_page.max_s.unwrap_or(i32::MAX);
+    // Products are bound by a FLAT decrement of the OLD page's own max_t
+    // (page.max_t - 1), NOT next_page.max_t (the recursively-decremented
+    // cutoff that governs next_page's own later d_r solve constraint
+    // generation -- a different, unrelated purpose/value). Confirmed
+    // against the Python reference (2026-07-26): products are computed
+    // during SATPage.next_page's one-time "build" phase, where the target
+    // page's max_t field is set via the flat `self.max_t - 1` (sat_ss.py),
+    // and `_induced_product_helper`'s `target_page.in_bounds(...)` check
+    // uses THAT flat value, not the recursive schedule a later, separate
+    // run.py invocation computes when reloading this page as input to
+    // solve ITS OWN d_r. Using next_page.max_t here (the recursive value)
+    // wrongly excluded real products at exactly next_page.max_t+1 through
+    // page.max_t-1 (confirmed: 11430 real E4 product mismatches, all at
+    // product-degree page.max_t-1, i.e. one past next_page.max_t=77 but
+    // within the flat bound=78).
+    let product_max_t = page.max_t.map(|t| t - 1);
 
     let mut product_triples = Vec::new();
 
     for &x in next_page.page.keys() {
-        if x.n > max_s {
-            continue;
-        }
+        // No n-based bound here (matches the Python original, which has
+        // none): max_t bounds t = s + f only, never n — a previous version
+        // of this code compared x.n against max_t directly, wrongly
+        // excluding high-n/low-t product triples (e.g. many s=0, high-n
+        // stable-range products).
         if x.s == 0 && x.f == 0 {
             continue;
         }
@@ -523,15 +610,10 @@ pub fn compute_induced_products(
                     continue;
                 }
 
-                let shifted = Tridegree::new(y.n - 1, y.s, y.f);
-                if !next_page.page.contains_key(&shifted) {
-                    continue;
-                }
-
                 let sources = [x, y, xy];
                 if !sources
                     .iter()
-                    .all(|s| next_page.is_in_computed_polygon_source(*s))
+                    .all(|s| product_max_t.is_none_or(|mt| s.s + s.f <= mt))
                 {
                     continue;
                 }
@@ -585,7 +667,16 @@ pub fn build_page_from_turned(
     turned: &HashMap<Tridegree, TurnedBidegree>,
 ) -> SATPage {
     let new_r = old_page.r + 1;
-    let new_max_t = old_page.max_t.map(|t| t - 1);
+    // Matches the Python reference's `run.py` per-page cutoff schedule
+    // (`max_t -= i - 2` for `i` in `3..=r`, which nets to a decrement of
+    // `old_page.r - 1` per turn — 80→79→77→74… for r=2,3,4,5 — not a flat
+    // `-1`). A flat `-1` only coincides with this on the very first turn
+    // (r=2, decrement=1); every later turn would leave Rust's cutoff too
+    // permissive relative to Python's, letting near-the-old-boundary
+    // degrees (whose true differential is genuinely unknown, just
+    // untracked) leak into real constraint generation instead of being
+    // excluded the way Python's shrunk window excludes them.
+    let new_max_t = old_page.max_t.map(|t| t - (old_page.r - 1));
 
     let mut next = SATPage::new(new_r);
     next.max_t = new_max_t;
@@ -749,7 +840,9 @@ pub fn build_next_page(
     sat_result: &SATResult,
 ) -> Result<(SATPage, HashMap<Tridegree, TurnedBidegree>), D2Error> {
     let new_r = page.r + 1;
-    let new_max_t = page.max_t.map(|t| t - 1);
+    // Same r-1 decrement schedule as build_page_from_turned (see the comment
+    // there); the two sites must stay in sync.
+    let new_max_t = page.max_t.map(|t| t - (page.r - 1));
 
     // Turn the page (compute homology)
     let turned = turn_page(page, sat_result, new_r, new_max_t)?;
