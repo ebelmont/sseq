@@ -1,10 +1,12 @@
 pub mod gf2;
 pub mod tridegree;
 pub mod element;
+pub mod fiber;
 pub mod map;
 pub mod products;
 pub mod page;
 pub mod differentials;
+pub mod hidden;
 pub mod cache;
 pub mod constraints;
 pub mod solver;

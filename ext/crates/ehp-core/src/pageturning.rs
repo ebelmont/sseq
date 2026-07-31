@@ -396,6 +396,257 @@ pub fn turn_page(
 }
 
 /// Compute induced map on the next page for a single tridegree.
+/// What [`patch_page_from_turned`] actually changed.
+#[derive(Default)]
+pub struct PatchOutcome {
+    /// Every degree whose next-page content changed: dims/basis, an induced
+    /// map matrix at that source (or its target), or a product block whose
+    /// key or product degree is the degree. This is the "dirty" input for
+    /// patching the page AFTER the next one (content changes here alter its
+    /// induction inputs at exactly these degrees).
+    pub changed: hashbrown::HashSet<Tridegree>,
+    /// Subset bookkeeping: degrees whose dimension changed (drives chart
+    /// regen + the cascade's re-turn carry, exactly like the full-rebuild
+    /// path's dims scan).
+    pub dims_changed: hashbrown::HashSet<Tridegree>,
+}
+
+/// Incrementally patch `next` — a page previously built by
+/// [`build_page_from_turned`] from this same `old_page` — after `turned`
+/// changed ONLY at `dirty` degrees (and/or `old_page`'s own content changed
+/// only at `dirty` degrees). Byte-equivalent to a full rebuild by
+/// construction:
+/// - dims/basis are reset from the dirty turned entries (removed when the
+///   basis vanished),
+/// - induced-map matrices are recomputed at every source degree whose source
+///   or target is dirty, with the exact presence rule of the full rebuild
+///   (a matrix exists iff ≥1 singleton-support entry and both dims > 0 —
+///   presence matters: an ABSENT stable-range E matrix means IDENTITY),
+/// - induced-product blocks are recomputed for every triple (x, y, xy)
+///   touching a dirty degree — the same enumeration filters as
+///   [`compute_induced_products`] (unit rule, turned membership, flat
+///   `old.max_t - 1` bound) — and stale blocks touching a dirty degree that
+///   are no longer valid triples are removed.
+///
+/// The only intentional difference from a full rebuild is storage sharing
+/// (no `dedup_shared` pass on patched entries) — content-equal, more Arcs.
+/// `EHP_CASCADE_VERIFY=1` in the REPL cross-checks patched pages against
+/// full rebuilds.
+pub fn patch_page_from_turned(
+    old_page: &SATPage,
+    turned: &HashMap<Tridegree, TurnedBidegree>,
+    dirty: &hashbrown::HashSet<Tridegree>,
+    next: &mut SATPage,
+) -> PatchOutcome {
+    let mut out = PatchOutcome::default();
+    if dirty.is_empty() {
+        return out;
+    }
+
+    // 1. Dimensions + basis at dirty degrees (nonempty turned entry = live).
+    for &t in dirty {
+        match turned.get(&t).filter(|tb| !tb.basis.is_empty()) {
+            Some(tb) => {
+                if next.page.get(&t) != Some(&tb.basis) {
+                    if next.dim_at(t) != tb.basis.len() {
+                        out.dims_changed.insert(t);
+                    }
+                    out.changed.insert(t);
+                    next.dimension.insert(t, tb.basis.len());
+                    next.page.insert(t, tb.basis.clone());
+                }
+            }
+            None => {
+                if next.dimension.remove(&t).is_some() {
+                    out.dims_changed.insert(t);
+                    out.changed.insert(t);
+                }
+                next.page.remove(&t);
+            }
+        }
+    }
+    next.compute_max_values();
+
+    // 2. Induced maps at influenced source degrees (source or target dirty).
+    for kind in MapKind::all_with_lh0() {
+        let mut srcs: hashbrown::HashSet<Tridegree> = hashbrown::HashSet::new();
+        for &d in dirty {
+            for s in [d, kind.source_degree(d)] {
+                // Visit every domain-eligible influenced source — including
+                // ones that just DIED on the old page (their recompute yields
+                // no entries, which REMOVES the stale matrix; filtering them
+                // out here left dead matrices behind — and an absent vs
+                // stale E matrix is the identity-default distinction).
+                if kind.domain_check(s) {
+                    srcs.insert(s);
+                }
+            }
+        }
+        if srcs.is_empty() {
+            continue;
+        }
+        let updates: Vec<(Tridegree, Option<crate::products::ProductMatrix>)> = srcs
+            .into_iter()
+            .map(|src| {
+                let entries = compute_induced_map_single(src, kind, old_page, turned);
+                // Full-rebuild presence rule: by_src key iff ≥1 singleton-
+                // support entry; then matrix built (possibly zero rows) iff
+                // both dims > 0.
+                let rows: Vec<(usize, FpVector)> = entries
+                    .iter()
+                    .filter_map(|(x, tgt)| {
+                        let idx: Vec<usize> = vec_support(&x.vec).collect();
+                        (idx.len() == 1).then(|| (idx[0], tgt.vec.clone()))
+                    })
+                    .collect();
+                let src_dim = next.dim_at(src);
+                let tgt_dim = next.dim_at(kind.target_degree(src));
+                let new_block = if !rows.is_empty() && src_dim > 0 && tgt_dim > 0 {
+                    let mut mat = mat_zero(src_dim, tgt_dim);
+                    for (row_idx, vec) in &rows {
+                        if *row_idx < src_dim && vec.len() == tgt_dim {
+                            mat_set_row(&mut mat, *row_idx, vec);
+                        }
+                    }
+                    Some(crate::products::ProductMatrix::from_matrix(
+                        src_dim as u16,
+                        1,
+                        tgt_dim as u16,
+                        &mat,
+                    ))
+                } else {
+                    None
+                };
+                (src, new_block)
+            })
+            .collect();
+        let table = next.maps.entry(kind).or_insert_with(|| MapTable::new(kind));
+        for (src, new_block) in updates {
+            let changed = match (&new_block, table.matrix_at(src)) {
+                (Some(nb), Some(ob)) => nb != ob,
+                (Some(_), None) | (None, Some(_)) => true,
+                (None, None) => false,
+            };
+            if changed {
+                out.changed.insert(src);
+                out.changed.insert(kind.target_degree(src));
+                match new_block {
+                    Some(nb) => table.set_block(src, nb),
+                    None => {
+                        table.matrices.remove(&src);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Induced product blocks for triples touching a dirty degree.
+    let mut by_n: HashMap<i32, Vec<Tridegree>> = HashMap::new();
+    let mut by_ns: HashMap<i32, Vec<Tridegree>> = HashMap::new();
+    for &t in next.page.keys() {
+        by_n.entry(t.n).or_default().push(t);
+        by_ns.entry(t.n + t.s).or_default().push(t);
+    }
+    let product_max_t = old_page.max_t.map(|t| t - 1);
+    let valid_triple = |x: Tridegree, y: Tridegree| -> Option<(Tridegree, Tridegree, Tridegree)> {
+        if y.n != x.n + x.s {
+            return None;
+        }
+        if x.s == 0 && x.f == 0 && !old_page.products.has_block(x, y) {
+            return None; // unit rule: only data-seeded identity products
+        }
+        let xy = Tridegree::new(x.n, x.s + y.s, x.f + y.f);
+        if !turned.contains_key(&x) || !turned.contains_key(&y) || !turned.contains_key(&xy) {
+            return None;
+        }
+        if ![x, y, xy]
+            .iter()
+            .all(|s| product_max_t.is_none_or(|mt| s.s + s.f <= mt))
+        {
+            return None;
+        }
+        Some((x, y, xy))
+    };
+    let mut candidates: hashbrown::HashMap<(Tridegree, Tridegree), Tridegree> =
+        hashbrown::HashMap::new();
+    for &d in dirty {
+        // d as x.
+        if let Some(ys) = by_n.get(&(d.n + d.s)) {
+            for &y in ys {
+                if let Some((x, y, xy)) = valid_triple(d, y) {
+                    candidates.insert((x, y), xy);
+                }
+            }
+        }
+        // d as y.
+        if let Some(xs) = by_ns.get(&d.n) {
+            for &x in xs {
+                if let Some((x, y, xy)) = valid_triple(x, d) {
+                    candidates.insert((x, y), xy);
+                }
+            }
+        }
+        // d as xy.
+        if let Some(xs) = by_n.get(&d.n) {
+            for &x in xs {
+                let y = Tridegree::new(x.n + x.s, d.s - x.s, d.f - x.f);
+                if next.page.contains_key(&y) {
+                    if let Some((x, y, xy)) = valid_triple(x, y) {
+                        candidates.insert((x, y), xy);
+                    }
+                }
+            }
+        }
+    }
+
+    // Stale blocks: touching a dirty degree but no longer a valid triple.
+    let stale: Vec<(Tridegree, Tridegree)> = next
+        .products
+        .iter_blocks()
+        .map(|(&k, _)| k)
+        .filter(|&(x, y)| {
+            let xy = Tridegree::new(x.n, x.s + y.s, x.f + y.f);
+            (dirty.contains(&x) || dirty.contains(&y) || dirty.contains(&xy))
+                && !candidates.contains_key(&(x, y))
+        })
+        .collect();
+    for (x, y) in stale {
+        next.products.remove_block(x, y);
+        out.changed.extend([x, y, Tridegree::new(x.n, x.s + y.s, x.f + y.f)]);
+    }
+
+    // Recompute candidate blocks (parallel like the full rebuild).
+    let cand_vec: Vec<((Tridegree, Tridegree), Tridegree)> =
+        candidates.iter().map(|(&k, &xy)| (k, xy)).collect();
+    let recomputed: Vec<((Tridegree, Tridegree), crate::products::ProductMatrix)> = cand_vec
+        .par_iter()
+        .map(|&((x, y), xy)| {
+            let (tb_x, tb_y, tb_xy) = (&turned[&x], &turned[&y], &turned[&xy]);
+            let dim1 = tb_x.basis.len();
+            let dim2 = tb_y.basis.len();
+            let tgt_dim = tb_xy.basis.len();
+            let mut block = crate::products::ProductMatrix::zero(dim1, dim2, tgt_dim);
+            for (xe, ye, res) in compute_induced_products_single(tb_x, tb_y, tb_xy, old_page) {
+                let xi: Vec<usize> = vec_support(&xe.vec).collect();
+                let yi: Vec<usize> = vec_support(&ye.vec).collect();
+                if xi.len() == 1 && yi.len() == 1 && res.vec.len() == tgt_dim {
+                    block.set_row(xi[0] * dim2 + yi[0], &res.vec);
+                }
+            }
+            ((x, y), block)
+        })
+        .collect();
+    for ((x, y), block) in recomputed {
+        let unchanged = next.products.block(x, y).is_some_and(|ob| *ob == block);
+        if !unchanged {
+            out.changed.extend([x, y, Tridegree::new(x.n, x.s + y.s, x.f + y.f)]);
+            next.products.insert_block(x, y, block);
+        }
+    }
+
+    out
+}
+
 pub fn compute_induced_map_single(
     src_degree: Tridegree,
     map_kind: MapKind,
@@ -593,13 +844,24 @@ pub fn compute_induced_products(
         // of this code compared x.n against max_t directly, wrongly
         // excluding high-n/low-t product triples (e.g. many s=0, high-n
         // stable-range products).
-        if x.s == 0 && x.f == 0 {
-            continue;
-        }
+        //
+        // The unit class (s=0, f=0) is normally skipped (Python parity: it
+        // never participates in Leibniz pairs), but the E2 data seeds
+        // h_i-on-identity product blocks that the chart h_i columns and the
+        // fiber view read (hi_target_names looks up (unit, h_i) products).
+        // Skipping the unit outright dropped exactly those blocks on every
+        // turn, so unit h_i-towers vanished from E3+ charts. Keep unit
+        // triples for precisely the (x, y) pairs whose product block exists
+        // on the old page — that propagates the seeded identity products
+        // (quotienting h_i's image like any other product) and nothing else.
+        let x_is_unit = x.s == 0 && x.f == 0;
 
         let y_n = x.n + x.s;
         if let Some(y_list) = by_n.get(&y_n) {
             for &y in y_list {
+                if x_is_unit && !page.products.has_block(x, y) {
+                    continue;
+                }
                 let xy = Tridegree::new(x.n, x.s + y.s, x.f + y.f);
 
                 // Check all three are in turned_page

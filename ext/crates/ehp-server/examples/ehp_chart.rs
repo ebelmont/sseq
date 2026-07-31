@@ -20,6 +20,8 @@
 //!                      ~/ehp-sat-rs/data/E2 — the canonical E2 CSVs, a
 //!                      byte-identical copy of ~/EHP_SAT/data/E2)
 //! - `EHP_MAX_T`      — max total degree s+f (default: 20)
+//! - `EHP_FIBERVIEWS` — "0" skips the fiber-sequence charts (one per base
+//!                      sphere N: S^N → ΩS^{N+1} → ΩS^{2N+1})
 //! - `EHP_R`          — starting page number (default: 2)
 //! - `SEQSEE_THEME`   — chart palette: "dark"/"light" (Catppuccin) or
 //!                      "teak"/"linen" (Finn Juhl dark/light). Default: "dark".
@@ -40,6 +42,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 
 use ehp_core::constraints::{self, DiffVar};
+use ehp_core::hidden;
 use ehp_core::interpage::{self, InterpagePage};
 use ehp_core::io;
 use ehp_core::map::MapKind;
@@ -70,6 +73,9 @@ struct PageState {
     n_values: BTreeSet<i32>,
     /// Stems with (unstable) classes — one stem chart each.
     stem_values: BTreeSet<i32>,
+    /// Base spheres N (N and N+1 both with classes) — one fiber-sequence
+    /// chart each (S^N → ΩS^{N+1} → ΩS^{2N+1}).
+    fiber_values: BTreeSet<i32>,
     /// Homology data from turning this page into the next.
     /// Stored for incremental re-turning when a differential changes.
     turned: Option<HashMap<Tridegree, TurnedBidegree>>,
@@ -90,6 +96,517 @@ struct UndoEntry {
     prev: Option<bool>,
 }
 
+/// Base spheres N with classes on both S^N and S^{N+1} — the fiber-sequence
+/// charts worth drawing (capped like n_values).
+fn compute_fiber_values(page: &SATPage, max_t: i32) -> BTreeSet<i32> {
+    let ns: BTreeSet<i32> = page
+        .dimension
+        .iter()
+        .filter(|(_, &d)| d > 0)
+        .map(|(&t, _)| t.n)
+        .collect();
+    ns.iter()
+        .copied()
+        .filter(|&n| n >= 2 && n < max_t && ns.contains(&(n + 1)))
+        .collect()
+}
+
+/// EHP_FIBERVIEWS != "0" (default on): generate the fiber-sequence charts.
+fn fiberviews_enabled() -> bool {
+    std::env::var("EHP_FIBERVIEWS").map(|v| v != "0").unwrap_or(true)
+}
+
+// =============================================================================
+// Named snapshots
+// -----------------------------------------------------------------------------
+// A snapshot is a self-contained, human-named copy of a whole session: the
+// solved page chain (serialized like the warm-start cache) + the generated
+// charts (cloned) + a manifest. Unlike the warm-start cache it is NOT keyed on
+// the fragile config hash — you load it by name (`snapshot load <name>` or
+// EHP_SNAPSHOT=<name> at startup), which bypasses the hash and the chart
+// freshness stamp entirely: no solve, no page-turn, no chart regeneration.
+// Layout:  snapshots/<name>/{pages/, charts/, manifest.json}
+// On APFS the chart clone is copy-on-write (`cp -c`): instant, zero extra
+// space until either copy diverges — essential given multi-GB chart dirs.
+// =============================================================================
+
+/// Immutable config of the running session, captured once in `main`. The
+/// snapshot-save command reads it so it doesn't have to be threaded through
+/// the whole REPL dispatch.
+struct SessionCfg {
+    start_r: i32,
+    max_t: i32,
+    max_r: i32,
+    theme: String,
+    cache_hash: String,
+}
+
+static SESSION: OnceLock<SessionCfg> = OnceLock::new();
+
+/// Parsed `manifest.json` of a snapshot.
+struct SnapshotManifest {
+    start_r: i32,
+    max_t: i32,
+    max_r: i32,
+    theme: String,
+    cache_hash: String,
+    pages: usize,
+    charts: usize,
+    mutations: usize,
+    created: u64,
+}
+
+fn snapshots_root() -> PathBuf {
+    PathBuf::from("snapshots")
+}
+
+fn snapshot_dir(name: &str) -> PathBuf {
+    snapshots_root().join(name)
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Format a unix timestamp as local "YYYY-MM-DD HH:MM" via `date` (darwin/BSD).
+/// Falls back to the raw epoch on any failure — display-only, never fatal.
+fn fmt_time(secs: u64) -> String {
+    std::process::Command::new("date")
+        .arg("-r")
+        .arg(secs.to_string())
+        .arg("+%Y-%m-%d %H:%M")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("epoch {}", secs))
+}
+
+/// Recursively clone `src` to `dst`, preferring APFS copy-on-write (`cp -c`)
+/// so a multi-GB charts dir copies instantly with no extra space until
+/// modified. Falls back to a plain recursive copy off-APFS.
+fn clone_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if dst.exists() {
+        std::fs::remove_dir_all(dst)?;
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let cow = std::process::Command::new("cp")
+        .arg("-c")
+        .arg("-R")
+        .arg(src)
+        .arg(dst)
+        .status();
+    if matches!(&cow, Ok(s) if s.success()) {
+        return Ok(());
+    }
+    // Fallback: clean any partial dst, then a plain recursive copy.
+    if dst.exists() {
+        std::fs::remove_dir_all(dst)?;
+    }
+    let status = std::process::Command::new("cp")
+        .arg("-R")
+        .arg(src)
+        .arg(dst)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "recursive copy failed",
+        ))
+    }
+}
+
+/// Count top-level `.html` files in a charts directory (headline chart count).
+fn count_html(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| {
+                    e.path().extension().and_then(|x| x.to_str()) == Some("html")
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+// =============================================================================
+// Last-session recall (`-- last` / `-- charts`)
+// =============================================================================
+
+/// Every env var that shapes a session (config hash inputs, display, data).
+/// Recorded verbatim in `output/.ehp_last.json` at each successful startup;
+/// `-- last` replays them so nobody has to remember EHP_MAX_T etc.
+const SESSION_ENV_VARS: &[&str] = &[
+    "EHP_DATA",
+    "EHP_MAX_T",
+    "EHP_R",
+    "EHP_MAX_R",
+    "SEQSEE_THEME",
+    "EHP_SNAPSHOT",
+    "EHP_SOLVER",
+    "EHP_RELAX_TARGET_EXCLUDE",
+    "EHP_OUTSIDE_DIFFS",
+    "EHP_OUTSIDE_PARITY",
+    "EHP_OUTSIDE_SKIP",
+    "EHP_D2_LINEAR",
+    "EHP_MAPVIEWS",
+    "EHP_FIBERVIEWS",
+];
+
+fn last_session_path() -> PathBuf {
+    PathBuf::from("output").join(".ehp_last.json")
+}
+
+fn record_last_session(cache_hash: &str) {
+    let mut env = serde_json::Map::new();
+    for var in SESSION_ENV_VARS {
+        if let Ok(v) = std::env::var(var) {
+            env.insert(var.to_string(), serde_json::Value::String(v));
+        }
+    }
+    let v = serde_json::json!({
+        "version": 1,
+        "env": env,
+        "cache_hash": cache_hash,
+        "created": now_secs(),
+    });
+    if let Ok(s) = serde_json::to_string_pretty(&v) {
+        let _ = std::fs::write(last_session_path(), s);
+    }
+}
+
+/// Replay the recorded env (setting recorded vars, clearing unrecorded ones)
+/// so the startup that follows reproduces the last session exactly — same
+/// config hash, so it lands on the warm cache and archived charts.
+fn apply_last_session() -> Result<String, String> {
+    let raw = std::fs::read_to_string(last_session_path()).map_err(|_| {
+        "no session recorded yet (output/.ehp_last.json) — start one normally first".to_string()
+    })?;
+    let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let env = v
+        .get("env")
+        .and_then(|e| e.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let mut summary = Vec::new();
+    for var in SESSION_ENV_VARS {
+        match env.get(*var).and_then(|x| x.as_str()) {
+            Some(val) => {
+                std::env::set_var(var, val);
+                summary.push(format!("{}={}", var, val));
+            }
+            None => std::env::remove_var(var),
+        }
+    }
+    Ok(summary.join(" "))
+}
+
+/// Best chart index for the last session: its snapshot's charts, else the
+/// warm-cache archive, else whatever is live in output/charts.
+fn last_session_charts_index() -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(last_session_path()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    if let Some(name) = v.pointer("/env/EHP_SNAPSHOT").and_then(|x| x.as_str()) {
+        let p = snapshot_dir(name).join("charts").join("index.html");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    if let Some(hash) = v.get("cache_hash").and_then(|x| x.as_str()) {
+        let p = ehp_core::cache::cache_dir(hash).join("charts").join("index.html");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let live = PathBuf::from("output").join("charts").join("index.html");
+    live.exists().then_some(live)
+}
+
+fn valid_snapshot_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && name != "."
+        && name != ".."
+        && !name.starts_with('.')
+}
+
+fn write_manifest(dir: &Path, m: &SnapshotManifest) -> std::io::Result<()> {
+    let v = serde_json::json!({
+        "version": 1,
+        "start_r": m.start_r,
+        "max_t": m.max_t,
+        "max_r": m.max_r,
+        "theme": m.theme,
+        "cache_hash": m.cache_hash,
+        "pages": m.pages,
+        "charts": m.charts,
+        "mutations": m.mutations,
+        "created": m.created,
+    });
+    std::fs::write(dir.join("manifest.json"), serde_json::to_string_pretty(&v)?)
+}
+
+fn load_snapshot_manifest(name: &str) -> Result<SnapshotManifest, String> {
+    let path = snapshot_dir(name).join("manifest.json");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("bad manifest json: {}", e))?;
+    let geti = |k: &str, d: i64| v.get(k).and_then(|x| x.as_i64()).unwrap_or(d);
+    let getu = |k: &str, d: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d);
+    Ok(SnapshotManifest {
+        start_r: geti("start_r", 2) as i32,
+        max_t: geti("max_t", 20) as i32,
+        max_r: geti("max_r", 5) as i32,
+        theme: v
+            .get("theme")
+            .and_then(|x| x.as_str())
+            .unwrap_or("dark")
+            .to_string(),
+        cache_hash: v
+            .get("cache_hash")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        pages: getu("pages", 0) as usize,
+        charts: getu("charts", 0) as usize,
+        mutations: getu("mutations", 0) as usize,
+        created: getu("created", 0),
+    })
+}
+
+/// Serialize the live (post-mutation) page chain + clone the charts into a
+/// named snapshot. Returns the written manifest.
+fn save_snapshot(
+    name: &str,
+    pages: &[PageState],
+    mutations: usize,
+    force: bool,
+) -> Result<SnapshotManifest, String> {
+    if !valid_snapshot_name(name) {
+        return Err(format!(
+            "invalid snapshot name '{}' (no '/', '\\', leading '.', or '..')",
+            name
+        ));
+    }
+    let cfg = SESSION
+        .get()
+        .ok_or("session config not initialized (internal error)")?;
+    let dir = snapshot_dir(name);
+    if dir.exists() && !force {
+        return Err(format!(
+            "snapshot '{}' already exists — `snapshot save {} force` to overwrite",
+            name, name
+        ));
+    }
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    // 1. Solved page chain WITH all applied mutations (the warm-start cache
+    //    dir only holds the startup state, so re-serialize from live `pages`).
+    let cached: Vec<ehp_core::cache::CachedPage> = pages
+        .iter()
+        .map(|ps| ehp_core::cache::CachedPage {
+            page: ps.page.clone(),
+            result: ps.result.clone(),
+            known_diffs: ps.known_diffs.clone(),
+            excluded_leibniz: ps.excluded_leibniz.clone(),
+        })
+        .collect();
+    ehp_core::cache::save_pages_to_dir(&dir.join("pages"), &cached, Some(&cfg.cache_hash))
+        .map_err(|e| format!("saving pages: {}", e))?;
+
+    // 2. Charts (the expensive artifact) — APFS copy-on-write clone.
+    let charts_src = PathBuf::from("output").join("charts");
+    let chart_count = if charts_src.exists() {
+        clone_dir(&charts_src, &dir.join("charts")).map_err(|e| format!("cloning charts: {}", e))?;
+        count_html(&dir.join("charts"))
+    } else {
+        0
+    };
+
+    let manifest = SnapshotManifest {
+        start_r: cfg.start_r,
+        max_t: cfg.max_t,
+        max_r: cfg.max_r,
+        theme: cfg.theme.clone(),
+        cache_hash: cfg.cache_hash.clone(),
+        pages: pages.len(),
+        charts: chart_count,
+        mutations,
+        created: now_secs(),
+    };
+    write_manifest(&dir, &manifest).map_err(|e| format!("writing manifest: {}", e))?;
+    Ok(manifest)
+}
+
+/// Restore a snapshot's charts into `output/charts` and load its solved page
+/// chain into `PageState`s. Bypasses the config hash and the chart stamp.
+fn restore_snapshot(name: &str, m: &SnapshotManifest) -> Result<Vec<PageState>, String> {
+    let dir = snapshot_dir(name);
+    let charts_snap = dir.join("charts");
+    if charts_snap.exists() {
+        std::fs::create_dir_all("output").map_err(|e| e.to_string())?;
+        clone_dir(&charts_snap, &PathBuf::from("output").join("charts"))
+            .map_err(|e| format!("restoring charts: {}", e))?;
+    }
+    let cached = ehp_core::cache::load_pages_from_dir(&dir.join("pages"), m.start_r, m.max_r)
+        .ok_or_else(|| {
+            "snapshot has no readable solved pages (cache-version mismatch — re-save it)".to_string()
+        })?;
+    Ok(cached_to_states(cached, m.max_t))
+}
+
+/// Re-exec this binary with `EHP_SNAPSHOT=<name>` so the startup restore path
+/// loads the snapshot cleanly (swapping the whole page set + charts). On unix
+/// this replaces the process image; it only returns if exec fails.
+#[cfg(unix)]
+fn reexec_with_snapshot(name: &str) {
+    use std::os::unix::process::CommandExt;
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("current_exe failed: {}", e);
+            return;
+        }
+    };
+    eprintln!("Restarting into snapshot '{}'...", name);
+    let err = std::process::Command::new(exe)
+        .env("EHP_SNAPSHOT", name)
+        .args(std::env::args().skip(1))
+        .exec();
+    eprintln!("exec failed: {}", err);
+}
+
+#[cfg(not(unix))]
+fn reexec_with_snapshot(name: &str) {
+    eprintln!(
+        "In-REPL load needs a unix exec; restart with EHP_SNAPSHOT={}.",
+        name
+    );
+}
+
+/// Print all snapshots with their config + provenance.
+fn list_snapshots() {
+    let root = snapshots_root();
+    let mut names: Vec<String> = match std::fs::read_dir(&root) {
+        Ok(rd) => rd
+            .flatten()
+            .filter(|e| e.path().join("manifest.json").exists())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    names.sort();
+    if names.is_empty() {
+        eprintln!("No snapshots. Create one with `snapshot save <name>`.");
+        return;
+    }
+    eprintln!("Snapshots ({}):", names.len());
+    for name in names {
+        match load_snapshot_manifest(&name) {
+            Ok(m) => eprintln!(
+                "  {:<20} t={} r={}..{} theme={} charts={} muts={}  [{}]",
+                name,
+                m.max_t,
+                m.start_r,
+                m.max_r,
+                m.theme,
+                m.charts,
+                m.mutations,
+                fmt_time(m.created),
+            ),
+            Err(e) => eprintln!("  {:<20} (unreadable manifest: {})", name, e),
+        }
+    }
+}
+
+/// Convert cached/restored pages into REPL `PageState`s (shared by the
+/// warm-start cache-hit path and snapshot restore). Prints per-page
+/// determined-var counts.
+fn cached_to_states(cached: Vec<ehp_core::cache::CachedPage>, max_t: i32) -> Vec<PageState> {
+    let mut pages = Vec::new();
+    for cp in cached {
+        let n_values: BTreeSet<i32> = cp
+            .page
+            .dimension
+            .iter()
+            .filter(|(_, &d)| d > 0)
+            .map(|(&t, _)| t.n)
+            .filter(|&n| n < max_t)
+            .collect();
+        let stem_values: BTreeSet<i32> = cp
+            .page
+            .dimension
+            .iter()
+            .filter(|(&t, &d)| d > 0 && t.n <= t.s + 2)
+            .map(|(&t, _)| t.s)
+            .collect();
+        let fiber_values = compute_fiber_values(&cp.page, max_t);
+        let unsat_reason = if cp.result.is_some() {
+            None
+        } else {
+            Some(format!("cached E_{} has no solve result", cp.page.r))
+        };
+        let r = cp.page.r;
+        if let Some(ref res) = cp.result {
+            eprintln!(
+                "E_{}: {}/{} vars determined (cached)",
+                r,
+                res.vars.len() - res.unknown.len(),
+                res.vars.len(),
+            );
+        }
+        pages.push(PageState {
+            page: cp.page,
+            result: cp.result,
+            known_diffs: cp.known_diffs,
+            n_values,
+            stem_values,
+            fiber_values,
+            turned: None,
+            excluded_leibniz: cp.excluded_leibniz,
+            unsat_reason,
+        });
+    }
+
+    // The cache doesn't store the turned-page chains (quotient/lift maps per
+    // tridegree), but `push_forward` needs them — without them the prior-page
+    // uncertainty overlays (faint dashed d_k edges on later pages) silently
+    // vanish from every chart rewrite in a warm-started session. Recompute
+    // them here; turning is the cheap part of startup (it's the solve and
+    // chart generation the cache exists to skip). The last page needs none
+    // (nothing is pushed past it).
+    let t0 = Instant::now();
+    let n_pages = pages.len();
+    let turned_maps: Vec<_> = pages[..n_pages.saturating_sub(1)]
+        .par_iter()
+        .map(|ps| {
+            let res = ps.result.as_ref()?;
+            ehp_core::pageturning::turn_page(&ps.page, res, ps.page.r + 1, ps.page.max_t).ok()
+        })
+        .collect();
+    for (ps, turned) in pages.iter_mut().zip(turned_maps) {
+        ps.turned = turned;
+    }
+    eprintln!(
+        "Recomputed turned-page chains in {:.2}s (prior-page uncertainty overlays)",
+        t0.elapsed().as_secs_f64(),
+    );
+    pages
+}
+
 // =============================================================================
 // Main
 // =============================================================================
@@ -97,106 +614,140 @@ struct UndoEntry {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // CLI modes (after `--`): `last` replays the most recent session's
+    // recorded env verbatim — no need to remember EHP_MAX_T etc.; `charts`
+    // just opens the last session's charts in the browser (no solve, no REPL).
+    match std::env::args().nth(1).as_deref() {
+        Some("charts") => {
+            return match last_session_charts_index() {
+                Some(p) => {
+                    let p = std::fs::canonicalize(&p).unwrap_or(p);
+                    if std::env::var("EHP_NO_OPEN").map(|v| v != "0").unwrap_or(false) {
+                        eprintln!("Charts at {} (EHP_NO_OPEN set — not opening)", p.display());
+                    } else {
+                        eprintln!("Opening {}", p.display());
+                        open::that(&p)?;
+                    }
+                    Ok(())
+                }
+                None => {
+                    Err("no charts recorded yet — start a session normally (or `-- last`) first"
+                        .into())
+                }
+            };
+        }
+        Some("last") => match apply_last_session() {
+            Ok(s) if s.is_empty() => eprintln!("Resuming last session (all defaults)"),
+            Ok(s) => eprintln!("Resuming last session: {}", s),
+            Err(e) => eprintln!("`last` unavailable: {} — continuing with current env.", e),
+        },
+        Some(other) => eprintln!(
+            "Unknown argument '{}' (expected `last` or `charts`) — ignoring.",
+            other
+        ),
+        None => {}
+    }
+
     let data_path = std::env::var("EHP_DATA").unwrap_or_else(|_| DEFAULT_DATA.to_string());
-    let max_t: i32 = std::env::var("EHP_MAX_T")
+    let mut max_t: i32 = std::env::var("EHP_MAX_T")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_MAX_T);
-    let start_r: i32 = std::env::var("EHP_R")
+    let mut start_r: i32 = std::env::var("EHP_R")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
     // Highest page to compute; stop turning after E_{max_r} (default 7).
-    let max_r: i32 = std::env::var("EHP_MAX_R")
+    // Default terminal page E5 (the user's usual working ceiling); the E-infinity
+    // fiber overlays (uncertain-diff coloring, hidden-EHP candidates) land on this
+    // max page. Override with EHP_MAX_R to turn more pages.
+    let mut max_r: i32 = std::env::var("EHP_MAX_R")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(7);
-    let theme = std::env::var("SEQSEE_THEME").unwrap_or_else(|_| "dark".into());
+        .unwrap_or(5);
+    let mut theme = std::env::var("SEQSEE_THEME").unwrap_or_else(|_| "dark".into());
+
+    // Snapshot startup (EHP_SNAPSHOT=<name>): load a named session verbatim.
+    // Its manifest OVERRIDES max_t/start_r/max_r/theme so every downstream
+    // step (CSV write, chart-stamp, config summary) is consistent with the
+    // restored state — regardless of what env this process was launched with.
+    let snapshot_name = std::env::var("EHP_SNAPSHOT").ok().filter(|s| !s.is_empty());
+    let mut snapshot_manifest: Option<SnapshotManifest> = None;
+    if let Some(name) = &snapshot_name {
+        match load_snapshot_manifest(name) {
+            Ok(m) => {
+                start_r = m.start_r;
+                max_t = m.max_t;
+                max_r = m.max_r;
+                theme = m.theme.clone();
+                snapshot_manifest = Some(m);
+            }
+            Err(e) => {
+                eprintln!(
+                    "Snapshot '{}' not loaded: {} — continuing with normal startup.",
+                    name, e
+                );
+            }
+        }
+    }
+
+    let solver_name = std::env::var("EHP_SOLVER")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "uf".into());
 
     eprintln!("EHP Chart REPL (multi-page)");
+    if let Some(name) = &snapshot_name {
+        if snapshot_manifest.is_some() {
+            eprintln!("  snapshot: {} (config from manifest)", name);
+        }
+    }
     eprintln!("  data:   {}", data_path);
     eprintln!("  start:  E_{}", start_r);
     eprintln!("  max t:  {}", max_t);
     eprintln!("  max r:  {}", max_r);
     eprintln!("  theme:  {}", theme);
+    eprintln!("  solver: {}", solver_name);
     eprintln!();
 
     // 0. Warm-start cache (EHP_CACHE=0 disables): the startup chain is a
     // deterministic function of the data + semantics flags; a hash match
     // loads pages/results and skips load+build+solve+turn entirely.
-    let cache_hash = ehp_core::cache::config_hash(&data_path, start_r, max_t, max_r);
+    // A snapshot forces its recorded hash (the pages/charts belong to it), so
+    // the chart-freshness stamp downstream matches without recomputing.
+    let cache_hash = match &snapshot_manifest {
+        Some(m) => m.cache_hash.clone(),
+        None => ehp_core::cache::config_hash(&data_path, start_r, max_t, max_r),
+    };
     let cache_mode = ehp_core::cache::cache_mode();
     let mut pages: Vec<PageState> = Vec::new();
-    if cache_mode == ehp_core::cache::CacheMode::Use {
+    let mut snapshot_loaded = false;
+
+    // Snapshot restore takes priority over the warm-start cache: load solved
+    // pages + charts by name, skipping solve/turn/regen entirely.
+    if let Some(m) = &snapshot_manifest {
+        let name = snapshot_name.as_ref().unwrap();
+        let t0 = Instant::now();
+        match restore_snapshot(name, m) {
+            Ok(states) => {
+                pages = states;
+                snapshot_loaded = true;
+                eprintln!(
+                    "Loaded snapshot '{}': {} pages, {} charts in {:.2}s — no solve, no regen.",
+                    name,
+                    pages.len(),
+                    m.charts,
+                    t0.elapsed().as_secs_f64(),
+                );
+            }
+            Err(e) => eprintln!("Snapshot restore failed: {} — falling back to cold startup", e),
+        }
+    }
+
+    if pages.is_empty() && cache_mode == ehp_core::cache::CacheMode::Use {
         if let Some(cached) = ehp_core::cache::load_startup_cache(&cache_hash, start_r, max_r) {
             let t0 = Instant::now();
-            for cp in cached {
-                let n_values: BTreeSet<i32> = cp
-                    .page
-                    .dimension
-                    .iter()
-                    .filter(|(_, &d)| d > 0)
-                    .map(|(&t, _)| t.n)
-                    .filter(|&n| n < max_t)
-                    .collect();
-                let stem_values: BTreeSet<i32> = cp
-                    .page
-                    .dimension
-                    .iter()
-                    .filter(|(&t, &d)| d > 0 && t.n <= t.s + 2)
-                    .map(|(&t, _)| t.s)
-                    .collect();
-                let unsat_reason = if cp.result.is_some() {
-                    None
-                } else {
-                    Some(format!("cached E_{} has no solve result", cp.page.r))
-                };
-                let r = cp.page.r;
-                if let Some(ref res) = cp.result {
-                    eprintln!(
-                        "E_{}: {}/{} vars determined (cached)",
-                        r,
-                        res.vars.len() - res.unknown.len(),
-                        res.vars.len(),
-                    );
-                }
-                pages.push(PageState {
-                    page: cp.page,
-                    result: cp.result,
-                    known_diffs: cp.known_diffs,
-                    n_values,
-                    stem_values,
-                    turned: None,
-                    excluded_leibniz: cp.excluded_leibniz,
-                    unsat_reason,
-                });
-            }
-
-            // The cache doesn't store the turned-page chains (quotient/lift
-            // maps per tridegree), but `push_forward` needs them — without
-            // them the prior-page uncertainty overlays (faint dashed d_k
-            // edges on later pages) silently vanish from every chart rewrite
-            // in a warm-started session. Recompute them here; turning is the
-            // cheap part of startup (it's the solve and chart generation the
-            // cache exists to skip). The last page needs none (nothing is
-            // pushed past it).
-            let t_turn = Instant::now();
-            let n_pages = pages.len();
-            let turned_maps: Vec<_> = pages[..n_pages.saturating_sub(1)]
-                .par_iter()
-                .map(|ps| {
-                    let res = ps.result.as_ref()?;
-                    ehp_core::pageturning::turn_page(&ps.page, res, ps.page.r + 1, ps.page.max_t)
-                        .ok()
-                })
-                .collect();
-            for (ps, turned) in pages.iter_mut().zip(turned_maps) {
-                ps.turned = turned;
-            }
-            eprintln!(
-                "Recomputed turned-page chains in {:.2}s (prior-page uncertainty overlays)",
-                t_turn.elapsed().as_secs_f64(),
-            );
+            pages = cached_to_states(cached, max_t);
             eprintln!(
                 "Warm-start cache HIT ({}): {} pages in {:.2}s",
                 cache_hash,
@@ -258,6 +809,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|(&t, &d)| d > 0 && t.n <= t.s + 2)
             .map(|(&t, _)| t.s)
             .collect();
+        let fiber_values = compute_fiber_values(&current_page, max_t);
 
         let has_result = result.is_some();
         let unsat_reason = if has_result {
@@ -273,6 +825,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             known_diffs,
             n_values,
             stem_values,
+            fiber_values,
             turned: None,
             excluded_leibniz: system.excluded_leibniz,
             unsat_reason,
@@ -345,6 +898,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         start_r + pages.len() as i32 - 1,
     );
 
+    // Fiber E-infinity coloring (Task 4): expose the highest page r being
+    // generated to the ehp_batch.py / jsonmaker subprocesses via an env var
+    // they inherit. jsonmaker only reads it in fiber mode on r == max page,
+    // coloring nodes involved in an UNCERTAIN Adams differential with their
+    // d_r color; sphere/stem charts ignore it. Set once here so every chart
+    // generation (initial + regen, all in this process) sees it.
+    if let Some(max_page) = pages.iter().map(|ps| ps.page.r).max() {
+        std::env::set_var("EHP_MAX_PAGE", max_page.to_string());
+    }
+
     // 3. Write CSV for each page
     let out_dir = PathBuf::from("output");
     std::fs::create_dir_all(&out_dir)?;
@@ -380,17 +943,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // applied mutation (regen_affected_charts), so post-mutation states
     // always regenerate.
     let want_mapviews = std::env::var("EHP_MAPVIEWS").map(|v| v != "0").unwrap_or(true);
+    let want_fiberviews = fiberviews_enabled();
+
+    // Capture the session config so `snapshot save` can record it without
+    // threading everything through the REPL dispatch.
+    let _ = SESSION.set(SessionCfg {
+        start_r,
+        max_t,
+        max_r,
+        theme: theme.clone(),
+        cache_hash: cache_hash.clone(),
+    });
+
     let stamp_path = charts_dir.join(".state_stamp");
     let expected_stamp = format!(
-        "{}|theme={}|mapviews={}",
-        cache_hash, theme, want_mapviews
+        "{}|theme={}|mapviews={}|fiberviews={}",
+        cache_hash, theme, want_mapviews, want_fiberviews
     );
-    let charts_fresh = from_cache
-        && std::fs::read_to_string(&stamp_path)
+    // A restored snapshot brings its own charts — never regenerate them.
+    let mut charts_fresh = snapshot_loaded
+        || (from_cache
+            && std::fs::read_to_string(&stamp_path)
+                .map(|c| c.trim() == expected_stamp)
+                .unwrap_or(false));
+    if charts_fresh {
+        if snapshot_loaded {
+            eprintln!("Snapshot charts restored — skipping regeneration.");
+        } else {
+            eprintln!("Charts on disk match this state (stamp) — skipping regeneration.");
+        }
+    }
+
+    // Charts archived alongside the warm-start cache: on a page-cache hit
+    // whose on-disk charts don't match this state (cleared by another run, or
+    // depicting a different config), clone the archived set back instead of
+    // regenerating — chart generation is the slow part of startup.
+    let cached_charts = ehp_core::cache::cache_dir(&cache_hash).join("charts");
+    if !charts_fresh && from_cache {
+        let archived_ok = std::fs::read_to_string(cached_charts.join(".state_stamp"))
             .map(|c| c.trim() == expected_stamp)
             .unwrap_or(false);
-    if charts_fresh {
-        eprintln!("Charts on disk match this state (stamp) — skipping regeneration.");
+        if archived_ok {
+            let t0 = Instant::now();
+            match clone_dir(&cached_charts, &charts_dir) {
+                Ok(()) => {
+                    charts_fresh = true;
+                    eprintln!(
+                        "Restored {} archived charts from the warm-start cache in {:.2}s — skipping regeneration.",
+                        count_html(&charts_dir),
+                        t0.elapsed().as_secs_f64(),
+                    );
+                }
+                Err(e) => eprintln!("Chart restore from cache failed ({}) — regenerating.", e),
+            }
+        }
     }
 
     // Remove chart artifacts from previous runs. Files are keyed only by
@@ -432,6 +1038,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !charts_fresh {
     let mut all_chart_files: Vec<(i32, i32, PathBuf)> = Vec::new(); // (r, n, path)
     let mut all_stem_files: Vec<(i32, i32)> = Vec::new(); // (r, k)
+    let mut all_fiber_files: Vec<(i32, i32)> = Vec::new(); // (r, n)
     for (i, ps) in pages.iter().enumerate() {
         let r = ps.page.r;
         eprintln!("Generating E_{} charts...", r);
@@ -453,13 +1060,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             r,
         );
 
+        let ok_fibers = generate_fiber_charts(
+            &ps.fiber_values,
+            &csv_paths[i],
+            &charts_dir,
+            &seqsee_dir,
+            &theme,
+            r,
+        );
+
         // Inject minimap data (E/H/P maps per sphere)
         let map_count = inject_map_info(&charts_dir, &ps.page, &ps.n_values, r);
         eprintln!(
-            "  {} sphere charts ({} with map info), {} stem charts",
+            "  {} sphere charts ({} with map info), {} stem charts, {} fiber charts",
             chart_files.len(),
             map_count,
             ok_stems.len(),
+            ok_fibers.len(),
         );
         let failed = ps.n_values.len().saturating_sub(chart_files.len());
         if failed > 0 {
@@ -475,13 +1092,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for k in ok_stems {
             all_stem_files.push((r, k));
         }
+        for n in ok_fibers {
+            all_fiber_files.push((r, n));
+        }
     }
 
-    // Stem chart scripts (WASD nav + class dims), then data overlays for
-    // everything (diff edges + class dims need the injected markers).
-    inject_stem_scripts(&charts_dir);
-    for i in 0..pages.len() {
-        fast_update_diffs(&charts_dir, &pages, i);
+    // Stem/fiber chart scripts (WASD nav + class dims), then data overlays
+    // for everything (diff edges + class dims need the injected markers).
+    print_chart_timing("startup generation");
+    timed_phase("inject stem scripts", || inject_stem_scripts(&charts_dir));
+    timed_phase("inject fiber scripts", || inject_fiber_scripts(&charts_dir));
+    timed_phase("inject diff/class overlays", || {
+        for i in 0..pages.len() {
+            fast_update_diffs(&charts_dir, &pages, i);
+        }
+    });
+    if want_fiberviews {
+        eprintln!(
+            "Generated {} fiber-sequence charts (EHP_FIBERVIEWS=0 to skip)",
+            all_fiber_files.len(),
+        );
     }
 
     // Pre-generate the split-screen map views (J-map style) so the e/h/p
@@ -513,6 +1143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             mv_total,
             t_mv.elapsed().as_secs_f64(),
         );
+        print_chart_timing("startup mapviews");
     }
 
     if all_chart_files.is_empty() {
@@ -521,19 +1152,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Generate combined index page
-    generate_index_html(&charts_dir, &all_chart_files, &all_stem_files, start_r, max_t, &theme, &pages)?;
+    generate_index_html(&charts_dir, &all_chart_files, &all_stem_files, &all_fiber_files, start_r, max_t, &theme, &pages)?;
 
     // Stamp the charts as depicting exactly this startup state.
     let _ = std::fs::write(&stamp_path, &expected_stamp);
     } // end !charts_fresh (generate)
 
-    // 6. Open browser
-    let index_path = charts_dir.join("index.html");
-    eprintln!("\nOpening {}", index_path.display());
-    if let Err(e) = open::that(&index_path) {
-        eprintln!("Could not open browser: {}", e);
-        eprintln!("Open {} in your browser", index_path.display());
+    // Archive the startup charts alongside the warm-start cache so future
+    // startups with this config restore them instead of regenerating (even
+    // after other runs clear output/charts). APFS clone: instant, ~0 extra
+    // bytes. Skipped for snapshots (their charts live in snapshots/<name>).
+    // The archive is startup-state only — mutations delete the on-disk stamp,
+    // and only stamped chart sets are ever archived or restored.
+    if !snapshot_loaded && cache_mode == ehp_core::cache::CacheMode::Use {
+        let cache_root = ehp_core::cache::cache_dir(&cache_hash);
+        let archived_ok = std::fs::read_to_string(cached_charts.join(".state_stamp"))
+            .map(|c| c.trim() == expected_stamp)
+            .unwrap_or(false);
+        if cache_root.exists()
+            && !archived_ok
+            && std::fs::read_to_string(&stamp_path)
+                .map(|c| c.trim() == expected_stamp)
+                .unwrap_or(false)
+        {
+            match clone_dir(&charts_dir, &cached_charts) {
+                Ok(()) => eprintln!(
+                    "Charts archived to {} — its index.html opens directly, no REPL needed.",
+                    cached_charts.display(),
+                ),
+                Err(e) => eprintln!("Chart archive failed: {}", e),
+            }
+        }
     }
+
+    // Right-click view-jump menu in every chart (sphere/stem/fiber).
+    // Unconditional: idempotent (marker refresh), and restored/stamp-fresh
+    // charts generated by an older binary need the script added too.
+    timed_phase("inject view menu", || inject_view_menu(&charts_dir));
+
+    // Same for the fiber script: on the charts-fresh skip path the archived
+    // charts may carry an older-generation script (no hidden-value overlay /
+    // Shift+V) — the injector's upgrade path replaces it in place.
+    timed_phase("inject fiber scripts (refresh)", || inject_fiber_scripts(&charts_dir));
+
+    // Hidden EHP map values (EXPERIMENTAL, EHP_HIDDEN=0 disables): load the
+    // persisted assertions, re-run Toda propagation against the terminal
+    // page, and inject the fiber-chart overlay. Runs on every startup path
+    // (cold, warm cache, snapshot) — snapshot chart HTML may carry stale
+    // overlay data, and this overwrites it.
+    let mut hidden = hidden_startup(&pages, &data_path, &charts_dir);
+
+    // 6. Open browser (EHP_NO_OPEN=1 skips — for scripted/headless runs)
+    let index_path = charts_dir.join("index.html");
+    if std::env::var("EHP_NO_OPEN").map(|v| v != "0").unwrap_or(false) {
+        eprintln!("\nCharts at {} (EHP_NO_OPEN set — not opening)", index_path.display());
+    } else {
+        eprintln!("\nOpening {}", index_path.display());
+        if let Err(e) = open::that(&index_path) {
+            eprintln!("Could not open browser: {}", e);
+            eprintln!("Open {} in your browser", index_path.display());
+        }
+    }
+
+    // Record this session so `-- last` / `-- charts` (the `ehp` launcher) can
+    // reopen it without anyone remembering the env. Written only after a
+    // fully successful startup.
+    record_last_session(&cache_hash);
 
     // 7. Enter REPL
     eprintln!();
@@ -542,7 +1226,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("          interpage [r], propagate on|off");
     eprintln!("          mapview <E|H|P> <source_n> [r]  |  mapview all [r]");
     eprintln!("          why <r> <n> <s> <f> (why is this differential un/determined?)");
-    eprintln!("          undo [r n s f row col], list, status, regen [r [n]], save <path>, quit");
+    eprintln!("          undo [r n s f row col], list, status, regen [r [n]], save <path>, outside [retry|status], quit");
+    eprintln!("          hidden <E|H|P> <n> <s> <f> <idx> <tn> <ts> <tf> <tidx>  (assert a hidden map value on the");
+    eprintln!("          terminal page; idx accepts sums like 0+2; Toda P(a∘E²b)=P(a)∘b propagates it)");
+    eprintln!("          hidden list | hidden remove <same args> | hidden undo  (EHP_HIDDEN=0 disables)");
     eprintln!("Tip: click two nodes in a chart to copy an `add` command; shift-click extra");
     eprintln!("     targets first for a sum. ';'-separated commands solve as one batch.");
     eprintln!("Chart keys: Shift+M maps minimap | e/h/p open map view | Shift+E/H/P highlight map image");
@@ -571,6 +1258,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &theme,
             &mut prop_log,
             &mut auto_prop,
+            &mut hidden,
         );
         if quit {
             break;
@@ -579,6 +1267,325 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+// =============================================================================
+// Hidden EHP map values (EXPERIMENTAL — Toda composition propagation)
+// -----------------------------------------------------------------------------
+// A pure overlay on the terminal page (see ehp_core::hidden for the module
+// contract): user-asserted hidden E/H/P values propagate through Toda's
+// P(a∘E²b) = P(a)∘b over the page's composition products (nonzero products
+// only), are persisted to <data_dir>/hidden_EHP.csv (asserted rows only;
+// deliberately NOT part of the warm-start cache hash — it cannot affect the
+// solve), and are drawn as dotted overlay edges in the fiber charts.
+// EHP_HIDDEN=0 disables everything. Nothing here touches solver / cascade /
+// snapshot state; snapshots need no changes (the CSV lives outside output/
+// and startup re-injects over any stale snapshot chart HTML).
+// =============================================================================
+
+/// All hidden-value session state, bound to the TERMINAL page (`pages.last()`).
+struct HiddenState {
+    store: hidden::HiddenStore,
+    csv_path: PathBuf,
+}
+
+/// Startup: load persisted assertions, re-propagate against the terminal
+/// page (deduced values are never persisted — recomputing them here is what
+/// makes the CSV robust to basis drift), and inject the fiber-chart overlay.
+fn hidden_startup(pages: &[PageState], data_path: &str, charts_dir: &Path) -> HiddenState {
+    let mut state = HiddenState {
+        store: hidden::HiddenStore::new(),
+        csv_path: hidden::hidden_csv_path(data_path),
+    };
+    if !hidden::hidden_enabled() {
+        return state;
+    }
+    let Some(ps) = pages.last() else { return state };
+    let csv_path = state.csv_path.clone();
+    for w in state.store.load_csv(&csv_path, &ps.page, ps.page.r) {
+        eprintln!("  {}", w);
+    }
+    let (_, rule_warnings) = state.store.propagate(&ps.page);
+    for w in &rule_warnings {
+        eprintln!("  note: {}", w);
+    }
+    let asserted = state.store.asserted().count();
+    if asserted > 0 || !state.store.quarantined.is_empty() {
+        eprintln!(
+            "Hidden EHP values: {} asserted loaded from {}, {} deduced by Toda propagation, {} quarantined.",
+            asserted,
+            csv_path.display(),
+            state.store.deduced().count(),
+            state.store.quarantined.len(),
+        );
+    }
+    inject_hidden_data(charts_dir, pages, &state);
+    state
+}
+
+/// After any differential mutation's cascade: the terminal page basis may
+/// have changed, so re-validate every assertion (quarantining what no longer
+/// parses) and re-deduce, then refresh the chart overlay. The CSV is
+/// deliberately NOT rewritten here — quarantined rows persist on disk and
+/// are re-admitted when the page state recovers (e.g. after the diff is
+/// undone).
+fn hidden_after_mutation(pages: &[PageState], hidden: &mut HiddenState, charts_dir: &Path) {
+    if !hidden::hidden_enabled() || hidden.store.is_empty() {
+        return;
+    }
+    let Some(ps) = pages.last() else { return };
+    for w in hidden.store.rebuild(&ps.page, ps.page.r) {
+        eprintln!("  {}", w);
+    }
+    inject_hidden_data(charts_dir, pages, hidden);
+}
+
+/// Fiber-chart base sphere N whose chart shows a hidden value of `kind` from
+/// source sphere `n` (source and target spheres are both in
+/// `triple_spheres(N)`).
+fn hidden_fiber_base(kind: MapKind, src_n: i32) -> Option<i32> {
+    match kind {
+        MapKind::E => Some(src_n),                               // S^N → S^{N+1}
+        MapKind::H => Some(src_n - 1),                           // S^{N+1} → S^{2N+1}
+        MapKind::P => (src_n % 2 == 1).then(|| (src_n - 1) / 2), // S^{2N+1} → S^N
+        MapKind::Lh0 => None,
+    }
+}
+
+/// Deduced hidden values → prop-log JSON entries. `"hidden": true` makes the
+/// log panel print the label instead of a d_r line.
+fn hidden_to_json(pages: &[PageState], values: &[hidden::HiddenValue]) -> Vec<serde_json::Value> {
+    let Some(ps) = pages.last() else { return Vec::new() };
+    let r = ps.page.r;
+    values
+        .iter()
+        .filter_map(|v| {
+            let (sd, td) = (v.source.degree, v.target.degree);
+            let (src_dim, tgt_dim) = (ps.page.dim_at(sd), ps.page.dim_at(td));
+            if src_dim == 0 || tgt_dim == 0 {
+                return None;
+            }
+            let src_i = ehp_core::gf2::vec_support(&v.source.vec).next()?;
+            let tgt_i = ehp_core::gf2::vec_support(&v.target.vec).next()?;
+            let chart = hidden_fiber_base(v.kind, sd.n)
+                .filter(|b| ps.fiber_values.contains(b))
+                .map(|b| serde_json::json!(format!("fiber{}_E{}.html", b, r)))
+                .unwrap_or(serde_json::Value::Null);
+            Some(serde_json::json!({
+                "hidden": true,
+                "kind": v.kind.name(),
+                "delta": v.delta(),
+                "label": v.to_string(),
+                "srcId": seqsee::gen_name(sd.n, sd.s, sd.f, src_i, src_dim),
+                "tgtId": seqsee::gen_name(td.n, td.s, td.f, tgt_i, tgt_dim),
+                "chart": chart,
+            }))
+        })
+        .collect()
+}
+
+/// Inject (or refresh) the hidden-value overlay data between
+/// `/*HIDDENDATA*/…/*ENDHIDDENDATA*/` markers in the terminal page's fiber
+/// charts. Every chart gets its (possibly empty) entry list, so stale
+/// overlays clear. Entries carry node-id lists for every summand; the JS
+/// draws one dotted line per (src, tgt) support pair. Returns charts updated.
+fn inject_hidden_data(charts_dir: &Path, pages: &[PageState], hidden: &HiddenState) -> usize {
+    if !hidden::hidden_enabled() {
+        return 0;
+    }
+    let Some(ps) = pages.last() else { return 0 };
+    let r = ps.page.r;
+    let mut by_base: HashMap<i32, Vec<serde_json::Value>> = HashMap::new();
+    let mut undrawn = 0usize;
+    for v in hidden.store.iter() {
+        let (sd, td) = (v.source.degree, v.target.degree);
+        let (src_dim, tgt_dim) = (ps.page.dim_at(sd), ps.page.dim_at(td));
+        let base = hidden_fiber_base(v.kind, sd.n).filter(|b| ps.fiber_values.contains(b));
+        let (Some(base), true) = (base, src_dim > 0 && tgt_dim > 0) else {
+            undrawn += 1;
+            continue;
+        };
+        let ids = |deg: Tridegree, vec: &fp::vector::FpVector, dim: usize| -> Vec<String> {
+            ehp_core::gf2::vec_support(vec)
+                .map(|i| seqsee::gen_name(deg.n, deg.s, deg.f, i, dim))
+                .collect()
+        };
+        by_base.entry(base).or_default().push(serde_json::json!({
+            "kind": v.kind.name(),
+            "delta": v.delta(),
+            "asserted": v.is_asserted(),
+            "label": v.to_string(),
+            "src": ids(sd, &v.source.vec, src_dim),
+            "tgt": ids(td, &v.target.vec, tgt_dim),
+        }));
+    }
+    let mut updated = 0;
+    for &base in &ps.fiber_values {
+        let data =
+            serde_json::Value::Array(by_base.remove(&base).unwrap_or_default()).to_string();
+        let path = charts_dir.join(format!("fiber{}_E{}.html", base, r));
+        let Ok(html) = std::fs::read_to_string(&path) else { continue };
+        if let Some(new_html) = replace_marker(&html, "/*HIDDENDATA*/", "/*ENDHIDDENDATA*/", &data)
+        {
+            if std::fs::write(&path, new_html).is_ok() {
+                updated += 1;
+            }
+        }
+    }
+    if undrawn > 0 {
+        eprintln!(
+            "  note: {} hidden values fall outside every generated fiber chart (still listed by `hidden list`).",
+            undrawn,
+        );
+    }
+    updated
+}
+
+/// Shared tail of `hidden undo` / `hidden remove`: rebuild the deductions
+/// from the remaining assertions, rewrite the CSV, drop the stale hidden
+/// prop-log entries, refresh charts.
+fn finish_hidden_removal(
+    pages: &[PageState],
+    hidden: &mut HiddenState,
+    charts_dir: &Path,
+    prop_log: &mut HashMap<String, serde_json::Value>,
+) {
+    let Some(ps) = pages.last() else { return };
+    for w in hidden.store.rebuild(&ps.page, ps.page.r) {
+        eprintln!("  {}", w);
+    }
+    if let Err(e) = hidden.store.save_csv(&hidden.csv_path, ps.page.r) {
+        eprintln!("  WARNING: could not write {}: {}", hidden.csv_path.display(), e);
+    }
+    prop_log.retain(|k, _| !k.starts_with("hidden "));
+    inject_propagation(charts_dir, pages, prop_log);
+    inject_hidden_data(charts_dir, pages, hidden);
+    eprintln!(
+        "  Remaining: {} asserted, {} deduced. Refresh browser.",
+        hidden.store.asserted().count(),
+        hidden.store.deduced().count(),
+    );
+}
+
+/// The `hidden` REPL command family:
+/// `hidden <E|H|P> <n> <s> <f> <idx> <tn> <ts> <tf> <tidx>` (idx accepts
+/// `+`-joined sums like `0+2`), `hidden list`, `hidden remove <same args>`,
+/// `hidden undo`.
+fn hidden_cmd(
+    parts: &[&str],
+    pages: &[PageState],
+    hidden: &mut HiddenState,
+    charts_dir: &Path,
+    prop_log: &mut HashMap<String, serde_json::Value>,
+) {
+    if !hidden::hidden_enabled() {
+        eprintln!("Hidden values are disabled (EHP_HIDDEN=0).");
+        return;
+    }
+    let Some(ps) = pages.last() else { return };
+    let page = &ps.page;
+    let r = page.r;
+    match parts.get(1).copied() {
+        Some("list") => {
+            eprintln!("Hidden EHP values (terminal page E_{}):", r);
+            let mut any = false;
+            for v in hidden.store.asserted() {
+                eprintln!("  [asserted]    {}", v);
+                any = true;
+            }
+            for v in hidden.store.deduced() {
+                eprintln!("  [deduced]     {}", v);
+                any = true;
+            }
+            for q in &hidden.store.quarantined {
+                eprintln!("  [quarantined] {}({}) = {} — {}", q.kind, q.source, q.target, q.reason);
+                any = true;
+            }
+            if !any {
+                eprintln!("  (none — assert one with `hidden P <n> <s> <f> <idx> <tn> <ts> <tf> <tidx>`)");
+            }
+        }
+        Some("undo") => match hidden.store.pop_asserted() {
+            Some(v) => {
+                eprintln!("Removed hidden {}", v);
+                finish_hidden_removal(pages, hidden, charts_dir, prop_log);
+            }
+            None => eprintln!("No asserted hidden values to undo."),
+        },
+        Some("remove") => {
+            let (kind, source, target) = match hidden::parse_hidden_args(page, &parts[2..]) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("hidden remove: {}", e);
+                    return;
+                }
+            };
+            if hidden.store.remove_asserted(kind, &source.to_string(), &target.to_string()) {
+                eprintln!("Removed hidden {}({}) = {}", kind, source, target);
+                finish_hidden_removal(pages, hidden, charts_dir, prop_log);
+            } else {
+                eprintln!(
+                    "Not an asserted hidden value (deduced ones can't be removed directly — \
+                     remove the assertion they came from)."
+                );
+            }
+        }
+        _ => {
+            let (kind, source, target) = match hidden::parse_hidden_args(page, &parts[1..]) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("hidden: {}", e);
+                    return;
+                }
+            };
+            match hidden.store.assert_value(page, kind, source.clone(), target.clone()) {
+                Ok(true) => {}
+                Ok(false) => {
+                    eprintln!("Already recorded.");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("hidden: {}", e);
+                    return;
+                }
+            }
+            let nominal = kind.target_degree(source.degree);
+            eprintln!(
+                "Recorded hidden {}({}) = {} (δ={} above the nominal target {}).",
+                kind,
+                source,
+                target,
+                target.degree.f - nominal.f,
+                nominal,
+            );
+            let (deduced, warnings) = hidden.store.propagate(page);
+            for w in &warnings {
+                eprintln!("  note: {}", w);
+            }
+            for v in &deduced {
+                eprintln!("  deduced: {}", v);
+            }
+            if deduced.is_empty() {
+                eprintln!("  No new values deduced (no all-nonzero composition partners found).");
+            }
+            if let Err(e) = hidden.store.save_csv(&hidden.csv_path, r) {
+                eprintln!("  WARNING: could not write {}: {}", hidden.csv_path.display(), e);
+            } else {
+                eprintln!("  Persisted to {}.", hidden.csv_path.display());
+            }
+            let cmd_key = format!("hidden {}", parts[1..].join(" "));
+            let entries = hidden_to_json(pages, &deduced);
+            prop_log.insert(cmd_key, serde_json::Value::Array(entries));
+            inject_propagation(charts_dir, pages, prop_log);
+            let updated = inject_hidden_data(charts_dir, pages, hidden);
+            if updated > 0 {
+                eprintln!(
+                    "  Updated {} fiber charts. Refresh browser to see the overlay.",
+                    updated,
+                );
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -739,11 +1746,70 @@ fn mat_eq(a: &fp::matrix::Matrix, b: &fp::matrix::Matrix) -> bool {
 /// Full content comparison of two pages: dimensions, exclusions, products,
 /// and maps. Used to decide whether a cascade rebuild actually changed
 /// anything a later page depends on.
-fn page_content_equal(a: &SATPage, b: &SATPage) -> bool {
-    if a.dimension != b.dimension
-        || a.exclude_set != b.exclude_set
-        || a.target_only_exclude != b.target_only_exclude
-    {
+/// Describe up to `limit` structural differences between two pages (for the
+/// cascade-patch verifier's mismatch report). `a` = patched, `b` = full.
+fn page_structural_diff(a: &SATPage, b: &SATPage, limit: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for (&t, &d) in &b.dimension {
+        if a.dim_at(t) != d {
+            out.push(format!("dim({},{},{}) patched {} vs full {}", t.n, t.s, t.f, a.dim_at(t), d));
+        }
+    }
+    for (&t, &d) in &a.dimension {
+        if b.dimension.get(&t).copied().unwrap_or(0) != d {
+            out.push(format!("dim({},{},{}) patched {} vs full {}", t.n, t.s, t.f, d, b.dim_at(t)));
+        }
+    }
+    for (&(d1, d2), pb) in b.products.iter_blocks() {
+        match a.products.block(d1, d2) {
+            Some(pa) if pa == pb => {}
+            Some(_) => out.push(format!("product block ({},{},{})x({},{},{}) differs", d1.n, d1.s, d1.f, d2.n, d2.s, d2.f)),
+            None => out.push(format!("product block ({},{},{})x({},{},{}) missing in patched", d1.n, d1.s, d1.f, d2.n, d2.s, d2.f)),
+        }
+        if out.len() >= limit {
+            return out;
+        }
+    }
+    for (&(d1, d2), _) in a.products.iter_blocks() {
+        if b.products.block(d1, d2).is_none() {
+            out.push(format!("product block ({},{},{})x({},{},{}) extra in patched", d1.n, d1.s, d1.f, d2.n, d2.s, d2.f));
+        }
+        if out.len() >= limit {
+            return out;
+        }
+    }
+    for kind in MapKind::all_with_lh0() {
+        let (Some(ma), Some(mb)) = (a.maps.get(&kind), b.maps.get(&kind)) else { continue };
+        for (t, mat_b) in &mb.matrices {
+            match ma.matrices.get(t) {
+                Some(mat_a) if mat_a.as_ref() == mat_b.as_ref() => {}
+                Some(_) => out.push(format!("{} map at ({},{},{}) differs", kind, t.n, t.s, t.f)),
+                None => out.push(format!("{} map at ({},{},{}) missing in patched", kind, t.n, t.s, t.f)),
+            }
+            if out.len() >= limit {
+                return out;
+            }
+        }
+        for t in ma.matrices.keys() {
+            if !mb.matrices.contains_key(t) {
+                out.push(format!("{} map at ({},{},{}) extra in patched", kind, t.n, t.s, t.f));
+            }
+            if out.len() >= limit {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// Structural page content only — dimensions, products, maps — WITHOUT the
+/// exclusion sets (the cascade compares those separately via the
+/// symmetric-difference it already computes). The distinction matters: the
+/// next page's structural content is a pure function of (this page's
+/// structural content, the turned data), so when neither changed the rebuild
+/// is skippable and only the exclusion sets need recomputing.
+fn page_structural_equal(a: &SATPage, b: &SATPage) -> bool {
+    if a.dimension != b.dimension {
         return false;
     }
     if a.products.num_blocks() != b.products.num_blocks() {
@@ -785,6 +1851,24 @@ fn determined_map(res: &SATResult) -> HashMap<DiffVar, bool> {
         .collect()
 }
 
+/// EHP_CASCADE_PATCH != "0" (default ON): rebuild cascade pages incrementally
+/// — recompute only the induced maps/products/dims touching the tridegrees
+/// whose induction inputs changed — instead of re-inducing the whole page
+/// (the dominant cascade cost at scale). `EHP_CASCADE_PATCH=0` restores the
+/// full rebuild everywhere.
+fn cascade_patch_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("EHP_CASCADE_PATCH").map_or(true, |v| v != "0"))
+}
+
+/// EHP_CASCADE_VERIFY == "1": run BOTH the incremental patch and the full
+/// rebuild on every cascade step and cross-check them structurally
+/// (expensive — for validating the patch path on a real workload).
+fn cascade_verify() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("EHP_CASCADE_VERIFY").map_or(false, |v| v == "1"))
+}
+
 /// Cascade re-solve: re-solve page at `start_idx`, then incrementally re-turn
 /// and re-solve subsequent pages. Stops early if no differential matrices
 /// change — unless `force` is set (an explicit `interpage` run), in which
@@ -803,6 +1887,13 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
     // (dims, exclusions, products, maps) at all. Product/map changes don't
     // show up in diff-value comparison but still propagate downstream.
     let mut prev_content_changed = false;
+    // Degrees where the current page's structural content (dims/products/
+    // maps — NOT exclusions) changed when it was last rebuilt/patched — the
+    // extra dirty set for patching the NEXT page (content changes here alter
+    // its induction inputs at exactly these degrees). `None` = unknown delta
+    // (a full rebuild that changed things): the next page must be fully
+    // rebuilt too.
+    let mut content_dirty: Option<HashSet<Tridegree>> = Some(HashSet::new());
     for i in start_idx..pages.len() {
         let r = pages[i].page.r;
 
@@ -830,21 +1921,58 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
             eprintln!("  E_{}: INCONSISTENT", r);
         }
 
-        // Collect newly determined (or value-changed) differentials.
+        // Collect newly determined (or value-changed) differentials, and
+        // track every DETERMINATION-STATUS change (unknown ↔ determined,
+        // value flips). A var going unknown → determined-ZERO changes no
+        // turning-effective matrix (unknown already turns as 0), but it DOES
+        // change the next page's exclusion set and this page's uncertainty
+        // display — so it must keep the cascade alive and regenerate the
+        // charts whose baked nulldif/exclusion dashes it invalidates.
+        let mut determination_changed = false;
+        let mut det_changed_degs: HashSet<Tridegree> = HashSet::new();
         if let Some(ref new_res) = result {
             let old_det = old_result
                 .as_ref()
                 .map(determined_map)
                 .unwrap_or_default();
+            let mark = |var: &DiffVar, det_degs: &mut HashSet<Tridegree>| {
+                let src = Tridegree::new(var.n, var.s, var.f);
+                det_degs.insert(src);
+                det_degs.insert(src.diff_target(r));
+            };
             for (vi, var) in new_res.vars.iter().enumerate() {
                 if new_res.unknown.contains(&vi) {
+                    if old_det.contains_key(var) {
+                        // Lost determination (e.g. after an undo): its dashes
+                        // must come back.
+                        determination_changed = true;
+                        mark(var, &mut det_changed_degs);
+                    }
                     continue;
                 }
                 let val = new_res.offset.entry(vi) != 0;
                 if old_det.get(var) != Some(&val) {
                     deduced.push(DeducedDiff { r, var: *var, value: val });
+                    determination_changed = true;
+                    mark(var, &mut det_changed_degs);
                 }
             }
+            // Vars that vanished from the system entirely.
+            for var in old_det.keys() {
+                if !new_res.var_index.contains_key(var) {
+                    determination_changed = true;
+                    mark(var, &mut det_changed_degs);
+                }
+            }
+        }
+        // Refresh this page's charts where determination changed: the
+        // generation-time dashed (nulldif / excluded-degree) lines only clear
+        // on a real regen with a fresh CSV — the DIFFDATA overlay alone
+        // leaves the baked dashes behind. Expanded across the stable fold so
+        // copy-sphere charts refresh with their rep.
+        if !det_changed_degs.is_empty() {
+            let folded = expand_stable_fold(&pages[i].page, det_changed_degs);
+            affected_degrees.entry(r).or_default().extend(folded);
         }
 
         // TODO(unsat-quarantine): before reporting INCONSISTENT as ground
@@ -878,8 +2006,11 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
         // page whose products/maps differ must keep cascading.
         let mut changed = changed_diff_tridegrees(old_result.as_ref(), new_res);
         changed.extend(carry.drain());
-        if changed.is_empty() && !prev_content_changed && !force {
-            eprintln!("  E_{}: nothing changed (values, dims, products, maps) — cascade stops", r);
+        if changed.is_empty() && !prev_content_changed && !determination_changed && !force {
+            eprintln!(
+                "  E_{}: nothing changed (values, dims, products, maps, determination) — cascade stops",
+                r,
+            );
             break;
         }
 
@@ -910,11 +2041,17 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
         let new_res = curr.result.as_ref().unwrap();
 
         // Get or initialize turned data
+        let mut turned_fresh = false;
         if curr.turned.is_none() {
             // Fallback: full turn (shouldn't happen normally, startup initializes it)
             let new_max_t = curr.page.max_t.map(|t| t - 1);
             match pageturning::turn_page(&curr.page, new_res, r + 1, new_max_t) {
-                Ok(t) => curr.turned = Some(t),
+                Ok(t) => {
+                    curr.turned = Some(t);
+                    // The delta vs whatever the next page was built from is
+                    // unknown — incremental patching is off the table.
+                    turned_fresh = true;
+                }
                 Err(e) => {
                     eprintln!("  E_{}: CONTRADICTION while turning: {} — consider `undo`", r, e);
                     return CascadeOutcome { deduced, affected_degrees };
@@ -945,8 +2082,103 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
             }
         }
 
-        // Rebuild next page from the full (patched) turned HashMap
-        let mut next_page = pageturning::build_page_from_turned(&curr.page, turned);
+        // Dirty set for incremental patching of the next page: the degrees
+        // whose turned data was just re-computed (`affected`) plus the
+        // degrees where THIS page's structural content changed when it was
+        // itself rebuilt/patched (they alter the induction inputs). `None`
+        // means fall back to the full rebuild.
+        let patch_dirty: Option<HashSet<Tridegree>> =
+            if force || !cascade_patch_enabled() || turned_fresh {
+                None
+            } else {
+                content_dirty.take().map(|mut cd| {
+                    cd.extend(affected.iter().copied());
+                    cd
+                })
+            };
+
+        // FAST PATH: empty dirty set — the next page's structural content is
+        // byte-identical, so skip the rebuild entirely; only the exclusion
+        // sets (a function of which entries are UNKNOWN, not of the
+        // turning-effective values) can differ.
+        if patch_dirty.as_ref().is_some_and(|d| d.is_empty()) && !cascade_verify() {
+            let (next_exclude, next_target_only) =
+                pageturning::make_next_exclude_set(&curr.page, new_res);
+            let excl_changed: Vec<Tridegree> = next_exclude
+                .symmetric_difference(&next_ps.page.exclude_set)
+                .copied()
+                .collect();
+            let excl_any = !excl_changed.is_empty()
+                || next_target_only != next_ps.page.target_only_exclude;
+            if !excl_changed.is_empty() {
+                let e = affected_degrees.entry(r + 1).or_default();
+                for t in excl_changed {
+                    e.insert(t);
+                    e.insert(t.diff_target(r + 1));
+                }
+            }
+            next_ps.page.exclude_set = next_exclude;
+            next_ps.page.target_only_exclude = next_target_only;
+            eprintln!(
+                "  E_{}: structurally unchanged — skipped page rebuild ({})",
+                r + 1,
+                if excl_any { "exclusions updated" } else { "exclusions unchanged" },
+            );
+            carry.clear();
+            prev_content_changed = excl_any;
+            content_dirty = Some(HashSet::new());
+            continue;
+        }
+
+        // Rebuild the next page: incrementally patch a cheap Arc-sharing
+        // clone of the old one (only maps/products/dims touching the dirty
+        // degrees are recomputed), or fall back to the full rebuild.
+        // EHP_CASCADE_VERIFY=1 runs both and cross-checks.
+        let mut patch_result: Option<pageturning::PatchOutcome> = None;
+        let mut next_page = if let Some(dirty) = &patch_dirty {
+            let t_patch = Instant::now();
+            let mut np = next_ps.page.overlay_clone();
+            let po = pageturning::patch_page_from_turned(&curr.page, turned, dirty, &mut np);
+            if timing_enabled() {
+                eprintln!(
+                    "  [timing] E_{} cascade patch: {:.2}s ({} dirty → {} changed)",
+                    r + 1,
+                    t_patch.elapsed().as_secs_f64(),
+                    dirty.len(),
+                    po.changed.len(),
+                );
+            }
+            let mut use_patch = true;
+            if cascade_verify() {
+                let full = pageturning::build_page_from_turned(&curr.page, turned);
+                if page_structural_equal(&np, &full) {
+                    eprintln!(
+                        "  E_{}: cascade patch verified against full rebuild ({} dirty → {} changed)",
+                        r + 1,
+                        dirty.len(),
+                        po.changed.len(),
+                    );
+                } else {
+                    eprintln!(
+                        "  E_{}: CASCADE-PATCH MISMATCH vs full rebuild ({} dirty) — using the \
+                         full rebuild; please report (EHP_CASCADE_PATCH=0 disables patching)",
+                        r + 1,
+                        dirty.len(),
+                    );
+                    for line in page_structural_diff(&np, &full, 8) {
+                        eprintln!("    {}", line);
+                    }
+                    np = full;
+                    use_patch = false;
+                }
+            }
+            if use_patch {
+                patch_result = Some(po);
+            }
+            np
+        } else {
+            pageturning::build_page_from_turned(&curr.page, turned)
+        };
 
         // GUARDRAIL (stable-fold invariant): every past-stable degree must
         // share its rep's dimension. A violation means the incremental
@@ -980,6 +2212,7 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
                 Ok(full) => {
                     *turned = full;
                     next_page = pageturning::build_page_from_turned(&curr.page, turned);
+                    patch_result = None;
                     let still = stable_fold_violations(&next_page);
                     if !still.is_empty() {
                         eprintln!(
@@ -1005,6 +2238,28 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
         // un-excluded so constraints there become active.
         let (next_exclude, next_target_only) =
             pageturning::make_next_exclude_set(&curr.page, new_res);
+        // Exclusion-status changes alter the chart display on their own: an
+        // excluded degree's uncertainty is drawn as dashes to ALL potential
+        // targets (seqsee exclusion fallback) even when no variable exists
+        // there — so an un-excluded (or newly excluded) degree needs its
+        // charts regenerated with a fresh CSV, exactly like a dimension
+        // change.
+        let excl_any = {
+            let excl_changed: Vec<Tridegree> = next_exclude
+                .symmetric_difference(&next_ps.page.exclude_set)
+                .copied()
+                .collect();
+            let any = !excl_changed.is_empty()
+                || next_target_only != next_ps.page.target_only_exclude;
+            if !excl_changed.is_empty() {
+                let e = affected_degrees.entry(r + 1).or_default();
+                for t in excl_changed {
+                    e.insert(t);
+                    e.insert(t.diff_target(r + 1));
+                }
+            }
+            any
+        };
         next_page.exclude_set = next_exclude;
         next_page.target_only_exclude = next_target_only;
         let next_n_values: BTreeSet<i32> = next_page
@@ -1017,17 +2272,25 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
         // homology at those degrees, at the sources mapping into them, and at
         // their targets must be re-turned on the next iteration.
         let r_next = r + 1;
-        let mut dims_changed: HashSet<Tridegree> = HashSet::new();
-        for (&t, &d) in &next_page.dimension {
-            if next_ps.page.dim_at(t) != d {
-                dims_changed.insert(t);
+        let dims_changed: HashSet<Tridegree> = match &patch_result {
+            // The patch touched ONLY its dirty degrees, so its dims-changed
+            // record is complete — no page-wide scan needed.
+            Some(po) => po.dims_changed.iter().copied().collect(),
+            None => {
+                let mut dims_changed: HashSet<Tridegree> = HashSet::new();
+                for (&t, &d) in &next_page.dimension {
+                    if next_ps.page.dim_at(t) != d {
+                        dims_changed.insert(t);
+                    }
+                }
+                for (&t, &d) in &next_ps.page.dimension {
+                    if next_page.dim_at(t) != d {
+                        dims_changed.insert(t);
+                    }
+                }
+                dims_changed
             }
-        }
-        for (&t, &d) in &next_ps.page.dimension {
-            if next_page.dim_at(t) != d {
-                dims_changed.insert(t);
-            }
-        }
+        };
         carry = dims_changed
             .iter()
             .flat_map(|&t| [t, t.diff_source(r_next)])
@@ -1045,7 +2308,21 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
                 dims_changed.len(),
             );
         }
-        prev_content_changed = !page_content_equal(&next_ps.page, &next_page);
+        // Flags + the dirty set for the NEXT page's patch. On the patch path
+        // the outcome's changed set is exact; a full rebuild has an unknown
+        // delta unless the structural compare says nothing changed.
+        let structural_changed;
+        (structural_changed, content_dirty) = match patch_result {
+            Some(po) => (!po.changed.is_empty(), Some(po.changed)),
+            None => {
+                if page_structural_equal(&next_ps.page, &next_page) {
+                    (false, Some(HashSet::new()))
+                } else {
+                    (true, None)
+                }
+            }
+        };
+        prev_content_changed = structural_changed || excl_any;
 
         next_ps.stem_values = next_page
             .dimension
@@ -1053,6 +2330,7 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
             .filter(|(&t, &d)| d > 0 && t.n <= t.s + 2)
             .map(|(&t, _)| t.s)
             .collect();
+        next_ps.fiber_values = compute_fiber_values(&next_page, i32::MAX);
         next_ps.page = next_page;
         next_ps.n_values = next_n_values;
     }
@@ -1070,6 +2348,7 @@ fn process_stdin_cmd(
     theme: &str,
     prop_log: &mut HashMap<String, serde_json::Value>,
     auto_prop: &mut bool,
+    hidden: &mut HiddenState,
 ) -> bool {
     let line = line.trim();
     if line.is_empty() {
@@ -1092,7 +2371,7 @@ fn process_stdin_cmd(
         if all_mutations {
             process_multi_mutation(
                 &segs, pages, undo_stack, csv_paths, charts_dir, seqsee_dir, theme, prop_log,
-                *auto_prop,
+                *auto_prop, hidden,
             );
             return false;
         }
@@ -1264,6 +2543,10 @@ fn process_stdin_cmd(
             if total_updated > 0 {
                 eprintln!("  Updated {} charts. Refresh browser to see changes.", total_updated);
             }
+
+            // The cascade may have changed the terminal page's basis — hidden
+            // values re-validate + re-deduce against the new state.
+            hidden_after_mutation(pages, hidden, charts_dir);
         }
 
         "undo" => {
@@ -1359,9 +2642,16 @@ fn process_stdin_cmd(
                 if total_updated > 0 {
                     eprintln!("  Updated {} charts. Refresh browser to see changes.", total_updated);
                 }
+
+                // Undoing a diff can restore quarantined hidden assertions.
+                hidden_after_mutation(pages, hidden, charts_dir);
             } else {
                 eprintln!("Nothing to undo.");
             }
+        }
+
+        "hidden" => {
+            hidden_cmd(&parts, pages, hidden, charts_dir, prop_log);
         }
 
         "list" => {
@@ -1517,7 +2807,18 @@ fn process_stdin_cmd(
                                 theme,
                                 r,
                             );
+                            let _ = generate_fiber_charts(
+                                &pages[idx].fiber_values,
+                                &csv_paths[idx],
+                                charts_dir,
+                                seqsee_dir,
+                                theme,
+                                r,
+                            );
                             inject_stem_scripts(charts_dir);
+                            inject_fiber_scripts(charts_dir);
+                            inject_view_menu(charts_dir);
+                            inject_hidden_data(charts_dir, pages, hidden);
                             fast_update_diffs(charts_dir, pages, idx);
                             inject_map_info(charts_dir, &pages[idx].page, &pages[idx].n_values, r);
                             eprintln!("Regenerated all E_{} charts (incl. stems). Reload browser.", r);
@@ -1554,15 +2855,27 @@ fn process_stdin_cmd(
                             theme,
                             r,
                         );
+                        let _ = generate_fiber_charts(
+                            &pages[i].fiber_values,
+                            &csv_paths[i],
+                            charts_dir,
+                            seqsee_dir,
+                            theme,
+                            r,
+                        );
                         inject_map_info(charts_dir, &pages[i].page, &pages[i].n_values, r);
                     }
                     inject_stem_scripts(charts_dir);
+                    inject_fiber_scripts(charts_dir);
+                    inject_view_menu(charts_dir);
+                    inject_hidden_data(charts_dir, pages, hidden);
                     for i in 0..pages.len() {
                         fast_update_diffs(charts_dir, pages, i);
                     }
                     eprintln!("Regenerated all charts (incl. stems). Reload browser.");
                 }
             }
+            print_chart_timing("regen command");
         }
 
         "save" => {
@@ -1574,6 +2887,227 @@ fn process_stdin_cmd(
             match save_all_known_diffs(pages, path) {
                 Ok(total) => eprintln!("Saved {} diffs to {}", total, path),
                 Err(e) => eprintln!("Save failed: {}", e),
+            }
+        }
+
+        "outside" => {
+            // outside [retry]  — re-attempt loading outside-diff rows that
+            //   were pruned at startup ("degree excluded (partial-quotient
+            //   basis)" etc.): uncertainties resolved since then (mutations,
+            //   `interpage try`) may have made their degrees trustworthy.
+            //   Newly admissible rows are applied like add/zero (undo entry
+            //   each, one cascade per pass) and the scan repeats until a pass
+            //   applies nothing — each cascade can un-exclude more degrees
+            //   downstream, admitting further rows.
+            // outside status — dry run: report what would load, change nothing.
+            let sub = parts.get(1).copied().unwrap_or("retry");
+            if sub != "retry" && sub != "status" {
+                eprintln!("Usage: outside [retry|status]");
+                return false;
+            }
+            let dry = sub == "status";
+            let dir = match std::env::var("EHP_OUTSIDE_DIFFS") {
+                Ok(d) if !d.is_empty() => d,
+                _ => {
+                    eprintln!("EHP_OUTSIDE_DIFFS is not set — no outside rows to retry.");
+                    return false;
+                }
+            };
+
+            let mut pass = 0usize;
+            let mut total_applied = 0usize;
+            loop {
+                pass += 1;
+                let mut admissible: Vec<(usize, DiffVar, bool)> = Vec::new();
+                let mut conflicts: Vec<(i32, DiffVar, bool, bool)> = Vec::new();
+                let mut still_pruned = 0usize;
+                let mut already = 0usize;
+                for idx in 0..pages.len() {
+                    let r = pages[idx].page.r;
+                    let mut rows = match ehp_server::load_outside_diffs(r, &dir) {
+                        Ok(rows) => rows,
+                        Err(e) => {
+                            eprintln!("  E_{}: outside load failed: {}", r, e);
+                            continue;
+                        }
+                    };
+                    // Prune against the CURRENT page state — this is the
+                    // whole point: exclusions may have cleared since startup.
+                    still_pruned +=
+                        ehp_core::constraints::prune_outside_diffs(&pages[idx].page, &mut rows)
+                            .len();
+                    for (dv, val) in rows {
+                        match pages[idx].known_diffs.get(&dv) {
+                            Some(_) => already += 1, // enforced (or user-overridden): keep as is
+                            None => {
+                                // A solver-determined opposite value would make the
+                                // cascade UNSAT — surface it instead of applying.
+                                let determined_opposite =
+                                    pages[idx].result.as_ref().and_then(|res| {
+                                        res.var_index.get(&dv).and_then(|&vi| {
+                                            (!res.unknown.contains(&vi))
+                                                .then(|| res.offset.entry(vi) != 0)
+                                        })
+                                    });
+                                match determined_opposite {
+                                    Some(v) if v != val => conflicts.push((r, dv, val, v)),
+                                    _ => admissible.push((idx, dv, val)),
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for (r, dv, want, have) in &conflicts {
+                    eprintln!(
+                        "  CONFLICT: outside d_{}({},{},{})[{},{}] = {} but the solver determined {} — not applied",
+                        r, dv.n, dv.s, dv.f, dv.row, dv.col, *want as u8, *have as u8,
+                    );
+                }
+
+                if dry {
+                    eprintln!(
+                        "outside status: {} rows would load now, {} still pruned, {} already enforced/overridden, {} conflict(s).",
+                        admissible.len(),
+                        still_pruned,
+                        already,
+                        conflicts.len(),
+                    );
+                    if !admissible.is_empty() {
+                        eprintln!("  Run `outside retry` to apply (each row gets an undo entry).");
+                    }
+                    return false;
+                }
+                if admissible.is_empty() {
+                    if pass == 1 {
+                        eprintln!(
+                            "No newly admissible outside rows ({} still pruned, {} already enforced).",
+                            still_pruned, already,
+                        );
+                    } else {
+                        eprintln!(
+                            "[pass {}] nothing further — {} row(s) applied in total ({} still pruned).",
+                            pass, total_applied, still_pruned,
+                        );
+                    }
+                    break;
+                }
+
+                eprintln!(
+                    "[pass {}] {} outside row(s) now admissible — applying + cascading...",
+                    pass,
+                    admissible.len(),
+                );
+                let first_idx = admissible.iter().map(|(i, _, _)| *i).min().unwrap();
+                let mut sources: Vec<(i32, DiffVar)> = Vec::new();
+                for &(idx, dv, val) in &admissible {
+                    let r = pages[idx].page.r;
+                    pages[idx].known_diffs.insert(dv, val);
+                    undo_stack.push(UndoEntry { r, var: dv, prev: None });
+                    sources.push((r, dv));
+                    eprintln!(
+                        "  d_{}({},{},{})[{},{}] = {}",
+                        r, dv.n, dv.s, dv.f, dv.row, dv.col, val as u8,
+                    );
+                }
+                total_applied += admissible.len();
+
+                let outcome = cascade_resolve(pages, first_idx, false);
+                if let Some(ps) = pages.iter().find(|p| {
+                    p.result.is_none()
+                        && p.unsat_reason.as_deref().is_some_and(|m| m.contains("INCONSISTENT"))
+                }) {
+                    eprintln!(
+                        "  WARNING: E_{} is now INCONSISTENT — an applied outside row contradicts \
+                         the current state. `undo` reverts the most recent application(s).",
+                        ps.page.r,
+                    );
+                }
+                regen_affected_charts(
+                    pages, &outcome.affected_degrees, csv_paths, charts_dir, seqsee_dir, theme,
+                );
+                let entries = deduced_to_json(pages, &outcome.deduced, &sources);
+                if !entries.is_empty() {
+                    eprintln!(
+                        "  {} differential(s) deduced — click the log entry in a chart to browse them",
+                        entries.len(),
+                    );
+                }
+                prop_log.insert(
+                    format!("outside retry (pass {})", pass),
+                    serde_json::Value::Array(entries),
+                );
+                inject_propagation(charts_dir, pages, prop_log);
+                let mut total_updated = 0;
+                for i in first_idx..pages.len() {
+                    total_updated += fast_update_diffs(charts_dir, pages, i);
+                }
+                if total_updated > 0 {
+                    eprintln!("  Updated {} charts.", total_updated);
+                }
+
+                if pass >= 10 {
+                    eprintln!("  Stopping after 10 passes (still converging?) — rerun `outside retry`.");
+                    break;
+                }
+            }
+            hidden_after_mutation(pages, hidden, charts_dir);
+        }
+
+        "snapshot" | "snap" => {
+            // snapshot save <name> [force] | snapshot list | snapshot load <name>
+            let sub = parts.get(1).copied().unwrap_or("");
+            match sub {
+                "save" => {
+                    let Some(name) = parts.get(2) else {
+                        eprintln!("Usage: snapshot save <name> [force]");
+                        return false;
+                    };
+                    let force = parts.get(3).map(|s| *s == "force").unwrap_or(false);
+                    // Mutation count = undo entries applied this session.
+                    match save_snapshot(name, pages, undo_stack.len(), force) {
+                        Ok(m) => {
+                            eprintln!(
+                                "Saved snapshot '{}' (clone, ~0 extra bytes): {} pages, {} charts, {} mutations.",
+                                name, m.pages, m.charts, m.mutations
+                            );
+                            // Point last-session recall (`ehp` / `-- last`) at
+                            // this snapshot: a plain resume reopens the saved
+                            // state, mutations included, not the startup state.
+                            std::env::set_var("EHP_SNAPSHOT", name);
+                            record_last_session(&m.cache_hash);
+                            eprintln!(
+                                "  Reload later with:  EHP_SNAPSHOT={} cargo run -p ehp-server --release --example ehp_chart",
+                                name
+                            );
+                            eprintln!("  or in-REPL:  snapshot load {}", name);
+                        }
+                        Err(e) => eprintln!("snapshot save failed: {}", e),
+                    }
+                }
+                "list" | "ls" => list_snapshots(),
+                "load" => {
+                    let Some(name) = parts.get(2) else {
+                        eprintln!("Usage: snapshot load <name>");
+                        return false;
+                    };
+                    if !snapshot_dir(name).join("manifest.json").exists() {
+                        eprintln!("No snapshot '{}' (see `snapshot list`).", name);
+                        return false;
+                    }
+                    // Loading swaps the entire page set + charts, so re-exec
+                    // this binary with EHP_SNAPSHOT set — a clean restart that
+                    // reuses the startup restore path (no solve, no regen).
+                    reexec_with_snapshot(name);
+                    // reexec_with_snapshot only returns if exec failed:
+                    eprintln!(
+                        "Could not re-exec. Restart manually:  EHP_SNAPSHOT={} cargo run -p ehp-server --release --example ehp_chart",
+                        name
+                    );
+                }
+                _ => {
+                    eprintln!("Usage: snapshot save <name> [force] | snapshot list | snapshot load <name>");
+                }
             }
         }
 
@@ -1720,6 +3254,7 @@ fn process_stdin_cmd(
                     pages, undo_stack, csv_paths, charts_dir, seqsee_dir, theme, prop_log,
                     min_stem, max_stem,
                 );
+                hidden_after_mutation(pages, hidden, charts_dir);
                 return false;
             }
 
@@ -1781,6 +3316,7 @@ fn process_stdin_cmd(
                     );
                 }
             }
+            hidden_after_mutation(pages, hidden, charts_dir);
             eprintln!("Charts updated — refresh browser.");
         }
 
@@ -1943,7 +3479,11 @@ fn process_stdin_cmd(
             eprintln!("          interpage [r], interpage try [min_stem [max_stem]], propagate on|off");
             eprintln!("          mapview <E|H|P> <source_n> [r]  |  mapview all [r]");
             eprintln!("          why <r> <n> <s> <f> (explain a differential's status)");
-            eprintln!("          undo [r n s f row col], list, status, regen [r [n]], save <path>, quit");
+            eprintln!("          undo [r n s f row col], list, status, regen [r [n]], save <path>, outside [retry|status], quit");
+    eprintln!("          hidden <E|H|P> <n> <s> <f> <idx> <tn> <ts> <tf> <tidx>  (assert a hidden map value on the");
+    eprintln!("          terminal page; idx accepts sums like 0+2; Toda P(a∘E²b)=P(a)∘b propagates it)");
+    eprintln!("          hidden list | hidden remove <same args> | hidden undo  (EHP_HIDDEN=0 disables)");
+            eprintln!("          snapshot save <name> [force] | snapshot list | snapshot load <name>");
         }
     }
 
@@ -2088,6 +3628,7 @@ fn process_multi_mutation(
     theme: &str,
     prop_log: &mut HashMap<String, serde_json::Value>,
     auto_prop: bool,
+    hidden: &mut HiddenState,
 ) {
     // Parse and validate everything before mutating anything.
     struct Mutation {
@@ -2245,6 +3786,10 @@ fn process_multi_mutation(
     if total_updated > 0 {
         eprintln!("  Updated {} charts. Refresh browser to see changes.", total_updated);
     }
+
+    // The cascade may have changed the terminal page's basis — hidden values
+    // re-validate + re-deduce against the new state.
+    hidden_after_mutation(pages, hidden, charts_dir);
 }
 
 /// Check whether a differential entry can be asserted on this page.
@@ -2776,8 +4321,8 @@ fn regen_affected_charts(
     // The charts no longer depict the cached startup state: drop the
     // freshness stamp so the next warm start regenerates.
     let _ = std::fs::remove_file(charts_dir.join(".state_stamp"));
-    // Collect (page idx, spheres, stems) worth regenerating.
-    let mut plan: Vec<(usize, BTreeSet<i32>, BTreeSet<i32>)> = Vec::new();
+    // Collect (page idx, spheres, stems, fibers) worth regenerating.
+    let mut plan: Vec<(usize, BTreeSet<i32>, BTreeSet<i32>, BTreeSet<i32>)> = Vec::new();
     let mut total = 0usize;
     for (&r, degrees) in affected {
         let Some(idx) = page_index(pages, r) else { continue };
@@ -2793,11 +4338,29 @@ fn regen_affected_charts(
             .map(|t| t.s)
             .filter(|k| ps.stem_values.contains(k))
             .collect();
-        if spheres.is_empty() && stems.is_empty() {
+        // A degree on sphere m appears on fiber charts with base N = m,
+        // N = m - 1 (via S^{N+1}) or N = (m-1)/2 (via S^{2N+1}).
+        let fibers: BTreeSet<i32> = if fiberviews_enabled() {
+            degrees
+                .iter()
+                .flat_map(|t| {
+                    let m = t.n;
+                    let mut bases = vec![m, m - 1];
+                    if m >= 5 && m % 2 == 1 {
+                        bases.push((m - 1) / 2);
+                    }
+                    bases
+                })
+                .filter(|n| ps.fiber_values.contains(n))
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        if spheres.is_empty() && stems.is_empty() && fibers.is_empty() {
             continue;
         }
-        total += spheres.len() + stems.len();
-        plan.push((idx, spheres, stems));
+        total += spheres.len() + stems.len() + fibers.len();
+        plan.push((idx, spheres, stems, fibers));
     }
     if plan.is_empty() {
         return 0;
@@ -2809,50 +4372,74 @@ fn regen_affected_charts(
             total,
         );
     }
-    plan.sort_by_key(|(idx, _, _)| *idx);
+    plan.sort_by_key(|(idx, _, _, _)| *idx);
 
     let t0 = Instant::now();
-    let mut regenerated = 0usize;
-    let mut any_stems = false;
-    for (idx, spheres, stems) in &plan {
-        let ps = &pages[*idx];
-        let r = ps.page.r;
-        // Fresh CSV first: the SeqSee pipeline reads it.
-        match std::fs::File::create(&csv_paths[*idx]) {
-            Ok(mut file) => {
-                if let Err(e) = seqsee::write_ehp_csv(&ps.page, ps.result.as_ref(), &ps.known_diffs, &mut file) {
-                    eprintln!("  E_{}: CSV write error: {} — skipping chart regen", r, e);
-                    continue;
+    // The plan entries are one-per-page and fully independent (own CSV, own
+    // chart files) — run them in parallel. Serially, 4 pages × 3 chart modes
+    // meant 12 back-to-back batch invocations, and with small affected sets
+    // most chunks pay the per-process CSV parse; page-level parallelism
+    // overlaps them.
+    let results: Vec<(usize, bool, bool)> = plan
+        .par_iter()
+        .map(|(idx, spheres, stems, fibers)| {
+            let ps = &pages[*idx];
+            let r = ps.page.r;
+            // Fresh CSV first: the SeqSee pipeline reads it.
+            match std::fs::File::create(&csv_paths[*idx]) {
+                Ok(mut file) => {
+                    if let Err(e) = seqsee::write_ehp_csv(
+                        &ps.page, ps.result.as_ref(), &ps.known_diffs, &mut file,
+                    ) {
+                        eprintln!("  E_{}: CSV write error: {} — skipping chart regen", r, e);
+                        return (0, false, false);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  E_{}: CSV create error: {} — skipping chart regen", r, e);
+                    return (0, false, false);
                 }
             }
-            Err(e) => {
-                eprintln!("  E_{}: CSV create error: {} — skipping chart regen", r, e);
-                continue;
+            let mut regenerated = 0usize;
+            match generate_all_charts(spheres, &csv_paths[*idx], charts_dir, seqsee_dir, theme, r)
+            {
+                Ok(files) => regenerated += files.len(),
+                Err(e) => eprintln!("  E_{}: chart regen error: {}", r, e),
             }
-        }
-        match generate_all_charts(spheres, &csv_paths[*idx], charts_dir, seqsee_dir, theme, r) {
-            Ok(files) => regenerated += files.len(),
-            Err(e) => eprintln!("  E_{}: chart regen error: {}", r, e),
-        }
-        if !stems.is_empty() {
-            let ok =
-                generate_stem_charts(stems, &csv_paths[*idx], charts_dir, seqsee_dir, theme, r);
-            regenerated += ok.len();
-            any_stems = true;
-        }
-        // Fresh charts need their map-minimap data back.
-        inject_map_info(charts_dir, &ps.page, &ps.n_values, r);
-    }
+            if !stems.is_empty() {
+                let ok =
+                    generate_stem_charts(stems, &csv_paths[*idx], charts_dir, seqsee_dir, theme, r);
+                regenerated += ok.len();
+            }
+            if !fibers.is_empty() {
+                let ok = generate_fiber_charts(
+                    fibers, &csv_paths[*idx], charts_dir, seqsee_dir, theme, r,
+                );
+                regenerated += ok.len();
+            }
+            // Fresh charts need their map-minimap data back.
+            inject_map_info(charts_dir, &ps.page, &ps.n_values, r);
+            (regenerated, !stems.is_empty(), !fibers.is_empty())
+        })
+        .collect();
+    let regenerated: usize = results.iter().map(|(n, _, _)| n).sum();
+    let any_stems = results.iter().any(|&(_, s, _)| s);
+    let any_fibers = results.iter().any(|&(_, _, f)| f);
     if any_stems {
         inject_stem_scripts(charts_dir);
     }
+    if any_fibers {
+        inject_fiber_scripts(charts_dir);
+    }
+    inject_view_menu(charts_dir);
     if regenerated > 0 {
         let desc: Vec<String> = plan
             .iter()
-            .map(|(idx, spheres, stems)| {
+            .map(|(idx, spheres, stems, fibers)| {
                 let r = pages[*idx].page.r;
                 let mut parts: Vec<String> = spheres.iter().map(|n| format!("S{}", n)).collect();
                 parts.extend(stems.iter().map(|k| format!("stem{}", k)));
+                parts.extend(fibers.iter().map(|n| format!("fiber{}", n)));
                 format!("E_{}: {}", r, parts.join(" "))
             })
             .collect();
@@ -2863,6 +4450,7 @@ fn regen_affected_charts(
             desc.join("; "),
         );
     }
+    print_chart_timing("mutation regen");
     regenerated
 }
 
@@ -2893,7 +4481,74 @@ fn batch_cmd(seqsee_dir: &Path) -> std::process::Command {
     cmd
 }
 
+/// EHP_TIMING set (any non-empty value): print chart-generation timing
+/// breakdowns (per-phase aggregates from the batch scripts' TIMESUM lines,
+/// plus injection-pass stopwatches). Propagates to the python children,
+/// which then also emit per-item TIME lines. Diagnostic-only: no effect on
+/// any generated file.
+fn timing_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("EHP_TIMING").map_or(false, |v| !v.is_empty() && v != "0"))
+}
+
+/// Per-mode chart-generation timing aggregate: (items, jsonmaker s,
+/// render s, output bytes). Summed across all parallel batch chunks since
+/// the last [`print_chart_timing`]; the per-chunk times are CPU-side
+/// (chunks run concurrently, so their sum exceeds wall time).
+type ChartTimingMap = HashMap<String, (usize, f64, f64, u64)>;
+static CHART_TIMING: OnceLock<std::sync::Mutex<ChartTimingMap>> = OnceLock::new();
+
+fn note_chart_timing(mode: &str, items: usize, json_s: f64, render_s: f64, bytes: u64) {
+    let m = CHART_TIMING.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut m = m.lock().unwrap();
+    let e = m.entry(mode.to_string()).or_insert((0, 0.0, 0.0, 0));
+    e.0 += items;
+    e.1 += json_s;
+    e.2 += render_s;
+    e.3 += bytes;
+}
+
+/// Print (and reset) the accumulated chart-generation timing, when
+/// EHP_TIMING is set. `context` labels the phase (startup, regen, ...).
+fn print_chart_timing(context: &str) {
+    let Some(m) = CHART_TIMING.get() else { return };
+    let mut m = m.lock().unwrap();
+    if m.is_empty() {
+        return;
+    }
+    if timing_enabled() {
+        let mut modes: Vec<_> = m.iter().collect();
+        modes.sort_by(|a, b| a.0.cmp(b.0));
+        for (mode, (items, json_s, render_s, bytes)) in modes {
+            eprintln!(
+                "  [timing] {} {}: {} charts, jsonmaker {:.1}s + render {:.1}s (cpu-side sums), \
+                 {:.1} MB written",
+                context,
+                mode,
+                items,
+                json_s,
+                render_s,
+                *bytes as f64 / 1e6,
+            );
+        }
+    }
+    m.clear();
+}
+
+/// Run `f`, printing its wall time under EHP_TIMING.
+fn timed_phase<T>(label: &str, f: impl FnOnce() -> T) -> T {
+    if !timing_enabled() {
+        return f();
+    }
+    let t0 = Instant::now();
+    let out = f();
+    eprintln!("  [timing] {}: {:.2}s", label, t0.elapsed().as_secs_f64());
+    out
+}
+
 /// Parse the batch script's per-item report lines, returning the OK ids.
+/// `TIMESUM` lines (one per chunk) feed the EHP_TIMING aggregate; unknown
+/// prefixes are ignored.
 fn parse_batch_report(stdout: &[u8], what: &str, r: i32) -> Vec<i32> {
     let mut oks = Vec::new();
     for line in String::from_utf8_lossy(stdout).lines() {
@@ -2906,6 +4561,28 @@ fn parse_batch_report(stdout: &[u8], what: &str, r: i32) -> Vec<i32> {
             let n = it.next().unwrap_or("?");
             let reason = it.next().unwrap_or("unknown error");
             eprintln!("  {}{} E_{}: FAILED ({})", what, n, r, reason);
+        } else if let Some(rest) = line.strip_prefix("TIMESUM ") {
+            // "TIMESUM <mode> items=<k> json=<s> render=<s> bytes=<n>"
+            let mut mode = "";
+            let (mut items, mut json_s, mut render_s, mut bytes) = (0usize, 0f64, 0f64, 0u64);
+            for (i, tok) in rest.split_whitespace().enumerate() {
+                if i == 0 {
+                    mode = tok;
+                } else if let Some(v) = tok.strip_prefix("items=") {
+                    items = v.parse().unwrap_or(0);
+                } else if let Some(v) = tok.strip_prefix("json=") {
+                    json_s = v.parse().unwrap_or(0.0);
+                } else if let Some(v) = tok.strip_prefix("render=") {
+                    render_s = v.parse().unwrap_or(0.0);
+                } else if let Some(v) = tok.strip_prefix("bytes=") {
+                    bytes = v.parse().unwrap_or(0);
+                }
+            }
+            if !mode.is_empty() {
+                note_chart_timing(mode, items, json_s, render_s, bytes);
+            }
+        } else if timing_enabled() && line.starts_with("TIME ") {
+            eprintln!("  [timing] {}", line);
         }
     }
     oks
@@ -2919,7 +4596,7 @@ fn run_batch_chunk(
     charts_dir: &Path,
     theme: &str,
     r: i32,
-    mode: &str, // "sphere" | "stem"
+    mode: &str, // "sphere" | "stem" | "fiber"
     values: &[i32],
 ) -> Vec<i32> {
     let mut cmd = batch_cmd(seqsee_dir);
@@ -2939,7 +4616,13 @@ fn run_batch_chunk(
             return Vec::new();
         }
     };
-    let what = if mode == "sphere" { "S^" } else { "stem " };
+    let what = if mode == "sphere" {
+        "S^"
+    } else if mode == "fiber" {
+        "fiber "
+    } else {
+        "stem "
+    };
     parse_batch_report(&out.stdout, what, r)
 }
 
@@ -3052,6 +4735,31 @@ fn generate_stem_charts(
     }
     let stems: Vec<i32> = stem_values.iter().copied().collect();
     generate_charts_batch("stem", &stems, &csv_abs, charts_dir, seqsee_dir, theme, r)
+}
+
+/// Generate fiber-sequence charts (one per base sphere N, showing the triple
+/// S^N → ΩS^{N+1} → ΩS^{2N+1}; see fiber_spec.md). Returns the base spheres
+/// generated successfully. EHP_FIBERVIEWS=0 disables.
+fn generate_fiber_charts(
+    fiber_values: &BTreeSet<i32>,
+    csv_path: &Path,
+    charts_dir: &Path,
+    seqsee_dir: &Path,
+    theme: &str,
+    r: i32,
+) -> Vec<i32> {
+    if !fiberviews_enabled() {
+        return Vec::new();
+    }
+    let Ok(csv_abs) = std::fs::canonicalize(csv_path) else {
+        return Vec::new();
+    };
+    if !seqsee_dir.join("ehp_batch.py").exists() {
+        eprintln!("  fiber charts need ehp_batch.py in the SeqSee dir — skipping");
+        return Vec::new();
+    }
+    let ns: Vec<i32> = fiber_values.iter().copied().collect();
+    generate_charts_batch("fiber", &ns, &csv_abs, charts_dir, seqsee_dir, theme, r)
 }
 
 /// Parse `stem{k}_E{r}.html` into (r, k).
@@ -3309,15 +5017,633 @@ fn inject_stem_scripts(charts_dir: &Path) {
       fresh.addEventListener('click', () => {{
         const n = window.prompt('Open sphere view — sphere number:');
         if (n !== null && n.trim() !== '' && !isNaN(parseInt(n))) {{
+          sessionStorage.removeItem('seqsee_viewport'); // cross-view jump
           location.href = 'S' + parseInt(n) + '_E{r}.html';
         }}
       }});
+    }}
+    // "EHP" button: jump to the fiber-sequence view (a stem chart spans many
+    // spheres, so prompt for the base sphere).
+    const ctr = document.getElementById('controls-container');
+    if (ctr) {{
+      const ehpBtn = document.createElement('button');
+      ehpBtn.className = 'control-button';
+      ehpBtn.textContent = 'EHP';
+      ehpBtn.title = 'Open EHP fiber-sequence view';
+      ehpBtn.addEventListener('click', () => {{
+        const n = window.prompt('Open EHP fiber view — base sphere n:');
+        if (n !== null && n.trim() !== '' && !isNaN(parseInt(n))) {{
+          sessionStorage.removeItem('seqsee_viewport'); // cross-view jump
+          location.href = 'fiber' + parseInt(n) + '_E{r}.html';
+        }}
+      }});
+      ctr.appendChild(ehpBtn);
     }}
   }}
   if (document.readyState === 'loading') {{
     window.addEventListener('DOMContentLoaded', initStem);
   }} else {{
     initStem();
+  }}
+}})();
+</script>
+</body>"#,
+        );
+        let new_html = html.replace("</body>", &script);
+        let _ = std::fs::write(&path, new_html);
+    }
+}
+
+/// Parse `fiber{n}_E{r}.html` into (r, n).
+fn parse_fiber_filename(name: &str) -> Option<(i32, i32)> {
+    let stem = name.strip_prefix("fiber")?.strip_suffix(".html")?;
+    let (n, r) = stem.split_once("_E")?;
+    Some((r.parse().ok()?, n.parse().ok()?))
+}
+
+/// Inject (or refresh) the fiber-chart script in every fiber chart on disk:
+/// WASD navigation between fiber charts (unified convention: w/s = base
+/// sphere ∓/+, a/d = page ∓/+), the live CLASSDIMS overlay, and
+/// click-to-highlight of a class with its outgoing (shift: also incoming)
+/// fiber-sequence edges. Fiber charts are read-only — no add-differential
+/// flow. Scans the charts dir so navigation reflects exactly the files that
+/// exist.
+fn inject_fiber_scripts(charts_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(charts_dir) else { return };
+    let fiber_files: Vec<(i32, i32)> = entries
+        .flatten()
+        .filter_map(|e| parse_fiber_filename(&e.file_name().to_string_lossy()))
+        .collect();
+    let have: HashSet<(i32, i32)> = fiber_files.iter().copied().collect();
+    for &(r, n) in &fiber_files {
+        let path = charts_dir.join(format!("fiber{}_E{}.html", n, r));
+        let Ok(html) = std::fs::read_to_string(&path) else { continue };
+
+        let nb = |nn: i32, rr: i32| -> serde_json::Value {
+            if have.contains(&(rr, nn)) {
+                serde_json::json!(format!("fiber{}_E{}.html", nn, rr))
+            } else {
+                serde_json::Value::Null
+            }
+        };
+        // Unified WASD convention: w/s (up/down) = base sphere -/+, a/d
+        // (left/right) = page -/+.
+        let nav = serde_json::json!({
+            "up": nb(n - 1, r),
+            "down": nb(n + 1, r),
+            "left": nb(n, r - 1),
+            "right": nb(n, r + 1),
+        });
+
+        if html.contains("/*FIBERNAV*/") && html.contains("/*HIDDENDATA*/") {
+            // Current-generation script: refresh the NAV data in place (the
+            // HIDDENDATA payload is refreshed separately by
+            // `inject_hidden_data`).
+            let (sm, em) = ("/*FIBERNAV*/", "/*ENDFIBERNAV*/");
+            if let (Some(s), Some(e)) = (html.find(sm), html.find(em)) {
+                let so = s + sm.len();
+                let new_html = format!("{}{}{}", &html[..so], nav, &html[e..]);
+                let _ = std::fs::write(&path, new_html);
+            }
+            continue;
+        }
+
+        let hidden_js = FIBER_HIDDEN_JS;
+        let script = format!(
+            r#"<script>
+(function() {{
+  const NAV = /*FIBERNAV*/{nav}/*ENDFIBERNAV*/;
+  const CLASS_DIMS = /*CLASSDIMS*/null/*ENDCLASSDIMS*/;
+  const HIDDEN_EDGES = /*HIDDENDATA*/[]/*ENDHIDDENDATA*/;
+  window.EHP_CLASS_DIMS = CLASS_DIMS;
+
+  // The template restores `seqsee_viewport` from sessionStorage on every
+  // load; saving here before WASD navigation keeps the pan/zoom fixed while
+  // stepping base spheres/pages.
+  function saveViewport() {{
+    try {{
+      if (window.panZoom) {{
+        const p = window.panZoom.getPan();
+        sessionStorage.setItem('seqsee_viewport',
+          JSON.stringify({{ x: p.x, y: p.y, zoom: window.panZoom.getZoom() }}));
+      }}
+    }} catch (err) {{}}
+  }}
+
+  window.addEventListener('keydown', (e) => {{
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === 'Escape') {{ if (hiddenMode) exitHiddenMode(); clearFocus(); return; }}
+    if (e.key === 'V' && e.shiftKey) {{
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      toggleHiddenMode();
+      return;
+    }}
+    const dir = {{w: 'up', s: 'down', a: 'left', d: 'right'}}[e.key.toLowerCase()];
+    if (!dir) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    const url = NAV[dir];
+    if (url) {{ saveViewport(); location.href = url; }}
+  }}, true);
+
+  function parseNodeId(id) {{
+    const m = (id || '').match(/^S(-?\d+)_(-?\d+)_(-?\d+)(?:_(\d+))?$/);
+    if (!m) return null;
+    return {{ n: parseInt(m[1]), s: parseInt(m[2]), f: parseInt(m[3]),
+             idx: m[4] !== undefined ? parseInt(m[4]) : 0 }};
+  }}
+
+  function applyClassDims() {{
+    if (!CLASS_DIMS) return;
+    const dead = new Set();
+    document.querySelectorAll('#nodes-group circle, #nodes-group rect').forEach(el => {{
+      const p = parseNodeId(el.id);
+      if (!p) return;
+      const key = p.n + '_' + p.s + '_' + p.f;
+      const dim = (key in CLASS_DIMS) ? CLASS_DIMS[key] : 0;
+      const isDead = p.idx >= dim;
+      el.style.opacity = isDead ? '0.15' : '';
+      if (isDead) dead.add(el.id);
+    }});
+    document.querySelectorAll('#edges-group [data-source]').forEach(el => {{
+      const s = el.getAttribute('data-source');
+      const t = el.getAttribute('data-target');
+      el.style.opacity = (dead.has(s) || (t && dead.has(t))) ? '0.1' : '';
+    }});
+  }}
+{hidden_js}
+  // ==========================================================================
+  // Click-to-highlight: click a class to focus it, its outgoing E/H/P edges
+  // (data-source == id) and their targets; shift-click also includes incoming
+  // edges (data-target == id) and their sources. Everything else fades.
+  // Click empty space or Escape clears.
+  // ==========================================================================
+  let focusId = null;
+
+  function clearFocus() {{
+    focusId = null;
+    document.querySelectorAll('.fiber-focus, .faded').forEach(el => {{
+      el.classList.remove('fiber-focus');
+      el.classList.remove('faded');
+    }});
+  }}
+
+  function onFiberNodeClick(e) {{
+    if (hiddenMode) {{ onHiddenClick(e); return; }}
+    const el = e.currentTarget;
+    if (!el.id) return;
+    e.stopPropagation();
+    if (focusId === el.id && !e.shiftKey) {{ clearFocus(); return; }}
+    clearFocus();
+    focusId = el.id;
+    const nodes = new Set([focusId]);
+    const focusEdges = new Set();
+    document.querySelectorAll('#edges-group [data-source]').forEach(ln => {{
+      const s = ln.getAttribute('data-source');
+      const t = ln.getAttribute('data-target');
+      if (s === focusId) {{
+        focusEdges.add(ln);
+        if (t) nodes.add(t);
+      }} else if (e.shiftKey && t === focusId) {{
+        focusEdges.add(ln);
+        nodes.add(s);
+      }}
+    }});
+    document.querySelectorAll('#nodes-group circle, #nodes-group rect').forEach(nd => {{
+      nd.classList.add(nodes.has(nd.id) ? 'fiber-focus' : 'faded');
+    }});
+    document.querySelectorAll('#edges-group [data-source]').forEach(ln => {{
+      ln.classList.add(focusEdges.has(ln) ? 'fiber-focus' : 'faded');
+    }});
+  }}
+
+  function initFiber() {{
+    applyClassDims();
+    drawHiddenOverlay();
+    const st = document.createElement('style');
+    st.textContent =
+      '#nodes-group circle, #nodes-group rect {{ cursor: pointer; }}' +
+      '#nodes-group .fiber-focus {{ stroke-width: 3px !important; }}' +
+      '#nodes-group .hidden-sel {{ stroke: #ff6ea6 !important; stroke-width: 3px !important; }}' +
+      '#nodes-group .faded, #edges-group .faded {{ opacity: 0.15; }}';
+    document.head.appendChild(st);
+    document.querySelectorAll('#nodes-group circle, #nodes-group rect').forEach(el => {{
+      el.addEventListener('click', onFiberNodeClick);
+    }});
+    // Node handlers stop propagation, so any click that reaches the document
+    // was on empty space.
+    document.addEventListener('click', () => clearFocus());
+    // The template's Sphere/Stem toggle is a placeholder; from a fiber chart
+    // it navigates back to the base sphere's chart on this page.
+    const viewBtn = document.getElementById('sphere-toggle');
+    if (viewBtn) {{
+      const fresh = viewBtn.cloneNode(true);
+      fresh.removeAttribute('onclick');
+      viewBtn.parentNode.replaceChild(fresh, viewBtn);
+      fresh.addEventListener('click', (e) => {{
+        e.stopPropagation();
+        // Cross-view jump: the saved viewport is meaningless on the sphere
+        // chart's layout — clear it so the Adams chart opens at its default
+        // framing instead of a fiber-chart pan/zoom.
+        sessionStorage.removeItem('seqsee_viewport');
+        location.href = 'S{n}_E{r}.html';
+      }});
+    }}
+  }}
+  if (document.readyState === 'loading') {{
+    window.addEventListener('DOMContentLoaded', initFiber);
+  }} else {{
+    initFiber();
+  }}
+}})();
+</script>"#,
+        );
+
+        if let Some(nav_pos) = html.find("/*FIBERNAV*/") {
+            // Older-generation script (no HIDDENDATA): replace the enclosing
+            // <script> block with the fresh one so already-generated charts
+            // (warm cache, snapshots) pick up the hidden overlay + Shift+V
+            // without a regen. The FIBERNAV marker only ever lives in the
+            // script this function injected, so the span is unambiguous; if
+            // the structure doesn't match, skip rather than corrupt.
+            let (Some(start), Some(end_rel)) =
+                (html[..nav_pos].rfind("<script>"), html[nav_pos..].find("</script>"))
+            else {
+                eprintln!(
+                    "  note: {} has an unrecognized fiber script — run `regen` to upgrade it.",
+                    path.display(),
+                );
+                continue;
+            };
+            let end = nav_pos + end_rel + "</script>".len();
+            let new_html = format!("{}{}{}", &html[..start], script, &html[end..]);
+            let _ = std::fs::write(&path, new_html);
+            continue;
+        }
+
+        let new_html = html.replace("</body>", &format!("{}\n</body>", script));
+        let _ = std::fs::write(&path, new_html);
+    }
+}
+
+/// Hidden-EHP-value JS for the fiber charts (plain constant — no `format!`
+/// placeholders, so braces need no escaping; spliced into the fiber script's
+/// IIFE, where `parseNodeId` etc. are in scope). Two features:
+/// - `drawHiddenOverlay()`: dotted overlay edges for the injected
+///   HIDDEN_EDGES (asserted = full opacity, deduced = faint), drawn above the
+///   E/H/P edges and below the nodes, with a tooltip label.
+/// - Shift+V assert mode: click a source class, then the target (shift-click
+///   accumulates a target sum, plain click finishes), and a `hidden <kind> …`
+///   REPL command lands on the clipboard. The kind is inferred from the
+///   sphere relation (E: n+1, H: 2n−1, P: (n−1)/2) and pre-validated (nominal
+///   stem, δ ≥ 1); the REPL re-validates authoritatively.
+const FIBER_HIDDEN_JS: &str = r#"
+  // ==========================================================================
+  // Hidden EHP map values: overlay + Shift+V assert mode (EHP_HIDDEN feature).
+  // ==========================================================================
+  const HIDDEN_COLOR = '#ff6ea6';  // matches the fiber_hidden candidate pink
+
+  function nodeCenter(id) {
+    const el = document.getElementById(id);
+    if (!el) return null;
+    if (el.tagName === 'circle')
+      return { x: parseFloat(el.getAttribute('cx')), y: parseFloat(el.getAttribute('cy')) };
+    const x = parseFloat(el.getAttribute('x') || '0');
+    const y = parseFloat(el.getAttribute('y') || '0');
+    return { x: x + parseFloat(el.getAttribute('width') || '0') / 2,
+             y: y + parseFloat(el.getAttribute('height') || '0') / 2 };
+  }
+
+  function drawHiddenOverlay() {
+    const edges = document.querySelector('#edges-group');
+    if (!edges) return;
+    const old = document.getElementById('hidden-overlay');
+    if (old) old.remove();
+    if (!HIDDEN_EDGES || !HIDDEN_EDGES.length) return;
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.id = 'hidden-overlay';
+    HIDDEN_EDGES.forEach(h => {
+      (h.src || []).forEach(sid => (h.tgt || []).forEach(tid => {
+        const a = nodeCenter(sid), b = nodeCenter(tid);
+        if (!a || !b) return;
+        const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        ln.setAttribute('x1', a.x); ln.setAttribute('y1', a.y);
+        ln.setAttribute('x2', b.x); ln.setAttribute('y2', b.y);
+        ln.setAttribute('stroke', HIDDEN_COLOR);
+        ln.setAttribute('stroke-width', '1.6');
+        ln.setAttribute('stroke-dasharray', '2,3');
+        ln.setAttribute('opacity', h.asserted ? '0.95' : '0.5');
+        ln.classList.add('hidden-overlay-edge');
+        const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+        title.textContent = h.label || (h.kind + ' (hidden, d=' + h.delta + ')');
+        ln.appendChild(title);
+        g.appendChild(ln);
+      }));
+    });
+    // Above the E/H/P edges, below the nodes.
+    edges.parentNode.insertBefore(g, edges.nextSibling);
+  }
+
+  let hiddenMode = false;
+  let hiddenSrc = null;    // { p, id }
+  let hiddenTgts = [];     // [{ p, id }] — summands of the target
+
+  function setHiddenStatus(text) {
+    let bar = document.getElementById('hidden-status');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'hidden-status';
+      bar.style.cssText = 'position:fixed;top:8px;left:50%;transform:translateX(-50%);' +
+        'background:#222;color:#ffd7e6;border:1px solid ' + HIDDEN_COLOR + ';' +
+        'padding:4px 12px;border-radius:6px;font:12px sans-serif;z-index:1000;' +
+        'max-width:80%;text-align:center;';
+      document.body.appendChild(bar);
+    }
+    bar.textContent = text;
+    bar.style.display = text ? 'block' : 'none';
+  }
+
+  function clearHiddenSel() {
+    hiddenSrc = null;
+    hiddenTgts = [];
+    document.querySelectorAll('.hidden-sel').forEach(el => el.classList.remove('hidden-sel'));
+  }
+
+  function exitHiddenMode() {
+    hiddenMode = false;
+    clearHiddenSel();
+    setHiddenStatus('');
+  }
+
+  function toggleHiddenMode() {
+    if (hiddenMode) { exitHiddenMode(); return; }
+    hiddenMode = true;
+    setHiddenStatus('hidden-value mode: click the source class, then the target ' +
+      '(shift-click accumulates a target sum; Shift+V or Esc exits)');
+  }
+
+  function hiddenCopy(cmd) {
+    navigator.clipboard.writeText(cmd).then(() => {
+      setHiddenStatus('Copied: ' + cmd + ' — paste into REPL (click next source; Shift+V exits)');
+    }).catch(() => {
+      window.prompt('Paste into REPL:', cmd);
+      setHiddenStatus(cmd);
+    });
+  }
+
+  function finishHiddenAssert() {
+    const s = hiddenSrc.p, t = hiddenTgts[0].p;
+    let kind = null, nomS = null, nomF = null;
+    if (t.n === s.n + 1) { kind = 'E'; nomS = s.s; nomF = s.f; }
+    else if (t.n === 2 * s.n - 1) { kind = 'H'; nomS = s.s - s.n + 1; nomF = s.f - 1; }
+    else if (s.n % 2 === 1 && s.n >= 5 && t.n === (s.n - 1) / 2) {
+      kind = 'P'; nomS = s.s + (s.n - 1) / 2 - 1; nomF = s.f + 2;
+    }
+    let err = null;
+    if (!kind) err = 'S' + t.n + ' is not the E/H/P target sphere of S' + s.n;
+    else if (t.s !== nomS) err = kind + ' target stem must be ' + nomS + ' (got ' + t.s + ')';
+    else if (t.f < nomF + 1) err = 'a hidden ' + kind + ' value must land at filtration >= ' +
+      (nomF + 1) + ' (nominal target filtration is ' + nomF + ')';
+    if (err) { setHiddenStatus(err + ' — selection cleared'); clearHiddenSel(); return; }
+    const tidx = hiddenTgts.map(x => x.p.idx).join('+');
+    const cmd = 'hidden ' + kind + ' ' + s.n + ' ' + s.s + ' ' + s.f + ' ' + s.idx +
+      ' ' + t.n + ' ' + t.s + ' ' + t.f + ' ' + tidx;
+    clearHiddenSel();
+    hiddenCopy(cmd);
+  }
+
+  function onHiddenClick(e) {
+    const el = e.currentTarget;
+    if (!el.id) return;
+    e.stopPropagation();
+    const p = parseNodeId(el.id);
+    if (!p) return;
+    if (!hiddenSrc) {
+      hiddenSrc = { p: p, id: el.id };
+      el.classList.add('hidden-sel');
+      setHiddenStatus('Source ' + el.id +
+        ' — click the target (shift-click first to accumulate a sum; sums in the ' +
+        'SOURCE are typed in the REPL directly, e.g. idx 0+1)');
+      return;
+    }
+    const first = hiddenTgts[0];
+    if (first && (p.n !== first.p.n || p.s !== first.p.s || p.f !== first.p.f)) {
+      setHiddenStatus('Target summands must share a degree — Esc restarts');
+      return;
+    }
+    hiddenTgts.push({ p: p, id: el.id });
+    el.classList.add('hidden-sel');
+    if (e.shiftKey) {
+      setHiddenStatus('Target sum: ' + hiddenTgts.map(x => x.id).join(' + ') +
+        ' — plain-click the last summand to finish');
+      return;
+    }
+    finishHiddenAssert();
+  }
+"#;
+
+/// Parse `S{n}_E{r}.html` into (r, n). Strict: bare integers only, so map
+/// views (`map_*.html`) and any suffixed variants are not treated as sphere
+/// charts.
+fn parse_sphere_filename(name: &str) -> Option<(i32, i32)> {
+    let stem = name.strip_prefix('S')?.strip_suffix(".html")?;
+    let (n, r) = stem.split_once("_E")?;
+    Some((r.parse().ok()?, n.parse().ok()?))
+}
+
+/// Inject (or refresh) the right-click view-jump menu in every chart on disk
+/// (sphere, stem, AND fiber charts): right-clicking a class offers jumps to
+/// that class's other views — its sphere chart, its stem chart, and the
+/// fiber-sequence charts where its sphere is the E/H/P source. For a class
+/// on sphere m those are unique: fiber{m} (E: S^m → S^{m+1}), fiber{m-1}
+/// (H: S^m → S^{2m-1}), and fiber{(m-1)/2} for odd m (P: S^m → S^{(m-1)/2}).
+/// Availability is scanned from the charts dir per page, so charts that were
+/// never generated are simply not offered. Navigation lands with
+/// `#focus=<nodeId>`, which every injected copy also handles: highlight the
+/// class and pan to it once panZoom is ready.
+fn inject_view_menu(charts_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(charts_dir) else { return };
+    // r -> sorted list of available n / k, per chart kind.
+    let mut spheres: HashMap<i32, Vec<i32>> = HashMap::new();
+    let mut stems: HashMap<i32, Vec<i32>> = HashMap::new();
+    let mut fibers: HashMap<i32, Vec<i32>> = HashMap::new();
+    // (filename, mode, r, current n-or-k)
+    let mut files: Vec<(String, &'static str, i32, i32)> = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if let Some((r, n)) = parse_sphere_filename(&name) {
+            spheres.entry(r).or_default().push(n);
+            files.push((name, "sphere", r, n));
+        } else if let Some((r, k)) = parse_stem_filename(&name) {
+            stems.entry(r).or_default().push(k);
+            files.push((name, "stem", r, k));
+        } else if let Some((r, n)) = parse_fiber_filename(&name) {
+            fibers.entry(r).or_default().push(n);
+            files.push((name, "fiber", r, n));
+        }
+    }
+    for v in spheres.values_mut() {
+        v.sort_unstable();
+    }
+    for v in stems.values_mut() {
+        v.sort_unstable();
+    }
+    for v in fibers.values_mut() {
+        v.sort_unstable();
+    }
+    let empty: Vec<i32> = Vec::new();
+
+    for (name, mode, r, cur) in files {
+        let path = charts_dir.join(&name);
+        let Ok(html) = std::fs::read_to_string(&path) else { continue };
+        let view = serde_json::json!({
+            "mode": mode,
+            "r": r,
+            "cur": cur,
+            "spheres": spheres.get(&r).unwrap_or(&empty),
+            "stems": stems.get(&r).unwrap_or(&empty),
+            "fibers": fibers.get(&r).unwrap_or(&empty),
+        });
+
+        if html.contains("/*VIEWNAV*/") {
+            // Refresh the availability data in place.
+            let (sm, em) = ("/*VIEWNAV*/", "/*ENDVIEWNAV*/");
+            if let (Some(s), Some(e)) = (html.find(sm), html.find(em)) {
+                let so = s + sm.len();
+                let new_html = format!("{}{}{}", &html[..so], view, &html[e..]);
+                let _ = std::fs::write(&path, new_html);
+            }
+            continue;
+        }
+
+        let script = format!(
+            r#"<script>
+(function() {{
+  const VIEW = /*VIEWNAV*/{view}/*ENDVIEWNAV*/;
+  const ID_RE = /^S(-?\d+)_(-?\d+)_(-?\d+)(?:_(\d+))?$/;
+  function parseId(id) {{
+    const m = ID_RE.exec(id || '');
+    if (!m) return null;
+    return {{ n: +m[1], s: +m[2], f: +m[3], idx: m[4] ? +m[4] : 0 }};
+  }}
+
+  let menuEl = null;
+  function closeMenu() {{
+    if (menuEl) {{ menuEl.remove(); menuEl = null; }}
+  }}
+  document.addEventListener('click', closeMenu);
+  document.addEventListener('keydown', (e) => {{ if (e.key === 'Escape') closeMenu(); }});
+
+  function openMenu(x, y, title, items) {{
+    closeMenu();
+    const m = document.createElement('div');
+    m.style.cssText =
+      'position:fixed;z-index:10000;min-width:190px;padding:4px 0;' +
+      'border-radius:6px;font:13px sans-serif;' +
+      'background:var(--background-color, #222);color:var(--text-color, #eee);' +
+      'border:1px solid rgba(128,128,128,.5);box-shadow:0 4px 14px rgba(0,0,0,.35);';
+    const hd = document.createElement('div');
+    hd.textContent = title;
+    hd.style.cssText = 'padding:4px 12px 6px;opacity:.6;font-size:11px;' +
+      'border-bottom:1px solid rgba(128,128,128,.3);margin-bottom:3px;';
+    m.appendChild(hd);
+    items.forEach(([label, href]) => {{
+      const it = document.createElement('div');
+      it.textContent = label;
+      it.style.cssText = 'padding:5px 12px;cursor:pointer;';
+      it.addEventListener('mouseenter', () => it.style.background = 'rgba(128,128,128,.25)');
+      it.addEventListener('mouseleave', () => it.style.background = '');
+      it.addEventListener('click', () => {{
+        closeMenu();
+        // Cross-view jump: drop the saved viewport so the target chart opens
+        // at default framing; the #focus hash then pans to the class.
+        sessionStorage.removeItem('seqsee_viewport');
+        location.href = href;
+      }});
+      m.appendChild(it);
+    }});
+    document.body.appendChild(m);
+    // Keep the menu on-screen.
+    const rect = m.getBoundingClientRect();
+    m.style.left = Math.min(x, window.innerWidth - rect.width - 8) + 'px';
+    m.style.top = Math.min(y, window.innerHeight - rect.height - 8) + 'px';
+    menuEl = m;
+  }}
+
+  document.addEventListener('contextmenu', (e) => {{
+    const t = e.target.closest && e.target.closest('#nodes-group circle, #nodes-group rect');
+    if (!t) return;
+    const id = t.id || (t.parentElement && t.parentElement.id) || '';
+    const c = parseId(id);
+    if (!c) return;
+    e.preventDefault();
+    const focus = '#focus=' + encodeURIComponent(id);
+    const items = [];
+    if (VIEW.mode !== 'sphere' && VIEW.spheres.includes(c.n)) {{
+      items.push(['Sphere S' + c.n, 'S' + c.n + '_E' + VIEW.r + '.html' + focus]);
+    }}
+    if (!(VIEW.mode === 'stem' && VIEW.cur === c.s) && VIEW.stems.includes(c.s)) {{
+      items.push(['Stem ' + c.s, 'stem' + c.s + '_E' + VIEW.r + '.html' + focus]);
+    }}
+    if (VIEW.fibers.includes(c.n)) {{
+      items.push(['E-source fiber (S' + c.n + ' → S' + (c.n + 1) + ')',
+        'fiber' + c.n + '_E' + VIEW.r + '.html' + focus]);
+    }}
+    if (VIEW.fibers.includes(c.n - 1)) {{
+      items.push(['H-source fiber (S' + c.n + ' → S' + (2 * c.n - 1) + ')',
+        'fiber' + (c.n - 1) + '_E' + VIEW.r + '.html' + focus]);
+    }}
+    if (c.n % 2 === 1 && VIEW.fibers.includes((c.n - 1) / 2)) {{
+      items.push(['P-source fiber (S' + c.n + ' → S' + ((c.n - 1) / 2) + ')',
+        'fiber' + ((c.n - 1) / 2) + '_E' + VIEW.r + '.html' + focus]);
+    }}
+    if (!items.length) return;
+    openMenu(e.clientX, e.clientY, id + '  (n=' + c.n + ', s=' + c.s + ', f=' + c.f + ')', items);
+  }});
+
+  // #focus=<nodeId>: highlight the class and pan to it (used by the menu's
+  // cross-view links; works in every chart type this script is injected in).
+  let focusedEl = null;
+  function clearFocus() {{
+    if (focusedEl) {{
+      focusedEl.setAttribute('stroke', focusedEl.dataset.ehpOrigStroke || 'none');
+      focusedEl.setAttribute('stroke-width', focusedEl.dataset.ehpOrigStrokeW || '0');
+      focusedEl = null;
+    }}
+  }}
+  function panToEl(el, attempt) {{
+    if (window.panZoom) {{
+      try {{
+        const rect = el.getBoundingClientRect();
+        window.panZoom.panBy({{
+          x: window.innerWidth / 2 - (rect.x + rect.width / 2),
+          y: window.innerHeight / 2 - (rect.y + rect.height / 2),
+        }});
+      }} catch (err) {{}}
+    }} else if (attempt < 25) {{
+      setTimeout(() => panToEl(el, attempt + 1), 160);
+    }}
+  }}
+  function focusFromHash() {{
+    const m = (location.hash || '').match(/^#focus=(.+)$/);
+    if (!m) return;
+    const el = document.getElementById(decodeURIComponent(m[1]));
+    if (!el) return;
+    clearFocus();
+    el.dataset.ehpOrigStroke = el.getAttribute('stroke') || 'none';
+    el.dataset.ehpOrigStrokeW = el.getAttribute('stroke-width') || '0';
+    el.setAttribute('stroke', '#e0245e');
+    el.setAttribute('stroke-width', '3');
+    focusedEl = el;
+    panToEl(el, 0);
+  }}
+  window.addEventListener('hashchange', focusFromHash);
+  if (document.readyState === 'loading') {{
+    window.addEventListener('DOMContentLoaded', focusFromHash);
+  }} else {{
+    focusFromHash();
   }}
 }})();
 </script>
@@ -3341,6 +5667,7 @@ fn clean_charts_dir(charts_dir: &Path) -> usize {
             || ((name.ends_with(".html") || name.ends_with(".json"))
                 && (name.starts_with("map_")
                     || name.starts_with("stem")
+                    || name.starts_with("fiber")
                     || (name.starts_with('S') && name.contains("_E"))));
         if is_ours && std::fs::remove_file(entry.path()).is_ok() {
             removed += 1;
@@ -3861,6 +6188,20 @@ fn fast_update_diffs(charts_dir: &Path, pages: &[PageState], idx: usize) -> usiz
         let html_path = charts_dir.join(format!("stem{}_E{}.html", k, r));
         let Ok(html) = std::fs::read_to_string(&html_path) else { continue };
         let dims = class_dims_json(&ps.page, |t| t.s == k && t.n <= t.s + 2);
+        if let Some(new_html) = replace_marker(&html, "/*CLASSDIMS*/", "/*ENDCLASSDIMS*/", &dims) {
+            if new_html != html && std::fs::write(&html_path, new_html).is_ok() {
+                updated += 1;
+            }
+        }
+    }
+
+    // Fiber charts: refresh their CLASSDIMS too (the triple's three spheres).
+    for &n in &ps.fiber_values {
+        let html_path = charts_dir.join(format!("fiber{}_E{}.html", n, r));
+        let Ok(html) = std::fs::read_to_string(&html_path) else { continue };
+        let dims = class_dims_json(&ps.page, |t| {
+            t.n == n || t.n == n + 1 || t.n == 2 * n + 1
+        });
         if let Some(new_html) = replace_marker(&html, "/*CLASSDIMS*/", "/*ENDCLASSDIMS*/", &dims) {
             if new_html != html && std::fs::write(&html_path, new_html).is_ok() {
                 updated += 1;
@@ -4402,6 +6743,7 @@ fn generate_index_html(
     charts_dir: &Path,
     chart_files: &[(i32, i32, PathBuf)], // (r, n, path)
     stem_files: &[(i32, i32)],           // (r, k)
+    fiber_files: &[(i32, i32)],          // (r, n)
     start_r: i32,
     max_t: i32,
     theme: &str,
@@ -4514,6 +6856,33 @@ fn generate_index_html(
             for k in ks.iter() {
                 index.push_str(&format!(
                     "  <li><a href=\"stem{k}_E{r}.html\">stem {k}</a></li>\n",
+                ));
+            }
+            index.push_str("</ul>\n");
+        }
+    }
+
+    // Fiber-sequence view section
+    if !fiber_files.is_empty() {
+        let mut fibers_by_r: std::collections::BTreeMap<i32, Vec<i32>> =
+            std::collections::BTreeMap::new();
+        for &(r, n) in fiber_files {
+            fibers_by_r.entry(r).or_default().push(n);
+        }
+        index.push_str("<h2>EHP fiber-sequence view (one chart per base sphere)</h2>\n");
+        for (r, ns) in &mut fibers_by_r {
+            ns.sort_unstable();
+            index.push_str(&format!(
+                "<h3>E_{} ({} base spheres)</h3>\n<ul style=\"columns: 16em auto\">\n",
+                r,
+                ns.len(),
+            ));
+            for &n in ns.iter() {
+                index.push_str(&format!(
+                    "  <li><a href=\"fiber{n}_E{r}.html\">S<sup>{n}</sup> &rarr; \
+                     &Omega;S<sup>{}</sup> &rarr; &Omega;S<sup>{}</sup></a></li>\n",
+                    n + 1,
+                    2 * n + 1,
                 ));
             }
             index.push_str("</ul>\n");
@@ -4889,8 +7258,10 @@ const CLICK_SCRIPT: &str = r##"
     }
     box.innerHTML = deduced.map((d, i) =>
       '<div class="ehp-ded-entry" data-idx="' + i + '" title="Click to show on its chart">' +
-      'd' + d.r + '(' + d.n + ',' + d.s + ',' + d.f + ')[' + d.row + ',' + d.col + '] = ' +
-      (d.val ? 1 : 0) +
+      (d.hidden
+        ? (d.label || (d.kind + ' hidden value'))
+        : 'd' + d.r + '(' + d.n + ',' + d.s + ',' + d.f + ')[' + d.row + ',' + d.col + '] = ' +
+          (d.val ? 1 : 0)) +
       (d.chart ? '' : ' <span class="desc">(no chart)</span>') +
       '</div>'
     ).join('');
@@ -4910,7 +7281,11 @@ const CLICK_SCRIPT: &str = r##"
       setStatus('No chart for S^' + d.n + ' on E_' + d.r);
       return;
     }
-    const hash = '#diff=' + encodeURIComponent(d.srcId + ';' + d.tgtId);
+    // Hidden-value entries live on fiber charts, which handle the view-menu
+    // #focus= fragment (highlight + pan) but not #diff=.
+    const hash = d.hidden
+      ? '#focus=' + encodeURIComponent(d.srcId)
+      : '#diff=' + encodeURIComponent(d.srcId + ';' + d.tgtId);
     const current = (location.pathname || '').split('/').pop();
     if (current === d.chart) {
       if (location.hash !== hash) {
@@ -5430,9 +7805,25 @@ const CLICK_SCRIPT: &str = r##"
       fresh.addEventListener('click', () => {
         const k = window.prompt('Open stem view — stem number:');
         if (k !== null && k.trim() !== '' && !isNaN(parseInt(k))) {
+          sessionStorage.removeItem('seqsee_viewport'); // cross-view jump
           location.href = 'stem' + parseInt(k) + '_E' + PAGE_R + '.html';
         }
       });
+    }
+    // "EHP" button: jump to the fiber-sequence view with this sphere as base.
+    const ctr = document.getElementById('controls-container');
+    if (ctr) {
+      const ehpBtn = document.createElement('button');
+      ehpBtn.className = 'control-button';
+      ehpBtn.textContent = 'EHP';
+      ehpBtn.title = 'Open EHP fiber-sequence view for this sphere';
+      ehpBtn.addEventListener('click', () => {
+        const n = currentSphere();
+        if (n === null) { setStatus('Cannot determine current sphere'); return; }
+        sessionStorage.removeItem('seqsee_viewport'); // cross-view jump
+        location.href = 'fiber' + n + '_E' + PAGE_R + '.html';
+      });
+      ctr.appendChild(ehpBtn);
     }
     // Highlight a differential linked from another chart's log
     // (panWhenReady waits for the pan-zoom instance).
