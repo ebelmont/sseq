@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::constraints::DiffVar;
-use crate::gf2::vec_get;
+use crate::gf2::{vec_get, vec_set, vec_zero};
 use crate::map::MapKind;
 use crate::page::SATPage;
 use crate::result::SATResult;
@@ -147,18 +147,30 @@ pub fn compute_sphere_diff_edges(
         // Uncertainty-excluded degrees have no differential variables at all —
         // the algorithm has no opinion there. Show every potential target as
         // an unknown (dashed) differential, as the original's write_spheres
-        // did, so "excluded" is never mistaken for "determined zero".
+        // did, so "excluded" is never mistaken for "determined zero" — EXCEPT
+        // entries the user (or an outside source) asserted via known diffs:
+        // those are recorded and take effect in page turning even at excluded
+        // degrees, so draw them as determined (solid for 1, no edge for 0).
         let first_var = DiffVar::new(n_var, tri.s, tri.f, 0, 0);
         if !result.var_index.contains_key(&first_var)
             && (page.is_excluded(tri) || page.is_excluded(tgt_tri))
         {
             for col in 0..dim {
                 for row in 0..tgt_dim {
-                    edges.push((
-                        gen_name(tri.n, tri.s, tri.f, col, dim),
-                        gen_name(tgt_tri.n, tgt_tri.s, tgt_tri.f, row, tgt_dim),
-                        false,
-                    ));
+                    let dv = DiffVar::new(n_var, tri.s, tri.f, row as u16, col as u16);
+                    match known.get(&dv) {
+                        Some(false) => continue, // asserted zero: no edge
+                        Some(true) => edges.push((
+                            gen_name(tri.n, tri.s, tri.f, col, dim),
+                            gen_name(tgt_tri.n, tgt_tri.s, tgt_tri.f, row, tgt_dim),
+                            true,
+                        )),
+                        None => edges.push((
+                            gen_name(tri.n, tri.s, tri.f, col, dim),
+                            gen_name(tgt_tri.n, tgt_tri.s, tgt_tri.f, row, tgt_dim),
+                            false,
+                        )),
+                    }
                 }
             }
             continue;
@@ -386,6 +398,74 @@ fn hi_target_names(
     names
 }
 
+/// XOR `v` (restricted to its first `dim` coords) into `acc` (F2).
+fn xor_into(acc: &mut fp::vector::FpVector, v: &fp::vector::FpVector, dim: usize) {
+    for j in 0..dim {
+        if j < v.len() && vec_get(v, j) {
+            vec_set(acc, j, !vec_get(acc, j));
+        }
+    }
+}
+
+/// Combined "h0 + E∘lh0" target names at (n, s, f+1) — the corrected h0
+/// structure line used in STEM VIEW (sphere/fiber views keep raw h0). In F2
+/// this is the XOR of two maps that both land at (n, s, f+1): right-h0
+/// multiplication, and (lh0 then E). Returns the nonzero target generator
+/// names; an empty result means the two maps cancel (the "difference"
+/// vanishes) and no vertical structline is drawn.
+fn h0_plus_elh0_target_names(page: &SATPage, src_t: Tridegree, col: usize) -> Vec<String> {
+    use crate::products::ProductKey;
+
+    let tgt_t = Tridegree::new(src_t.n, src_t.s, src_t.f + 1);
+    let tgt_dim = page.dim_at(tgt_t);
+    if tgt_dim == 0 {
+        return Vec::new();
+    }
+    let mut acc = vec_zero(tgt_dim);
+
+    // (a) right h0 multiplication image (h0 is the 0-th basis element at
+    // (n+s, 0, 1)), same source as hi_target_names(.., 0).
+    let hi_t = Tridegree::new(src_t.n + src_t.s, 0, 1);
+    if page.dim_at(hi_t) > 0 {
+        let key = ProductKey::new(src_t, col as u16, hi_t, 0);
+        if let Some(h0_vec) = page.products.get(&key) {
+            xor_into(&mut acc, &h0_vec, tgt_dim);
+        }
+    }
+
+    // (b) E ∘ lh0 image: lh0 sends (col at src_t) to mid = (n-1, s, f+1);
+    // apply E (mid → (n, s, f+1) = tgt_t) to each nonzero coordinate.
+    let mid_t = Tridegree::new(src_t.n - 1, src_t.s, src_t.f + 1);
+    let mid_dim = page.dim_at(mid_t);
+    if mid_dim > 0 {
+        if let (Some(lh0_mt), Some(e_mt)) =
+            (page.maps.get(&MapKind::Lh0), page.maps.get(&MapKind::E))
+        {
+            if let (Some(lh0_mat), Some(e_mat)) =
+                (lh0_mt.matrix_at(src_t), e_mt.matrix_at(mid_t))
+            {
+                if col < lh0_mat.rows() {
+                    let lh0_row = lh0_mat.row_vec(col);
+                    for j in 0..mid_dim {
+                        if j < lh0_row.len() && vec_get(&lh0_row, j) && j < e_mat.rows() {
+                            let e_row = e_mat.row_vec(j);
+                            xor_into(&mut acc, &e_row, tgt_dim);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut names = Vec::new();
+    for j in 0..tgt_dim {
+        if vec_get(&acc, j) {
+            names.push(gen_name(tgt_t.n, tgt_t.s, tgt_t.f, j, tgt_dim));
+        }
+    }
+    names
+}
+
 /// Collect target generator names for a map (E, H, or P) applied to generator
 /// `(src_t, col)`. Reads the map matrix row for `col` and returns names of
 /// nonzero target entries.
@@ -513,7 +593,7 @@ pub fn write_ehp_csv<W: io::Write>(
         writer,
         "name,n,stem,Adams filtration,shift,\
          h0target,h1target,h2target,h3target,\
-         E,H,P,C2,drinfo,drtarget,nulldif,XX"
+         E,H,P,C2,drinfo,drtarget,nulldif,lh0target,h0lh0target,XX"
     )?;
 
     let mut tridegrees: Vec<Tridegree> = page
@@ -543,6 +623,11 @@ pub fn write_ehp_csv<W: io::Write>(
             let e_targets = map_target_names(page, MapKind::E, t, idx);
             let map_h_targets = map_target_names(page, MapKind::H, t, idx);
             let p_targets = map_target_names(page, MapKind::P, t, idx);
+
+            // lh0 map (diagonal, (n-1,s,f+1)) and the combined h0+E∘lh0
+            // (vertical, (n,s,f+1)) — consumed by STEM VIEW only.
+            let lh0_targets = map_target_names(page, MapKind::Lh0, t, idx);
+            let h0lh0_targets = h0_plus_elh0_target_names(page, t, idx);
 
             // Differential info
             let (dr_info, dr_targets, null_targets) = if let Some(res) = result {
@@ -591,7 +676,7 @@ pub fn write_ehp_csv<W: io::Write>(
 
             writeln!(
                 writer,
-                "{},{},{},{},{},{},{},{},{},{},{},{},,{},{},{},XX",
+                "{},{},{},{},{},{},{},{},{},{},{},{},,{},{},{},{},{},XX",
                 name,
                 t.n,
                 t.s,
@@ -607,6 +692,8 @@ pub fn write_ehp_csv<W: io::Write>(
                 dr_info.map(|d| d.to_string()).unwrap_or_default(),
                 dr_targets.join(";"),
                 null_targets.join(";"),
+                lh0_targets.join(";"),
+                h0lh0_targets.join(";"),
             )?;
         }
     }

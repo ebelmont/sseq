@@ -1869,14 +1869,31 @@ fn cascade_verify() -> bool {
     *FLAG.get_or_init(|| std::env::var("EHP_CASCADE_VERIFY").map_or(false, |v| v == "1"))
 }
 
+/// EHP_CONSENSUS != "0" (default ON): `interpage try` applies both-worlds
+/// consensus determinations (a var forced to the same value whether a switch
+/// is 0 or 1 holds unconditionally). `EHP_CONSENSUS=0` restores
+/// contradiction-only forcing.
+fn consensus_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("EHP_CONSENSUS").map_or(true, |v| v != "0"))
+}
+
 /// Cascade re-solve: re-solve page at `start_idx`, then incrementally re-turn
 /// and re-solve subsequent pages. Stops early if no differential matrices
 /// change — unless `force` is set (an explicit `interpage` run), in which
 /// case every page is re-solved, re-turned, and rebuilt to the end.
+/// `solve_through` is the highest page INDEX with directly mutated
+/// known_diffs: pages up to and including it are always re-solved (an early
+/// stop below it would silently drop a mutation applied on a later page).
 /// Returns every differential that became determined (or changed value)
 /// relative to the previous solve — the deductions from the mutation — plus
 /// the re-turned degrees per page (whose charts need real regeneration).
-fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> CascadeOutcome {
+fn cascade_resolve(
+    pages: &mut [PageState],
+    start_idx: usize,
+    solve_through: usize,
+    force: bool,
+) -> CascadeOutcome {
     let mut deduced = Vec::new();
     let mut affected_degrees: HashMap<i32, HashSet<Tridegree>> = HashMap::new();
     // Degrees on the *next* page whose dimensions changed when it was rebuilt
@@ -2006,7 +2023,12 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
         // page whose products/maps differ must keep cascading.
         let mut changed = changed_diff_tridegrees(old_result.as_ref(), new_res);
         changed.extend(carry.drain());
-        if changed.is_empty() && !prev_content_changed && !determination_changed && !force {
+        if changed.is_empty()
+            && !prev_content_changed
+            && !determination_changed
+            && !force
+            && i >= solve_through
+        {
             eprintln!(
                 "  E_{}: nothing changed (values, dims, products, maps, determination) — cascade stops",
                 r,
@@ -2127,6 +2149,17 @@ fn cascade_resolve(pages: &mut [PageState], start_idx: usize, force: bool) -> Ca
             carry.clear();
             prev_content_changed = excl_any;
             content_dirty = Some(HashSet::new());
+            if !excl_any && i + 1 > solve_through {
+                // The next page's inputs are bit-identical (structure,
+                // exclusions, and its own known_diffs untouched), so its
+                // re-solve — and everything downstream — is a provable
+                // no-op. Stop instead of paying the solves.
+                eprintln!(
+                    "  E_{}: inputs unchanged — downstream re-solves skipped, cascade stops",
+                    r + 1,
+                );
+                break;
+            }
             continue;
         }
 
@@ -2483,7 +2516,7 @@ fn process_stdin_cmd(
 
             // Cascade re-solve from this page through all later pages,
             // recording every differential deduced from this mutation.
-            let outcome = cascade_resolve(pages, idx, false);
+            let outcome = cascade_resolve(pages, idx, idx, false);
             let deduced = outcome.deduced;
             let cmd_key = format!("{} {} {} {} {} {} {}", cmd, r, n, s, f, row, col);
 
@@ -2614,7 +2647,7 @@ fn process_stdin_cmd(
 
                 // Cascade re-solve from this page; the undone command's
                 // propagation record is stale, so drop it.
-                let outcome = cascade_resolve(pages, idx, false);
+                let outcome = cascade_resolve(pages, idx, idx, false);
                 regen_affected_charts(
                     pages, &outcome.affected_degrees, csv_paths, charts_dir, seqsee_dir, theme,
                 );
@@ -2999,6 +3032,7 @@ fn process_stdin_cmd(
                     admissible.len(),
                 );
                 let first_idx = admissible.iter().map(|(i, _, _)| *i).min().unwrap();
+                let last_idx = admissible.iter().map(|(i, _, _)| *i).max().unwrap();
                 let mut sources: Vec<(i32, DiffVar)> = Vec::new();
                 for &(idx, dv, val) in &admissible {
                     let r = pages[idx].page.r;
@@ -3012,7 +3046,7 @@ fn process_stdin_cmd(
                 }
                 total_applied += admissible.len();
 
-                let outcome = cascade_resolve(pages, first_idx, false);
+                let outcome = cascade_resolve(pages, first_idx, last_idx, false);
                 if let Some(ps) = pages.iter().find(|p| {
                     p.result.is_none()
                         && p.unsat_reason.as_deref().is_some_and(|m| m.contains("INCONSISTENT"))
@@ -3278,7 +3312,7 @@ fn process_stdin_cmd(
                 pages.last().map(|p| p.page.r).unwrap_or(0),
             );
             let t0 = Instant::now();
-            let outcome = cascade_resolve(pages, start_idx, true);
+            let outcome = cascade_resolve(pages, start_idx, start_idx, true);
             let deduced = outcome.deduced;
             eprintln!(
                 "  {} differentials newly determined (or changed) in {:.1}s",
@@ -3423,12 +3457,32 @@ fn process_stdin_cmd(
                 ip.last().map(|p| p.page.r).unwrap_or(r),
             );
             let t0 = Instant::now();
-            let findings = interpage::trial_error_sweep(&ip, min_stem, max_stem, |done, total| {
-                if done % 20 == 0 || done == total {
-                    eprintln!("  {}/{} trials done", done, total);
-                }
-            });
+            let sweep_outcome =
+                interpage::trial_error_sweep_full(&ip, min_stem, max_stem, |done, total| {
+                    if done % 20 == 0 || done == total {
+                        eprintln!("  {}/{} trials done", done, total);
+                    }
+                });
+            let findings = sweep_outcome.contradictions;
             eprintln!("Sweep finished in {:.1}s.", t0.elapsed().as_secs_f64());
+
+            // Both-worlds consensus (report-only here; `interpage try`
+            // applies them): same value forced whether the switch is 0 or 1.
+            if !sweep_outcome.consensus.is_empty() {
+                let mut seen: HashSet<(i32, DiffVar, bool)> = HashSet::new();
+                eprintln!("Determined in BOTH worlds of some unknown (unconditional):");
+                for c in &sweep_outcome.consensus {
+                    if seen.insert((c.r, c.var, c.value)) {
+                        eprintln!(
+                            "  d_{}({},{},{})[{},{}] = {} (via d_{}({},{},{})[{},{}])",
+                            c.r, c.var.n, c.var.s, c.var.f, c.var.row, c.var.col,
+                            c.value as u8,
+                            c.via_r, c.via.n, c.via.s, c.via.f, c.via.row, c.via.col,
+                        );
+                    }
+                }
+                eprintln!("  (run `interpage try` to apply these automatically)");
+            }
 
             if findings.is_empty() {
                 eprintln!("No contradictions found — no values forced.");
@@ -3720,7 +3774,8 @@ fn process_multi_mutation(
     eprintln!("Applied {} mutations; re-solving once...", muts.len());
 
     // One cascade for the whole batch.
-    let outcome = cascade_resolve(pages, min_idx, false);
+    let max_idx = muts.iter().map(|m| m.idx).max().unwrap_or(min_idx);
+    let outcome = cascade_resolve(pages, min_idx, max_idx, false);
     let deduced = outcome.deduced;
     let cmd_key = segs.join("; ");
 
@@ -3882,6 +3937,15 @@ fn run_interpage_try(
     let mut all_affected: HashMap<i32, HashSet<Tridegree>> = HashMap::new();
     let mut total_forced = 0usize;
     let mut pass = 0usize;
+    // EHP_TIMING bookkeeping: per-(page, var) contradiction outcomes of the
+    // previous pass, to measure how many trials a pass repeats with an
+    // IDENTICAL outcome — the empirical ceiling for influence-based trial
+    // skipping (a trial's outcome can only change if the pass in between
+    // changed state its propagation can reach).
+    let mut prev_outcomes: HashMap<(i32, DiffVar), (bool, bool)> = HashMap::new();
+    let mut sweep_secs = 0f64;
+    let mut cascade_secs = 0f64;
+    let mut total_trials = 0usize;
 
     loop {
         pass += 1;
@@ -3892,34 +3956,76 @@ fn run_interpage_try(
 
             // Sweep against the current state (immutable borrow ends before
             // the forced values are applied below).
-            let findings = {
+            let (findings, consensus, trialed) = {
                 let Some(ip) = interpage_slice(pages, idx) else {
                     eprintln!("[pass {}] skipping E_{}: {}", pass, r, no_result_msg(&pages[idx]));
                     continue;
                 };
-                let n_unknown = ip[0]
+                let trialed: Vec<DiffVar> = ip[0]
                     .result
                     .unknown
                     .iter()
-                    .filter(|&&i| {
-                        let v = ip[0].result.vars[i];
-                        v.s >= min_stem && v.s < max_stem
-                    })
-                    .count();
-                if n_unknown == 0 {
+                    .map(|&i| ip[0].result.vars[i])
+                    .filter(|v| v.s >= min_stem && v.s < max_stem)
+                    .collect();
+                if trialed.is_empty() {
                     continue;
                 }
-                eprintln!("[pass {}] E_{}: sweeping {} unknown vars × 2 values...", pass, r, n_unknown);
+                eprintln!(
+                    "[pass {}] E_{}: sweeping {} unknown vars × 2 values...",
+                    pass,
+                    r,
+                    trialed.len(),
+                );
                 let t1 = Instant::now();
-                let findings = interpage::trial_error_sweep(&ip, min_stem, max_stem, |done, total| {
-                    if done % 50 == 0 || done == total {
-                        eprintln!("  E_{}: {}/{} trials", r, done, total);
-                    }
-                });
+                let outcome =
+                    interpage::trial_error_sweep_full(&ip, min_stem, max_stem, |done, total| {
+                        if done % 50 == 0 || done == total {
+                            eprintln!("  E_{}: {}/{} trials", r, done, total);
+                        }
+                    });
                 eprintln!("  E_{}: sweep done in {:.1}s", r, t1.elapsed().as_secs_f64());
-                findings
+                sweep_secs += t1.elapsed().as_secs_f64();
+                total_trials += 2 * trialed.len();
+                if timing_enabled() {
+                    if let Some(report) = interpage::trial_stats::report_and_reset() {
+                        eprintln!("  [timing] E_{} trial stages: {}", r, report);
+                    }
+                }
+                (outcome.contradictions, outcome.consensus, trialed)
             };
-            if findings.is_empty() {
+
+            // Outcome-repeat measurement (EHP_TIMING): compare this sweep's
+            // per-var contradiction pattern with the previous pass's.
+            if timing_enabled() {
+                let contradicted: HashSet<(DiffVar, bool)> =
+                    findings.iter().map(|f| (f.var, f.contradicted_value)).collect();
+                let mut repeated = 0usize;
+                let mut compared = 0usize;
+                let mut cur: Vec<((i32, DiffVar), (bool, bool))> = Vec::new();
+                for &var in &trialed {
+                    let outcome = (
+                        contradicted.contains(&(var, false)),
+                        contradicted.contains(&(var, true)),
+                    );
+                    if let Some(prev) = prev_outcomes.get(&(r, var)) {
+                        compared += 1;
+                        if *prev == outcome {
+                            repeated += 1;
+                        }
+                    }
+                    cur.push(((r, var), outcome));
+                }
+                prev_outcomes.extend(cur);
+                if compared > 0 {
+                    eprintln!(
+                        "  [timing] E_{} pass {}: {}/{} re-trialed vars had IDENTICAL outcomes \
+                         to the previous pass (skippable ceiling)",
+                        r, pass, repeated, compared,
+                    );
+                }
+            }
+            if findings.is_empty() && consensus.is_empty() {
                 continue;
             }
 
@@ -3934,6 +4040,10 @@ fn run_interpage_try(
             vars_sorted.sort();
 
             let mut applied = 0usize;
+            // Highest page index that received a value this batch — the
+            // cascade must re-solve at least through it (consensus values
+            // can land on pages beyond the swept one).
+            let mut max_applied_idx = idx;
             for var in vars_sorted {
                 let fs = &by_var[&var];
                 if fs.len() == 2 {
@@ -3959,6 +4069,74 @@ fn run_interpage_try(
                 undo_stack.push(UndoEntry { r, var, prev });
                 applied += 1;
             }
+
+            // Both-worlds consensus: a var forced to the SAME value in the
+            // two consistent worlds of some switch holds unconditionally
+            // (case analysis — see trial_error_sweep_full). Dedupe by
+            // (r, var); conflicting conclusions from different switches mean
+            // the base system is inconsistent — report, apply neither.
+            if consensus_enabled() && !consensus.is_empty() {
+                let mut chosen: HashMap<(i32, DiffVar), &interpage::ConsensusFinding> =
+                    HashMap::new();
+                let mut conflicted: HashSet<(i32, DiffVar)> = HashSet::new();
+                for c in &consensus {
+                    match chosen.get(&(c.r, c.var)) {
+                        Some(prev) if prev.value != c.value => {
+                            conflicted.insert((c.r, c.var));
+                        }
+                        Some(_) => {}
+                        None => {
+                            chosen.insert((c.r, c.var), c);
+                        }
+                    }
+                }
+                for &(cr, cv) in &conflicted {
+                    let line = format!(
+                        "[pass {}] d_{}({},{},{})[{},{}]: CONFLICTING both-worlds values via \
+                         different switches — base system inconsistent, not applied!",
+                        pass, cr, cv.n, cv.s, cv.f, cv.row, cv.col,
+                    );
+                    eprintln!("  {}", line);
+                    log_lines.push(line);
+                }
+                let mut keys: Vec<(i32, DiffVar)> = chosen
+                    .keys()
+                    .filter(|k| !conflicted.contains(*k))
+                    .copied()
+                    .collect();
+                keys.sort();
+                for key in keys {
+                    let c = chosen[&key];
+                    let Some(cidx) = page_index(pages, c.r) else { continue };
+                    let prev = pages[cidx].known_diffs.get(&c.var).copied();
+                    if prev == Some(c.value) {
+                        continue; // already recorded
+                    }
+                    if prev == Some(!c.value) {
+                        let line = format!(
+                            "[pass {}] d_{}({},{},{})[{},{}]: both-worlds value {} CONTRADICTS \
+                             the recorded value — not applied, check the recorded diff!",
+                            pass, c.r, c.var.n, c.var.s, c.var.f, c.var.row, c.var.col,
+                            c.value as u8,
+                        );
+                        eprintln!("  {}", line);
+                        log_lines.push(line);
+                        continue;
+                    }
+                    let line = format!(
+                        "[pass {}] d_{}({},{},{})[{},{}] = {} determined (same value in both \
+                         worlds of d_{}({},{},{})[{},{}])",
+                        pass, c.r, c.var.n, c.var.s, c.var.f, c.var.row, c.var.col,
+                        c.value as u8, c.via_r, c.via.n, c.via.s, c.via.f, c.via.row, c.via.col,
+                    );
+                    eprintln!("  {}", line);
+                    log_lines.push(line);
+                    pages[cidx].known_diffs.insert(c.var, c.value);
+                    undo_stack.push(UndoEntry { r: c.r, var: c.var, prev });
+                    max_applied_idx = max_applied_idx.max(cidx);
+                    applied += 1;
+                }
+            }
             if applied == 0 {
                 continue;
             }
@@ -3967,7 +4145,9 @@ fn run_interpage_try(
 
             // One cascade for this page's batch of forced values; later
             // sweeps (and passes) run against the updated state.
-            let outcome = cascade_resolve(pages, idx, false);
+            let t_c = Instant::now();
+            let outcome = cascade_resolve(pages, idx, max_applied_idx, false);
+            cascade_secs += t_c.elapsed().as_secs_f64();
             if !outcome.deduced.is_empty() {
                 eprintln!("  cascade deduced {} further differentials", outcome.deduced.len());
             }
@@ -3984,6 +4164,17 @@ fn run_interpage_try(
                 total_forced,
                 t0.elapsed().as_secs_f64(),
             );
+            if timing_enabled() {
+                eprintln!(
+                    "  [timing] interpage try: {} passes, {} trials, sweeps {:.1}s, \
+                     cascades {:.1}s, total {:.1}s",
+                    pass,
+                    total_trials,
+                    sweep_secs,
+                    cascade_secs,
+                    t0.elapsed().as_secs_f64(),
+                );
+            }
             break;
         }
         eprintln!("[pass {}] {} values forced; running another pass...", pass, forced_this_pass);
@@ -4581,9 +4772,10 @@ fn parse_batch_report(stdout: &[u8], what: &str, r: i32) -> Vec<i32> {
             if !mode.is_empty() {
                 note_chart_timing(mode, items, json_s, render_s, bytes);
             }
-        } else if timing_enabled() && line.starts_with("TIME ") {
-            eprintln!("  [timing] {}", line);
         }
+        // Per-item "TIME ..." lines from the batch script are deliberately NOT
+        // forwarded (hundreds of lines per regen drowned the interesting
+        // output); the per-mode TIMESUM aggregates above carry the signal.
     }
     oks
 }

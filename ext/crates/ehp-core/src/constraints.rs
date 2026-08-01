@@ -790,6 +790,21 @@ pub fn make_leibniz_constraint_single(
                     let e_mat_at_d =
                         page.map_matrix_ref(MapKind::E, d_deg2).to_matrix_transposed();
 
+                    // Dimension guard (mirrors make_naturality_constraint_single's
+                    // phi checks): overlay pages patch dim_at per recomputed
+                    // degree while sharing the stock page's map blocks, so a
+                    // re-activated pair at the edge of that patch can see an E
+                    // block whose dimensions no longer match the patched
+                    // tgt_dim (ytil's column count). The basis there is exactly
+                    // as untrustworthy as an excluded degree — defer the pair
+                    // instead of multiplying mismatched matrices (panic in
+                    // gf2::mat_mul during `interpage try`, 2026-07-29; the
+                    // widened Leibniz enumeration reaches these stable-edge
+                    // pairs).
+                    if e_mat_at_d.rows() != tgt_dim {
+                        return skip();
+                    }
+
                     // Ytil * E_mat gives the combined matrix
                     let combined = mat_mul(&ytil, &e_mat_at_d);
 

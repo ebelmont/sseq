@@ -197,8 +197,11 @@
     <svg id="svg-canvas" width="100%" height="100%">
       <defs>
         <!-- Define the arrowhead markers -->
-        <marker id='arrow-simple' orient="auto" markerWidth='3' markerHeight='4' refX='0.1' refY='2' fill="context-fill"
-          stroke="context-stroke">
+        <!-- context-fill/context-stroke are Firefox-only; Chromium falls back
+             to black, so color the tip with the theme text color directly
+             (arrows are drawn in the default edge color). -->
+        <marker id='arrow-simple' orient="auto" markerWidth='3' markerHeight='4' refX='0.1' refY='2'
+          fill="var(--text-color)" stroke="none">
           <path d='M0,0 V4 L2,2 Z' />
         </marker>
         <!-- Define the grid pattern -->
@@ -231,9 +234,19 @@
         <!-- Tick marks. We use Jinja2 templating syntax to place them automatically -->
         <g id="ticks" class="tick">
           <g id="x-ticks" class="x-tick">
+            {%- if data.get("header", {}).get("metadata", {}).get("viewMode", "") == "fiber" and data.header.chart.fiberColumns is defined %}
+            {#- Unrolled fiber sequence: one column per map source. Label each
+                column with its sphere (small), and each S^N column (start of a
+                stem's E->H->P triple) with the stem, centered under the block. #}
+            {%- for col in data.header.chart.fiberColumns %}
+              <text x="{{ col.x * spacing }}" y="{{ 0.55 * spacing }}" data-x="{{ col.x }}" class="fiber-subtick">S{{ col.n }}</text>
+              <text x="{{ col.x * spacing }}" y="{{ 1.25 * spacing }}" data-x="{{ col.x }}" class="fiber-subtick">{{ col.stem }}</text>
+            {%- endfor %}
+            {%- else %}
             {%- for i in range(data.header.chart.width.min, data.header.chart.width.max + 1, axis_interval) %}
               <text x="{{ i * spacing }}" y="{{ 0.5 * spacing }}">{{ data.header.chart.x_reflect_sum - i if data.header.chart.x_reflect_sum is defined else i }}</text>
             {%- endfor %}
+            {%- endif %}
           </g>
           <g id="y-ticks" class="y-tick">
             {%- for j in range(data.header.chart.height.min, data.header.chart.height.max + 1, axis_interval) %}
@@ -245,6 +258,37 @@
     </svg>
   </div>
   <div id="tooltip"></div>
+  {%- if data.get("header", {}).get("metadata", {}).get("viewMode", "") == "fiber" %}
+  {#- filterValue can be present-but-None (CLI run without a filter arg), so a
+      plain .get default never applies; fall back to jsonmaker's fiberN. #}
+  {%- set _fiber_meta = data.get("header", {}).get("metadata", {}) %}
+  {%- set fiber_n = _fiber_meta.get("filterValue") if _fiber_meta.get("filterValue") is not none else _fiber_meta.get("fiberN", 0) %}
+  {%- set fiber_diag = data.get("header", {}).get("metadata", {}).get("fiberDiagnostics", {}) %}
+  <div id="fiber-legend">
+    <div class="fiber-legend-row"><span class="fiber-swatch" style="background: var(--cc-mapE)"></span>E : S<sup>{{ fiber_n }}</sup> &rarr; &Omega;S<sup>{{ fiber_n + 1 }}</sup></div>
+    <div class="fiber-legend-row"><span class="fiber-swatch" style="background: var(--cc-mapH)"></span>H : &Omega;S<sup>{{ fiber_n + 1 }}</sup> &rarr; &Omega;S<sup>{{ 2 * fiber_n + 1 }}</sup></div>
+    <div class="fiber-legend-row"><span class="fiber-swatch" style="background: var(--cc-mapP)"></span>P : &Omega;S<sup>{{ 2 * fiber_n + 1 }}</sup> &rarr; S<sup>{{ fiber_n }}</sup></div>
+    <div class="fiber-legend-row"><span class="fiber-swatch fiber-swatch-dashed"></span>dashed = zero or hidden on this page</div>
+    <div class="fiber-legend-row"><span class="fiber-swatch fiber-swatch-shade"></span>shaded = stable range (stem &le; {{ fiber_n - 2 }})</div>
+    <div class="fiber-legend-row">columns cycle S<sup>{{ fiber_n }}</sup>&nbsp;(E)&nbsp;&rarr;&nbsp;S<sup>{{ fiber_n + 1 }}</sup>&nbsp;(H)&nbsp;&rarr;&nbsp;S<sup>{{ 2 * fiber_n + 1 }}</sup>&nbsp;(P)&nbsp;&rarr; next stem; reading &rarr; walks the exact sequence, each map one column</div>
+    {%- if not data.get("header", {}).get("metadata", {}).get("fiberHasTop", True) %}
+    <div class="fiber-legend-row">S<sup>{{ 2 * fiber_n + 1 }}</sup> out of computed range</div>
+    {%- endif %}
+    <details id="fiber-diagnostics">
+      <summary>Exactness diagnostics ({{ fiber_diag.get("totals", {}).get("flagged", 0) }} flagged)</summary>
+      <div class="fiber-diag-totals">F&#8322; rank totals &mdash; E: {{ fiber_diag.get("totals", {}).get("E", 0) }}, H: {{ fiber_diag.get("totals", {}).get("H", 0) }}, P: {{ fiber_diag.get("totals", {}).get("P", 0) }}</div>
+      {%- if fiber_diag.get("cells", []) %}
+      <ul>
+        {%- for c in fiber_diag.get("cells", []) %}
+        <li>U<sup>{{ c.sphere }}</sup>(s={{ c.stem }}, f={{ c.f }}): rank {{ c.map_in }} in = {{ c.rank_in }}, dim ker {{ c.map_out }} = {{ c.ker_out }} (dim {{ c.dim }}) &mdash; candidate hidden map</li>
+        {%- endfor %}
+      </ul>
+      {%- else %}
+      <div class="fiber-diag-totals">no mismatches inside the window</div>
+      {%- endif %}
+    </details>
+  </div>
+  {%- endif %}
   <script>
     // All theme colors live in per-theme CSS variable blocks in <head>
     // (generated from themes.json). Switching theme is a single data-theme
@@ -548,7 +592,7 @@
           element.setAttribute("transform", `translate(${xTranslate} 0)`);
         });
         document.querySelectorAll("#x-ticks text").forEach((element) => {
-          const xCoord = {{ "(" ~ data.header.chart.x_reflect_sum ~ " - parseInt(element.textContent))" if data.header.chart.x_reflect_sum is defined else "parseInt(element.textContent)" }} * spacing;
+          const xCoord = {{ "(element.dataset.x !== undefined ? parseFloat(element.dataset.x) : parseInt(element.textContent))" if data.get("header", {}).get("metadata", {}).get("viewMode", "") == "fiber" else ("(" ~ data.header.chart.x_reflect_sum ~ " - parseInt(element.textContent))" if data.header.chart.x_reflect_sum is defined else "parseInt(element.textContent)") }} * spacing;
           element.setAttribute("x", xCoord * scale);
         });
         document.querySelectorAll("#y-ticks").forEach((element) => {
@@ -665,6 +709,18 @@
       
       // Generate dynamic title based on current page
       function generateTitle() {
+        {%- if data.get("header", {}).get("metadata", {}).get("viewMode", "") == "fiber" %}
+        // Fiber charts (fiber{N}_E{r}.html) are titled with the fiber
+        // sequence S^N -> Omega S^{N+1} -> Omega S^{2N+1}. Checked BEFORE
+        // the other branches.
+        const fiberMatch = window.location.pathname.split('/').pop().match(/^fiber(\d+)_E(\d+)/);
+        if (fiberMatch) {
+          const fiberN = parseInt(fiberMatch[1]);
+          document.getElementById('main-title').textContent =
+            `$\\mathrm{E}_{${fiberMatch[2]}}(S^{${fiberN}} \\to \\Omega S^{${fiberN + 1}} \\to \\Omega S^{${2 * fiberN + 1}})$`;
+          return;
+        }
+        {%- endif %}
         // Stem charts (stem{k}_E{r}.html) are titled E_r(π^k).
         const stemMatch = window.location.pathname.split('/').pop().match(/^stem(\d+)_E(\d+)/);
         let titleText;
@@ -693,6 +749,28 @@
         ],
         throwOnError: false
       });
+
+      {%- if data.get("header", {}).get("metadata", {}).get("viewMode", "") == "fiber" %}
+      // Fiber only (Task 3): the legend starts hidden (#fiber-legend has
+      // display:none in the generated CSS); clicking the title toggles it.
+      // #title-container has pointer-events:none, so re-enable events on the
+      // title itself and give it a pointer cursor. Sphere/stem charts never
+      // enter this branch, so they stay byte-identical.
+      (function () {
+        const title = document.getElementById('main-title');
+        const legend = document.getElementById('fiber-legend');
+        if (title) {
+          title.style.cursor = 'pointer';
+          title.style.pointerEvents = 'auto';
+          if (legend) {
+            title.addEventListener('click', function () {
+              const shown = window.getComputedStyle(legend).display !== 'none';
+              legend.style.display = shown ? 'none' : 'block';
+            });
+          }
+        }
+      })();
+      {%- endif %}
 
       // Show the SVG after y-values are adjusted
       document.body.style.visibility = "visible";

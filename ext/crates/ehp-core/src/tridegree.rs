@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// A tridegree (n, s, f) in the unstable Adams spectral sequence.
 ///
 /// - `n`: sphere of origin
-/// - `s`: stem (Adams filtration degree)
+/// - `s`: stem — `U_r^{n,s,f}` detects elements of `π_{n+s}(S^n)`
 /// - `f`: Adams filtration
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct Tridegree {

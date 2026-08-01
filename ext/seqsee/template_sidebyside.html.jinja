@@ -787,14 +787,13 @@
       });
 
       // Pre-mark sphere edges where both endpoints are in the J-image.
-      // Skip differential (d{r}) and unknown-differential (n{r}) edges:
-      // image mode marks the map's image (classes + the structure lines
-      // among them); differentials are not part of the image, and forcing
-      // them to the highlight color made the target chart's d_r colors
-      // look wrong whenever a differential connected two image classes.
-      // They fade with the rest of the non-image content instead.
+      // This includes differential (d{r}) and unknown-differential (n{r})
+      // edges: an image class supporting/receiving a differential within the
+      // image is exactly what image mode should surface, so they get the same
+      // highlight treatment as the structure lines (dashed n{r} edges keep
+      // their dash pattern). Edges with only one endpoint in the image fade
+      // with the rest of the non-image content.
       document.querySelectorAll("#content-group-right .defaultEdge[data-source][data-target]").forEach(edge => {
-        if (Array.from(edge.classList).some(c => /^[dn]\d+$/.test(c))) return;
         const src = edge.getAttribute("data-source");
         const tgt = edge.getAttribute("data-target");
         if (jImageNodes.has(src) && jImageNodes.has(tgt)) {

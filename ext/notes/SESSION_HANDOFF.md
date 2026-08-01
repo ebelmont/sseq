@@ -323,3 +323,97 @@ viewport persistence, regen cap removed, seqsee python probe fix.
 7. Pre-existing gaps: mapview staleness after mutations; Rust has no
    per-page-turn cutoff decrement for ITS OWN edge determinations (Python
    does) — unaudited.
+
+## July 31 2026 session — hidden values v1, incremental cascades, chart-gen 10×, consensus sweeps
+
+Full mechanisms in CLAUDE.md bullets (each feature has one) + three new
+notes; this is the orientation layer. Everything below is verified-built
+with `cargo test -p ehp-core` green; scale validation was done live by the
+user at t=100 unless marked otherwise.
+
+### New capabilities
+1. **Hidden EHP map values v1** (`ehp-core/src/hidden.rs`, `EHP_HIDDEN`):
+   user-asserted hidden P/E/H values (map values landing δ≥1 filtrations
+   above nominal), Toda P(a∘E²b)=P(a)∘b forward propagation (nonzero
+   products ONLY — zero page products may hide extensions), CSV persistence
+   (`data/E2/hidden_EHP.csv`, cache-hash-safe, quarantine on basis drift),
+   `hidden …` REPL family, fiber-chart dotted overlay + Shift+V
+   click-to-assert, `diag_hidden` example (reuses snapshot/warm-cache pages).
+   READ `notes/HIDDEN_VALUE_PROPAGATION_NOTES.md` before extending: v1 is a
+   forward closure; the agreed long-term shape is a CONSTRAINT SYSTEM
+   isomorphic to the differential engine (Toda linearity = the Leibniz rule
+   of hidden values; exactness = the d² analog; δ-ladder = the page tower).
+2. **Cascade correctness + incremental rebuilds** (`cascade_resolve` +
+   `pageturning::patch_page_from_turned`): determination-status changes
+   (unknown ↔ determined, incl. zeros) now keep the cascade alive — forced/
+   asserted ZEROS propagate un-exclusions (was the (5,25,4) bug class);
+   exclusion-set changes regenerate affected charts; `solve_through`
+   parameter guarantees pages with directly-mutated known_diffs are always
+   re-solved (multi-page batches / outside retry / consensus). Rebuilds are
+   incremental: skip path (empty dirty ⇒ exclusions-only update, near-free —
+   the zero-assert case), patch path (Arc-clone + recompute only maps/
+   products/dims touching dirty degrees, dirty chained across pages via
+   PatchOutcome.changed), full rebuild fallback (force/`interpage`,
+   self-heal, unknown deltas). `EHP_CASCADE_VERIFY=1` double-computes and
+   structurally cross-checks (prints per-entry diffs); verified at t=100 on
+   0-dirty, small, and 85k-dirty mutations; `EHP_CASCADE_PATCH=0` kill
+   switch. Cascade patches now run 0.2–4.6s where full rebuilds were ~40s.
+3. **Chart generation ~10×** (vendored `ext/seqsee/jsonmaker.py`): ~95% of
+   generation CPU was `pd.read_csv` re-parsing the same page CSV PER CHART
+   (11–13s/chart at t=100). Fixed: (path,mtime) CSV cache, `_rows(df)`
+   dict-rows cache replacing all `iterrows`, cached schema, fiber
+   sibling-CSV cache, `jsonschema` validation opt-in (`SEQSEE_VALIDATE=1`).
+   Byte-parity verified on the full t=25 corpus (540 files identical).
+   `regen_affected_charts` also parallelizes its per-page plan entries.
+4. **Both-worlds consensus** (`interpage::trial_error_sweep_full`,
+   `EHP_CONSENSUS=0` disables): consistent trials' learned sets are
+   intersected — a var forced to the SAME value whether a switch is 0 or 1
+   is determined unconditionally (kills "uncertain d4s" that exist only
+   because their degree is excluded under an uncertain d3). Basis guard:
+   only accepted when NEITHER world changed dims at the var's src/tgt
+   degrees (equal dims ⇒ identical canonical bases). `sweep` reports;
+   `interpage try` applies (with conflict detection = base-system
+   inconsistency signal). Verified working by the user at t=100.
+5. **Instrumentation everywhere** (`EHP_TIMING=1`): chart-gen TIMESUM
+   aggregates + injection-pass stopwatches; `interpage::trial_stats`
+   per-stage trial timers (first-solve/turn/overlay/constraints/re-solve/
+   teardown + assumed-1/learned-1/zero-stratum splits); pass-over-pass
+   outcome memo ("skippable ceiling"); cascade-patch timings. Measured
+   t=100 profile lives in `notes/INTERPAGE_TRY_SPEEDUP.md`.
+6. Map-view image mode (Shift+E/H/P/J) now highlights differentials whose
+   BOTH endpoints are in the image (old deliberate skip removed;
+   `template_sidebyside.html.jinja`). User's planned direction: a fade-only
+   mode preserving original colors (see CLAUDE.md).
+
+### The priority queue for the next session (designs are WRITTEN, execute)
+1. `notes/INTERPAGE_TRY_SPEEDUP.md` — measured: overlay+teardown = 76–91%
+   of trial CPU; E5 trials (no page step) cost 6ms = the floor; skippable
+   ceiling ≈ 100%. Design 1: THIN OVERLAY (minimal page instead of 2M-entry
+   clone+drop per page step; gated on `diag_sweep_verify` byte-parity + a
+   per-step constraint-comparison verify mode). Design 2: influence-based
+   PASS SKIPPING. Expected: interpage try ~472s → ~1 min at t=100.
+2. `notes/HIDDEN_VALUE_PROPAGATION_NOTES.md` — hidden-value constraint
+   system (HiddenVar, Toda + exactness constraints, same solver, δ-ladder;
+   v1 forward closure is the regression oracle; UI layer stays).
+3. `notes/CHARTGEN_SPEEDUP_INVESTIGATION.md` leftovers — JSON round-trip
+   skip, compact_json→stdlib, on-demand map views, shared assets (re-profile
+   first; jsonmaker and render are now the same order).
+
+### Gotchas (new + one CORRECTION)
+- CORRECTION to the earlier "runtime SeqSee is ~/seqsee/seqsee_new" gotcha:
+  the RUNTIME copy is now the VENDORED `ext/seqsee/` (resolved via
+  CARGO_MANIFEST_DIR; the session banner prints which). The external
+  `~/seqsee/seqsee_new` checkout is OLDER (no fiber mode) — do not edit it
+  expecting runtime effect, and do not "sync" it over the vendored copy.
+- NEVER run test REPL sessions from `ext/` — `output/` and `snapshots/` are
+  cwd-relative and shared with the user's live session (a test run clobbered
+  one). Run from a scratch cwd (data paths resolve absolutely); delete any
+  test-created `output/.ehp_last.json` (it hijacks the `ehp` launcher).
+- `jsonmaker.py` defines `def main()` which SHADOWS `import main` at call
+  time — reference the module via the `_seqsee_main` alias only.
+- `ProductTable::multiply` returns zero for ABSENT blocks: any "minimal
+  page" construction (thin overlay!) can silently corrupt constraints by
+  missing a block — always pair with a constraint-comparison verify mode.
+- Consensus/hidden/outside values are all basis-dependent statements —
+  every new "recorded value" channel needs the quarantine + dim-guard
+  treatment, not silent application.

@@ -2,6 +2,7 @@ import copy
 import json
 import jsonschema
 import math
+import re
 import sys
 import os
 from collections import defaultdict
@@ -157,10 +158,17 @@ def get_theme_colors(theme="light"):
     return THEME_PALETTES.get(theme, CATPPUCCIN_LATTE)
 
 
-def get_themed_color_aliases(theme="light"):
-    """Generate color aliases using the appropriate Catppuccin theme."""
+def get_themed_color_aliases(theme="light", fiber=False):
+    """Generate color aliases using the appropriate Catppuccin theme.
+
+    With `fiber=True`, also emit the fiber-view map colors mapE/mapH/mapP
+    (no 'n' prefix — n-prefixed aliases get auto-dashed below). Every theme
+    in themes.json shares the same palette role names, so picking distinct
+    roles here yields distinct, readable colors in every theme. Fiber-only
+    so sphere/stem chart output stays byte-identical.
+    """
     colors = get_theme_colors(theme)
-    return {
+    aliases = {
         # Legacy color names mapped to Catppuccin
         "darkcyan": colors["teal"],      # Use teal instead of sapphire for darkcyan
         "darkgreen": colors["green"],
@@ -194,12 +202,22 @@ def get_themed_color_aliases(theme="light"):
         "n6": colors["yellow"],          # n6 nulldif edges - yellow dashed
         "n7": colors["peach"],           # n7 nulldif edges - peach dashed
         "n8": colors["mauve"],           # n8 nulldif edges - mauve dashed
-        
+
         # Note: nulldifs now use n2, n3, n4, etc. which are already defined above
     }
+    if fiber:
+        aliases.update(
+            {
+                # Fiber-sequence map colors (fiber view only)
+                "mapE": colors["sapphire"],  # E: S^N -> Omega S^{N+1}
+                "mapH": colors["maroon"],    # H: Omega S^{N+1} -> Omega S^{2N+1}
+                "mapP": colors["green"],     # P: Omega S^{2N+1} -> S^N
+            }
+        )
+    return aliases
 
 
-def build_theme_css(initial_theme="light"):
+def build_theme_css(initial_theme="light", fiber=False):
     """
     Emit one `:root[data-theme="X"]` CSS-variable block per theme, covering both
     the chrome variables (--bg-color etc.) and every themed color alias as
@@ -228,7 +246,7 @@ def build_theme_css(initial_theme="light"):
             "--muted-color": pal["subtext0"],
             "--panel-bg": pal["mantle"],
         }
-        for alias, color in get_themed_color_aliases(name).items():
+        for alias, color in get_themed_color_aliases(name, fiber=fiber).items():
             theme_vars[f"--cc-{alias}"] = color
         body = "\n".join(f"      {k}: {v};" for k, v in theme_vars.items())
         selector = f':root[data-theme="{name}"]'
@@ -477,6 +495,8 @@ def generate_nodes_svg(data):
         data, ["header", "chart", "nodeSize"]
     )
 
+    node_view_mode = data.get("header", {}).get("metadata", {}).get("viewMode")
+
     for node_id, node in data.get("nodes", {}).items():
         cx = node["absoluteX"] * scale
         cy = node["absoluteY"] * scale
@@ -530,12 +550,27 @@ def generate_nodes_svg(data):
         if unc_src or unc_tgt:
             kind = "both" if (unc_src and unc_tgt) else ("src" if unc_src else "tgt")
             uncertain_attr = f' data-uncertain="{kind}"'
-            mark_font_size = 1.1 * default_node_radius
-            uncertain_mark = (
-                f'<text class="uncertain-mark" x="{cx}" y="{cy}" text-anchor="middle" '
-                f'dominant-baseline="central" font-size="{mark_font_size}px" '
-                f'pointer-events="none">?</text>\n'
-            )
+            if node_view_mode == "fiber":
+                # Fiber charts: sized ~4x the node radius and offset to the
+                # upper right so the glyph clears the dot. Gated on fiber so
+                # existing stem charts stay byte-identical.
+                mark_font_size = 4.0 * default_node_radius
+                mark_offset = 1.4 * default_node_radius
+                uncertain_mark = (
+                    f'<text class="uncertain-mark" x="{cx + mark_offset}" y="{cy - mark_offset}" '
+                    f'text-anchor="start" '
+                    f'dominant-baseline="central" font-size="{mark_font_size}px" '
+                    f'pointer-events="none">?</text>\n'
+                )
+            else:
+                # Stem charts (original form): 1.1x, centered on the node.
+                mark_font_size = 1.1 * default_node_radius
+                uncertain_mark = (
+                    f'<text class="uncertain-mark" x="{cx}" y="{cy}" '
+                    f'text-anchor="middle" '
+                    f'dominant-baseline="central" font-size="{mark_font_size}px" '
+                    f'pointer-events="none">?</text>\n'
+                )
 
         # Generate appropriate SVG element based on shape
         if node_shape in ["square", "rectangle"]:
@@ -629,11 +664,61 @@ def generate_edges_svg(data):
     return edges_svg
 
 
+def generate_fiber_decorations_svg(data):
+    """Fiber-view chart decorations, drawn under edges and nodes.
+
+    Emitted in PRE-NEGATION coordinates (y = f * scale, positive), exactly
+    like edges/nodes: the template's DOMContentLoaded pass negates every y
+    inside #content-group (lines via y1/y2, rects center-adjusted).
+
+    The fiber sequence is unrolled one column per map source (see jsonmaker).
+    Decorations: a light separator before each S^N (E-source) column so each
+    stem's E/H/P triple reads as a block, and stable-range shading over
+    columns whose intrinsic stem <= N - 2 (Freudenthal range). Returns ""
+    outside fiber view, keeping other charts byte-identical.
+    """
+    meta = data.get("header", {}).get("metadata", {})
+    if meta.get("viewMode") != "fiber":
+        return ""
+    chart = data.get("header", {}).get("chart", {})
+    n_base = chart.get("fiber_n")
+    columns = chart.get("fiberColumns")
+    if n_base is None or not columns:
+        return ""
+    height = chart["height"]
+    y_min, y_max = height["min"], height["max"]
+
+    svg = '<g id="fiber-decorations">\n'
+
+    # Stable-range shading: one band per column whose intrinsic stem <= N - 2.
+    for col in columns:
+        if col["stem"] <= n_base - 2:
+            svg += (
+                f'<rect class="fiber-stable-range" x="{(col["x"] - 0.5) * scale}" '
+                f'y="{y_min * scale}" width="{scale}" '
+                f'height="{(y_max - y_min) * scale}"></rect>\n'
+            )
+
+    # Separator before each S^N column: marks the start of a stem's
+    # E -> H -> P triple.
+    for col in columns:
+        if col["n"] == n_base:
+            x_sep = (col["x"] - 0.5) * scale
+            svg += (
+                f'<line class="fiber-separator" x1="{x_sep}" y1="{y_min * scale}" '
+                f'x2="{x_sep}" y2="{y_max * scale}"></line>\n'
+            )
+
+    svg += "</g>\n"
+    return svg
+
+
 def generate_svg(data):
     # First make sure that the absolute positions are calculated
     calculate_absolute_positions(data)
     # We generate nodes after edges so that they are drawn on top
-    return generate_edges_svg(data) + generate_nodes_svg(data)
+    # (fiber decorations, when present, go underneath everything)
+    return generate_fiber_decorations_svg(data) + generate_edges_svg(data) + generate_nodes_svg(data)
 
 
 def generate_html(data, theme="light"):
@@ -651,7 +736,9 @@ def generate_html(data, theme="light"):
     
     # Get theme colors for template
     theme_colors = get_theme_colors(theme)
-    
+
+    is_fiber = data.get("header", {}).get("metadata", {}).get("viewMode") == "fiber"
+
     template = load_template()
     html_output = template.render(
         data=data,
@@ -661,7 +748,7 @@ def generate_html(data, theme="light"):
         static_svg_content=static_svg_content,
         theme=theme if theme in THEME_PALETTES else "light",
         theme_colors=theme_colors,
-        theme_css=build_theme_css(theme),
+        theme_css=build_theme_css(theme, fiber=is_fiber),
         theme_names_json=json.dumps(THEME_ORDER),
         theme_labels_json=json.dumps(THEME_LABELS),
         theme_label=THEME_LABELS.get(theme, theme),
@@ -774,8 +861,10 @@ def generate_css_styles(data, theme="light"):
     # build_theme_css(), so the generated classes are theme-independent and
     # runtime theme switching needs no restyling. User-defined aliases from
     # the data header keep their literal values (they override).
+    is_fiber = data.get("header", {}).get("metadata", {}).get("viewMode") == "fiber"
     themed_colors = {
-        alias: f"var(--cc-{alias})" for alias in get_themed_color_aliases(theme)
+        alias: f"var(--cc-{alias})"
+        for alias in get_themed_color_aliases(theme, fiber=is_fiber)
     }
     color_aliases = get_value_or_schema_default(data, ["header", "aliases", "colors"])
     final_color_aliases = {**themed_colors, **color_aliases}
@@ -857,12 +946,139 @@ def generate_css_styles(data, theme="light"):
     # and filled (d_r-colored) nodes in every theme; it is how all other
     # chart text (ticks, axes) is colored. Gated on viewMode so sphere
     # charts stay byte-identical.
-    if data.get("header", {}).get("metadata", {}).get("viewMode") == "stem":
+    if data.get("header", {}).get("metadata", {}).get("viewMode") in ("stem", "fiber"):
         global_css += {
             ".uncertain-mark": {
                 "fill": "var(--text-color)",
                 "font-weight": "bold",
+                # Halo so the glyph stays legible over grid lines and
+                # adjacent nodes (paint-order draws the stroke underneath).
+                "stroke": "var(--bg-color)",
+                "stroke-width": "0.4px",
+                "paint-order": "stroke",
             }
+        }
+
+    # Fiber-view-only styles: master-column separators, stable-range shading,
+    # the S^{2N+1} window boundary, click-highlight focus, per-sub-column
+    # tick labels, and the legend / diagnostics panels. Gated on viewMode so
+    # sphere/stem charts stay byte-identical.
+    if is_fiber:
+        # Task 5: the fiber tooltip is now a multi-line HTML box (class name,
+        # sphere, tridegree, per-map image). Give it room and readable
+        # line spacing. Fiber only, so sphere/stem #tooltip is untouched.
+        global_css += {
+            "#tooltip": {
+                "max-width": "22em",
+                "line-height": "1.4",
+                "text-align": "left",
+            }
+        }
+        global_css += {
+            ".fiber-separator": {
+                "stroke": "var(--grid-color)",
+                "stroke-width": "1.5px",
+                "fill": "none",
+            }
+        }
+        global_css += {
+            ".fiber-stable-range": {
+                "fill": "var(--surface-color)",
+                "stroke": "none",
+                "opacity": "0.35",
+            }
+        }
+        global_css += {
+            ".fiber-window-boundary": {
+                "stroke": "var(--muted-color)",
+                "stroke-width": "2px",
+                "stroke-dasharray": "10, 6",
+                "fill": "none",
+            }
+        }
+        # Click-highlight: selected elements carry .fiber-focus while
+        # everything else gets .faded (see the injected chart JS).
+        global_css += {".fiber-focus": {"opacity": "1"}}
+        # Hidden-EHP-value candidate: a node that is neither hit by nor supports
+        # an EHP map AND is not involved in any uncertain Adams differential.
+        # By exactness such a class shouldn't exist on an exact page, so on the
+        # E-infinity page it flags an exactness failure that is NOT explained by
+        # a missed differential -> a candidate hidden EHP value to inspect. The
+        # fiber block in process_json tags these "fiber_hidden" (max page only).
+        # Slightly enlarged with a bold pink border so they stand out.
+        global_css += {
+            ".fiber_hidden": {
+                "r": scale * node_size * 1.5,
+                "fill": "var(--text-color)",
+                "stroke": "#ff6ea6",
+                "stroke-width": scale * node_size * 0.55,
+            }
+        }
+        global_css += {
+            ".fiber-subtick": {
+                "fill": "var(--muted-color)",
+                "font-size": "9pt",
+            }
+        }
+        global_css += {
+            "#fiber-legend": {
+                # Hidden until the user clicks the title (see the fiber-gated
+                # click handler in the template JS). Task 3.
+                "display": "none",
+                "position": "absolute",
+                "bottom": "20px",
+                "left": "20px",
+                "z-index": "10",
+                "font-family": "sans-serif",
+                "font-size": "13px",
+                "color": "var(--text-color)",
+                "background-color": "var(--panel-bg)",
+                "border": "1px solid var(--grid-color)",
+                "border-radius": "6px",
+                "padding": "8px 12px",
+                "max-width": "34em",
+            }
+        }
+        global_css += {".fiber-legend-row": {"margin": "2px 0"}}
+        global_css += {
+            ".fiber-swatch": {
+                "display": "inline-block",
+                "width": "1.6em",
+                "height": "0.35em",
+                "margin-right": "0.5em",
+                "vertical-align": "middle",
+                "border-radius": "2px",
+            }
+        }
+        global_css += {
+            ".fiber-swatch-dashed": {
+                "background": "none",
+                "height": "0",
+                "border-bottom": "2px dashed var(--text-color)",
+            }
+        }
+        global_css += {
+            ".fiber-swatch-shade": {
+                "background-color": "var(--surface-color)",
+                "height": "0.9em",
+            }
+        }
+        global_css += {
+            "#fiber-diagnostics": {
+                "margin-top": "6px",
+                "font-size": "12px",
+            }
+        }
+        global_css += {
+            "#fiber-diagnostics ul": {
+                "max-height": "30vh",
+                "overflow-y": "auto",
+                "margin": "4px 0",
+                "padding-left": "1.4em",
+            }
+        }
+        global_css += {
+            "#fiber-diagnostics summary": {"cursor": "pointer"}
         }
 
     # Add faded class for highlighting mode
@@ -918,10 +1134,114 @@ def process_json(input_file, output_file, theme="light", view_mode="sphere", fil
         for node in data.get("nodes", {}).values():
             node["x"] = x_reflect_sum - node["x"]
         data["header"]["chart"]["x_reflect_sum"] = x_reflect_sum
-        # Stem charts line up same-bidegree classes DIAGONALLY (45°) instead
-        # of the schema-default horizontal (nodeSlope 0). An explicit
-        # nodeSlope in the input JSON still wins.
+        # Stem charts line up same-bidegree classes DIAGONALLY (−45°, slope
+        # −1) instead of the schema-default horizontal (nodeSlope 0). An
+        # explicit nodeSlope in the input JSON still wins.
+        data["header"]["chart"].setdefault("nodeSlope", -1)
+
+    # Fiber mode only: jsonmaker already emits the integer unrolled-sequence
+    # column as node x (S^N/S^{N+1}/S^{2N+1} each in their own full column,
+    # one map step apart), so there is no fractional sub-column rewrite. We
+    # only record per-column descriptors (sphere + intrinsic stem) for the
+    # decorations and the custom sphere/stem tick labels, plus N.
+    if view_mode == "fiber" and filter_value is not None:
+        import re as _re
+
+        # Ensure header.chart (width/height bounds) exists; idempotent, so the
+        # later call inside generate_html is a no-op.
+        compute_chart_dimensions(data)
+        n_base = filter_value
+        columns = {}
+        for node_id, node in data.get("nodes", {}).items():
+            m = _re.match(r"^S(\d+)_(\-?\d+)_", node_id)
+            if not m:
+                continue
+            n_val, stem = int(m.group(1)), int(m.group(2))
+            columns[node["x"]] = {"x": node["x"], "n": n_val, "stem": stem}
+        # Same-cell classes stack diagonally, like stem charts.
         data["header"]["chart"].setdefault("nodeSlope", 1)
+        data["header"]["chart"]["fiber_n"] = n_base
+        data["header"]["chart"]["fiberColumns"] = [
+            columns[x] for x in sorted(columns)
+        ]
+
+        # Task 6: within a cell, order nodes so map-TARGETS (hit; ker of the
+        # outgoing map by exactness) sit at the SW/left end and map-SOURCES
+        # (support an outgoing map) at the NE/right end, cutting edge
+        # crossings. A SOLID edge is one that is NOT a dashed 'zero/hidden'
+        # stub: it lands on a real target (has a 'target') or is a solid
+        # offset arrow (its attributes carry an arrowTip dict). We overwrite
+        # any existing position (fiber nodes only ever get position 0 from the
+        # CSV 'shift'). calculate_absolute_positions sorts ASCENDING, so
+        # position -1 -> SW/left (hit), +1 -> NE/right (support).
+        def _edge_is_solid(edge):
+            for a in edge.get("attributes", []):
+                if a == "dashed":
+                    return False
+            return True
+
+        def _edge_is_source_side(edge):
+            # A node "supports" an outgoing map if it is the source of a solid
+            # edge that either lands on a real target or is a solid offset
+            # arrow (arrowTip). A dashed stub does not count.
+            if not _edge_is_solid(edge):
+                return False
+            if edge.get("target"):
+                return True
+            for a in edge.get("attributes", []):
+                if isinstance(a, dict) and "arrowTip" in a:
+                    return True
+            return False
+
+        has_incoming = set()
+        has_outgoing = set()
+        for edge in data.get("edges", []):
+            if not _edge_is_solid(edge):
+                continue
+            src = edge.get("source")
+            tgt = edge.get("target")
+            if tgt:
+                has_incoming.add(tgt)
+            if src is not None and _edge_is_source_side(edge):
+                has_outgoing.add(src)
+        # Hidden-EHP-value candidates (max page only): a node neither hit by nor
+        # supporting an EHP map, AND not involved in any uncertain Adams
+        # differential (no diff_d / uncertain_* attribute), AT a tridegree where
+        # exactness GENUINELY fails. The last clause is essential: a class high
+        # enough in stem that its EHP maps weren't computed is "stranded" only by
+        # truncation, not a real hidden value. So we require the node's tridegree
+        # (sphere, stem, f) to be a flagged cell of the exactness diagnostics,
+        # which are frontier-guarded (a comparison whose map source is beyond the
+        # recorded data is skipped). Tag "fiber_hidden" (enlarged + pink border).
+        meta = data.get("header", {}).get("metadata", {})
+        fiber_max_page = bool(meta.get("fiberMaxPage"))
+        flagged_cells = set()
+        for c in meta.get("fiberDiagnostics", {}).get("cells", []):
+            try:
+                flagged_cells.add((int(c["sphere"]), int(c["stem"]), int(c["f"])))
+            except (KeyError, ValueError, TypeError):
+                continue
+        _tri = re.compile(r"^S(\d+)_(-?\d+)_(-?\d+)")
+        for node_id, node in data.get("nodes", {}).items():
+            node["position"] = int(node_id in has_outgoing) - int(
+                node_id in has_incoming
+            )
+            if (
+                fiber_max_page
+                and flagged_cells
+                and node_id not in has_incoming
+                and node_id not in has_outgoing
+            ):
+                m = _tri.match(node_id)
+                tri = (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+                attrs = node.get("attributes", [])
+                involved = any(
+                    isinstance(a, str)
+                    and (a.startswith("diff_d") or a.startswith("uncertain_"))
+                    for a in attrs
+                )
+                if tri in flagged_cells and not involved:
+                    node.setdefault("attributes", []).append("fiber_hidden")
 
     # Generate HTML
     html_content = generate_html(data, theme)
@@ -1733,8 +2053,8 @@ def main():
         print("       seqsee --multi <output.html> <chart1.json> [chart2.json] ... [theme]")
         print("       seqsee --sidebyside <so.json> <sphere.json> <output.html> [theme] [back_url]")
         print("  theme: 'light' or 'dark' (default: light)")
-        print("  view_mode: 'sphere' or 'stem' (default: sphere)")
-        print("  filter_value: integer to filter by (n for sphere, s for stem)")
+        print("  view_mode: 'sphere', 'stem' or 'fiber' (default: sphere)")
+        print("  filter_value: integer to filter by (n for sphere, s for stem, base N for fiber)")
         sys.exit(1)
 
     if sys.argv[1] == "--multi":

@@ -958,6 +958,82 @@ pub fn try_diffs(
     try_diffs_with_cache(pages, assumptions, None)
 }
 
+/// Everything a consistent trial determined, plus the basis bookkeeping a
+/// consumer needs to compare trials ACROSS worlds: `dim_changed` holds the
+/// stable reps of every degree whose dimension this trial's overlays changed
+/// (union over page steps). A learned value at degrees OUTSIDE this set is a
+/// statement in the stock partial-page basis (equal dims ⇒ identical
+/// canonical echelon bases — see the stale-blocks comment in the trial body),
+/// so it is comparable between the two worlds of a switch.
+pub struct TrialRun {
+    pub learned: Vec<LearnedDiff>,
+    pub dim_changed: HashSet<Tridegree>,
+}
+
+/// Per-stage trial profiling: lock-free atomic sums over every
+/// [`try_diffs_with_cache`] call since the last report. Overhead is a handful
+/// of `Instant::now()` calls per trial — negligible against trial cost — so
+/// collection is always on; only reporting is caller-gated. The
+/// assumed-1 / learned-1 splits price the "zero-stratum" optimization: a
+/// trial whose assumed AND learned values are all 0 changes no turned data
+/// (unknowns already turn as 0), so its turn/overlay stage time is in
+/// principle removable.
+pub mod trial_stats {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    pub static TRIALS: AtomicU64 = AtomicU64::new(0);
+    pub static ASSUMED_ONE: AtomicU64 = AtomicU64::new(0);
+    pub static LEARNED_ONE: AtomicU64 = AtomicU64::new(0);
+    /// Assumed all-0 AND learned only 0s: the trials whose turn/overlay work
+    /// is provably a no-op (nothing turning-effective changed).
+    pub static ZERO_STRATUM: AtomicU64 = AtomicU64::new(0);
+    pub static CONTRADICTED: AtomicU64 = AtomicU64::new(0);
+    pub static PAGE_STEPS: AtomicU64 = AtomicU64::new(0);
+    pub static NS_FIRST_SOLVE: AtomicU64 = AtomicU64::new(0);
+    pub static NS_TURN: AtomicU64 = AtomicU64::new(0);
+    pub static NS_OVERLAY: AtomicU64 = AtomicU64::new(0);
+    pub static NS_CONSTRAINTS: AtomicU64 = AtomicU64::new(0);
+    pub static NS_SOLVE: AtomicU64 = AtomicU64::new(0);
+    /// Dropping the per-step overlay pages (~2M Arc'd product blocks each):
+    /// suspected owner of the time the other stages don't account for.
+    pub static NS_DROP: AtomicU64 = AtomicU64::new(0);
+    pub static NS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+    pub fn add(counter: &AtomicU64, ns: u128) {
+        counter.fetch_add(ns as u64, Relaxed);
+    }
+
+    /// Human-readable report of everything since the last call, then reset.
+    /// `None` if no trials ran.
+    pub fn report_and_reset() -> Option<String> {
+        let trials = TRIALS.swap(0, Relaxed);
+        if trials == 0 {
+            return None;
+        }
+        let s = |c: &AtomicU64| c.swap(0, Relaxed) as f64 / 1e9;
+        let n = |c: &AtomicU64| c.swap(0, Relaxed);
+        Some(format!(
+            "{} trials ({} assumed-1, {} learned-1, {} zero-stratum, {} contradicted), \
+             {} page steps; \
+             cpu-side: first-solve {:.1}s, turn {:.1}s, overlay {:.1}s, constraints {:.1}s, \
+             re-solve {:.1}s, teardown {:.1}s, total {:.1}s",
+            trials,
+            n(&ASSUMED_ONE),
+            n(&LEARNED_ONE),
+            n(&ZERO_STRATUM),
+            n(&CONTRADICTED),
+            n(&PAGE_STEPS),
+            s(&NS_FIRST_SOLVE),
+            s(&NS_TURN),
+            s(&NS_OVERLAY),
+            s(&NS_CONSTRAINTS),
+            s(&NS_SOLVE),
+            s(&NS_DROP),
+            s(&NS_TOTAL),
+        ))
+    }
+}
+
 /// [`try_diffs`] with an optional sweep-shared [`SweepCache`] built from
 /// `pages`. The turned-degree cache is consulted only for the first page step
 /// (whose source page and base result are trial-invariant) and only at
@@ -970,6 +1046,54 @@ pub fn try_diffs_with_cache(
     assumptions: &[(DiffVar, bool)],
     cache: Option<&SweepCache>,
 ) -> Result<Vec<LearnedDiff>, TrialError> {
+    try_diffs_full(pages, assumptions, cache).map(|run| run.learned)
+}
+
+/// [`try_diffs_with_cache`] returning the full [`TrialRun`].
+pub fn try_diffs_full(
+    pages: &[InterpagePage],
+    assumptions: &[(DiffVar, bool)],
+    cache: Option<&SweepCache>,
+) -> Result<TrialRun, TrialError> {
+    use std::time::Instant;
+    let t_trial = Instant::now();
+    trial_stats::TRIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if assumptions.iter().any(|&(_, v)| v) {
+        trial_stats::ASSUMED_ONE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    let out = try_diffs_with_cache_inner(pages, assumptions, cache);
+    match &out {
+        Ok(run) => {
+            // Learned-1 means a value-1 determination BEYOND the assumptions
+            // themselves (the assumed var reappears in its own learned list):
+            // together with assumed-1 this splits off the "zero stratum" —
+            // trials that determine only zeros and therefore change no
+            // turned data.
+            let r0 = pages[0].page.r;
+            let learned_one = run.learned.iter().any(|l| {
+                l.value && !(l.r == r0 && assumptions.iter().any(|&(v, _)| v == l.var))
+            });
+            if learned_one {
+                trial_stats::LEARNED_ONE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if !learned_one && assumptions.iter().all(|&(_, v)| !v) {
+                trial_stats::ZERO_STRATUM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        Err(_) => {
+            trial_stats::CONTRADICTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    trial_stats::add(&trial_stats::NS_TOTAL, t_trial.elapsed().as_nanos());
+    out
+}
+
+fn try_diffs_with_cache_inner(
+    pages: &[InterpagePage],
+    assumptions: &[(DiffVar, bool)],
+    cache: Option<&SweepCache>,
+) -> Result<TrialRun, TrialError> {
+    use std::time::Instant;
     assert!(!pages.is_empty());
     let first = &pages[0];
     let r0 = first.page.r;
@@ -984,8 +1108,10 @@ pub fn try_diffs_with_cache(
         cons.push((vec![idx], val));
     }
 
-    let (learned0, mut dsat) =
-        update_sat_result(first.result, &cons, &[]).ok_or(TrialError::Unsat { r: r0 })?;
+    let t_s = Instant::now();
+    let first_solved = update_sat_result(first.result, &cons, &[]);
+    trial_stats::add(&trial_stats::NS_FIRST_SOLVE, t_s.elapsed().as_nanos());
+    let (learned0, mut dsat) = first_solved.ok_or(TrialError::Unsat { r: r0 })?;
     let mut learned_all: Vec<LearnedDiff> = learned0
         .into_iter()
         .map(|(var, value)| LearnedDiff { r: r0, var, value })
@@ -1009,6 +1135,7 @@ pub fn try_diffs_with_cache(
     });
 
     let mut prev_overlay: Option<SATPage> = None;
+    let mut dim_changed_all: HashSet<Tridegree> = HashSet::new();
 
     for i in 1..pages.len() {
         let target = &pages[i];
@@ -1026,14 +1153,19 @@ pub fn try_diffs_with_cache(
         };
         let step_index = cache.and_then(|c| c.target_indexes.get(i - 1));
 
+        trial_stats::PAGE_STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let t_turn = Instant::now();
         let mut lt = turn_page_local(source_page, target.page, &dsat, step_source_index)?;
+        trial_stats::add(&trial_stats::NS_TURN, t_turn.elapsed().as_nanos());
         if lt.unexclude.is_empty() {
             // No degree became certain: the target page's system gains no new
             // constraints, so nothing can change on this or any higher page.
             break;
         }
+        let t_ov = Instant::now();
         let mut overlay =
             build_overlay_page(source_page, target.page, &lt, &dsat, step_shared, step_index)?;
+        trial_stats::add(&trial_stats::NS_OVERLAY, t_ov.elapsed().as_nanos());
 
         lt.new_vars = collect_new_vars(&overlay, target.result, &lt.unexclude);
 
@@ -1057,6 +1189,7 @@ pub fn try_diffs_with_cache(
             .filter(|(&t, &d)| d != target.page.dim_at(t))
             .map(|(&t, _)| stable_rep(t))
             .collect();
+        dim_changed_all.extend(changed.iter().copied());
         let mut stale_blocks: HashSet<Tridegree> = HashSet::new();
         for &c in &changed {
             for u in [c, Tridegree::new(c.n, c.s + 1, c.f - r1)] {
@@ -1071,6 +1204,7 @@ pub fn try_diffs_with_cache(
             }
         }
 
+        let t_cons = Instant::now();
         let new_cons = make_new_constraints(
             &mut overlay,
             source_page.max_t,
@@ -1080,6 +1214,7 @@ pub fn try_diffs_with_cache(
             &ext_index,
             &stale_blocks,
         );
+        trial_stats::add(&trial_stats::NS_CONSTRAINTS, t_cons.elapsed().as_nanos());
         debug!(
             "try_diffs: E_{}: {} un-excluded degrees, {} new vars, {} new constraints",
             target.page.r,
@@ -1088,10 +1223,12 @@ pub fn try_diffs_with_cache(
             new_cons.len()
         );
 
-        let (learned, next_dsat) = update_sat_result(target.result, &new_cons, &lt.new_vars)
-            .ok_or(TrialError::Unsat {
-                r: target.page.r,
-            })?;
+        let t_solve = Instant::now();
+        let solved = update_sat_result(target.result, &new_cons, &lt.new_vars);
+        trial_stats::add(&trial_stats::NS_SOLVE, t_solve.elapsed().as_nanos());
+        let (learned, next_dsat) = solved.ok_or(TrialError::Unsat {
+            r: target.page.r,
+        })?;
         learned_all.extend(learned.into_iter().map(|(var, value)| LearnedDiff {
             r: target.page.r,
             var,
@@ -1099,10 +1236,18 @@ pub fn try_diffs_with_cache(
         }));
 
         dsat = next_dsat;
-        prev_overlay = Some(overlay);
+        let t_drop = Instant::now();
+        drop(std::mem::replace(&mut prev_overlay, Some(overlay)));
+        trial_stats::add(&trial_stats::NS_DROP, t_drop.elapsed().as_nanos());
     }
 
-    Ok(learned_all)
+    let t_drop = Instant::now();
+    drop(prev_overlay);
+    trial_stats::add(&trial_stats::NS_DROP, t_drop.elapsed().as_nanos());
+    Ok(TrialRun {
+        learned: learned_all,
+        dim_changed: dim_changed_all,
+    })
 }
 
 // =============================================================================
@@ -1129,7 +1274,47 @@ pub fn trial_error_sweep(
     max_stem: i32,
     progress: impl Fn(usize, usize) + Sync,
 ) -> Vec<SweepFinding> {
+    trial_error_sweep_full(pages, min_stem, max_stem, progress).contradictions
+}
+
+/// A value determined UNCONDITIONALLY by case analysis on one unknown
+/// switch: BOTH values of `via` are consistent, and each world independently
+/// forces `var = value` on page `r`. Since `via` must be 0 or 1, the value
+/// holds regardless — the classic "same in every possible world" argument.
+/// Only emitted when neither world changed the dimensions at the learned
+/// var's source/target degrees (equal dims ⇒ identical canonical bases, so
+/// the two worlds' statements are about the same variable).
+#[derive(Clone, Debug)]
+pub struct ConsensusFinding {
+    pub via: DiffVar,
+    pub via_r: i32,
+    pub r: i32,
+    pub var: DiffVar,
+    pub value: bool,
+}
+
+/// Contradiction forcings plus both-worlds consensus determinations.
+pub struct SweepOutcome {
+    pub contradictions: Vec<SweepFinding>,
+    pub consensus: Vec<ConsensusFinding>,
+}
+
+/// [`trial_error_sweep`] that ALSO harvests the both-worlds consensus:
+/// when both values of an unknown are consistent, the learned sets of the
+/// two worlds are intersected instead of discarded — any var forced to the
+/// SAME value in both worlds is determined unconditionally (subject to the
+/// dim-guard on [`ConsensusFinding`]). This is what removes uncertainties
+/// that exist only because a degree sits in the exclude list of an earlier
+/// unknown: e.g. an "uncertain" d4 that Leibniz forces to 0 whether the
+/// obstructing d3 is 0 or 1.
+pub fn trial_error_sweep_full(
+    pages: &[InterpagePage],
+    min_stem: i32,
+    max_stem: i32,
+    progress: impl Fn(usize, usize) + Sync,
+) -> SweepOutcome {
     let first = &pages[0];
+    let r0 = first.page.r;
     let mut unknown_vars: Vec<DiffVar> = first
         .result
         .unknown
@@ -1139,11 +1324,7 @@ pub fn trial_error_sweep(
         .collect();
     unknown_vars.sort();
 
-    let jobs: Vec<(DiffVar, bool)> = unknown_vars
-        .iter()
-        .flat_map(|&v| [(v, false), (v, true)])
-        .collect();
-    let total = jobs.len();
+    let total = 2 * unknown_vars.len();
     let done = std::sync::atomic::AtomicUsize::new(0);
 
     // Turned data at degrees a trial doesn't touch is identical across all
@@ -1151,23 +1332,85 @@ pub fn trial_error_sweep(
     // and precompute the stock-page indices every trial's overlay build needs.
     let cache = SweepCache::new(pages);
 
-    jobs.par_iter()
-        .filter_map(|&(var, value)| {
-            let result = try_diffs_with_cache(pages, &[(var, value)], Some(&cache));
-            let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            progress(n, total);
-            match result {
-                Err(e @ (TrialError::Unsat { .. } | TrialError::D2 { .. })) => {
-                    Some(SweepFinding {
-                        var,
-                        contradicted_value: value,
-                        error: e,
-                    })
+    // One job per var, running both values, so the two worlds' learned sets
+    // can be intersected. Ordering matches the old flat sweep: vars
+    // ascending, the value-0 finding before the value-1 finding.
+    let per_var: Vec<(Vec<SweepFinding>, Vec<ConsensusFinding>)> = unknown_vars
+        .par_iter()
+        .map(|&var| {
+            let tick = || {
+                let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                progress(n, total);
+            };
+            let run0 = try_diffs_full(pages, &[(var, false)], Some(&cache));
+            tick();
+            let run1 = try_diffs_full(pages, &[(var, true)], Some(&cache));
+            tick();
+
+            let mut findings = Vec::new();
+            let mut consensus = Vec::new();
+            match (run0, run1) {
+                (Err(e), Ok(_)) => findings.push(SweepFinding {
+                    var,
+                    contradicted_value: false,
+                    error: e,
+                }),
+                (Ok(_), Err(e)) => findings.push(SweepFinding {
+                    var,
+                    contradicted_value: true,
+                    error: e,
+                }),
+                (Err(e0), Err(e1)) => {
+                    // Both values contradict: the base system itself is
+                    // inconsistent — two findings, like the old flat sweep.
+                    findings.push(SweepFinding { var, contradicted_value: false, error: e0 });
+                    findings.push(SweepFinding { var, contradicted_value: true, error: e1 });
                 }
-                _ => None,
+                (Ok(w0), Ok(w1)) => {
+                    // Both worlds consistent: intersect their learned sets.
+                    let learned1: HashMap<(i32, DiffVar), bool> = w1
+                        .learned
+                        .iter()
+                        .map(|l| ((l.r, l.var), l.value))
+                        .collect();
+                    for l in &w0.learned {
+                        // The switch itself trivially differs between worlds.
+                        if l.r == r0 && l.var == var {
+                            continue;
+                        }
+                        if learned1.get(&(l.r, l.var)) != Some(&l.value) {
+                            continue;
+                        }
+                        // Basis guard: the learned var's degrees must have
+                        // stock dimensions in BOTH worlds.
+                        let src = stable_rep(Tridegree::new(l.var.n, l.var.s, l.var.f));
+                        let tgt = stable_rep(src.diff_target(l.r));
+                        if [src, tgt].iter().any(|t| {
+                            w0.dim_changed.contains(t) || w1.dim_changed.contains(t)
+                        }) {
+                            continue;
+                        }
+                        consensus.push(ConsensusFinding {
+                            via: var,
+                            via_r: r0,
+                            r: l.r,
+                            var: l.var,
+                            value: l.value,
+                        });
+                    }
+                }
             }
+            (findings, consensus)
         })
-        .collect()
+        .collect();
+
+    let mut contradictions = Vec::new();
+    let mut consensus = Vec::new();
+    for (f, c) in per_var {
+        contradictions.extend(f);
+        consensus.extend(c);
+    }
+    SweepOutcome { contradictions, consensus }
 }
 
 #[cfg(test)]

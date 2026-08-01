@@ -39,6 +39,17 @@ Every class in the stem-k slice is a dot, in one of three states:
    If a node both supports and is hit by a differential, **supporting wins**:
    draw it open in the color of the differential it supports.
 
+4. **Involved in an UNCERTAIN differential** (the node's row has a nonempty
+   `nulldif`, or the node appears in some other row's `nulldif` list): same
+   coloring and open/filled convention as the determined states above —
+   possible source = open circle, possible target = filled circle, both in
+   the d_r color computed from the filtration jump — plus a bold "?" glyph
+   offset to the upper right of the node (theme text color with a background
+   halo, sized ~4x the node radius) to mark the uncertainty. Determined
+   states win over uncertain ones when a node has both; the "?" is drawn
+   either way. The nodes also carry `data-uncertain="src"|"tgt"|"both"`,
+   which the REPL's injected JS uses for the click-to-add-differential flow.
+
 The d_r colors are the existing theme-aware `d{r}` palette shared with
 sphere-view differential edges: d2 teal, d3 red, d4 green, d5 blue,
 d6 yellow, d7 peach, d8 mauve (Catppuccin Latte/Mocha variants per theme).
@@ -62,9 +73,11 @@ Only two edge families appear in stem mode:
    carries that class's color.)
 
    A class whose suspensions continue beyond the displayed range (`E` target
-   `loc`, or `Einfo` of `loc`/`free`) instead gets a short horizontal arrow
-   pointing right (+x, length 0.7 grid units, simple arrowtip), in the
-   default edge color.
+   `loc`, `Einfo` of `loc`/`free`, or a real target name past the stable-edge
+   cap) instead gets a short horizontal arrow (length 0.7 grid units, simple
+   arrowtip in the theme text color) pointing toward the stable range — LEFT
+   in the mirrored n-decreases-rightward layout. Such an arrow on a class at
+   the stable edge means it survives to a nontrivial stable class.
 
 2. **h0 structlines** — vertical lines within a column (same `n`, filtration
    +1), styled exactly as in sphere view, including the usual

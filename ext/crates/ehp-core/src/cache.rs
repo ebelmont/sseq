@@ -40,7 +40,9 @@ use crate::tridegree::Tridegree;
 // naturality gates removed, Leibniz pair enumeration fixed, r-1 max_t
 // schedule, turn_page crop, flat product bound, is_cycle guards. All cached
 // solves/page chains from version 3 are semantically stale.
-const CACHE_VERSION: u32 = 4;
+// 5: unit-class (h_i-on-identity) product blocks now propagate through page
+// turns — cached E3+ product tables from version 4 lack them.
+const CACHE_VERSION: u32 = 5;
 
 /// One page's cached startup state.
 pub struct CachedPage {

@@ -1,0 +1,21 @@
+#!/bin/zsh
+# ehp — one-word launcher for the EHP chart REPL (see ext/CLAUDE.md).
+#
+#   ehp              resume the most recent session (recorded config, warm
+#                    cache, archived charts — nothing to remember)
+#   ehp charts       just open the last session's charts in the browser;
+#                    no solve, no REPL
+#   ehp <max_t>      fresh session at EHP_MAX_T=<max_t> (other flags from
+#                    the current environment)
+#   ehp snap <name>  reopen a named snapshot (EHP_SNAPSHOT=<name>)
+#
+# Tip: alias ehp="$HOME/sseq/ext/ehp"
+cd "$(dirname "$0")/crates" || exit 1
+case "$1" in
+  ""|last)  exec cargo run -p ehp-server --release --example ehp_chart -- last ;;
+  charts)   exec cargo run -p ehp-server --release --example ehp_chart -- charts ;;
+  snap)     [ -n "$2" ] || { echo "usage: ehp snap <name>" >&2; exit 2 }
+            EHP_SNAPSHOT="$2" exec cargo run -p ehp-server --release --example ehp_chart ;;
+  <->)      EHP_MAX_T="$1" exec cargo run -p ehp-server --release --example ehp_chart ;;
+  *)        echo "usage: ehp [last | charts | snap <name> | <max_t>]" >&2; exit 2 ;;
+esac
