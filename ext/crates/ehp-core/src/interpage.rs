@@ -1,5 +1,28 @@
 //! Interpage assumption propagation ("multi-page propagation").
 //!
+//! REVIEW MAP (2026-08): the CORE ALGORITHM — `update_sat_result`,
+//! `turn_page_local`, the overlay patching in `build_overlay_page_from`,
+//! `make_new_constraints`, and the page-step loop in
+//! `try_diffs_with_cache_inner` — is the original Python port, unchanged.
+//! Everything else falls into two layers on top of it:
+//!
+//! - SPEED PLUMBING, output-identical by construction and by gate:
+//!   `TbCache`/`SharedTurn`/`PageIndex`/`SweepCache` (sweep-shared
+//!   read-only caches) and the THIN OVERLAY (`OverlayBases` +
+//!   `SATPage::thin_overlay`: layered product/map tables instead of a
+//!   full clone per page step). Gates: `diag_sweep_verify` byte-parity at
+//!   t=25/t=50 and `EHP_TRIAL_VERIFY=1` (pointwise thin-vs-eager
+//!   comparison per page step).
+//!
+//! - CONSENSUS HARVESTERS, which only READ finished trial results and
+//!   record values through the same guarded `known_diffs` channel as user
+//!   asserts: per-entry both-worlds agreement (`ConsensusFinding`),
+//!   possibility-set intersection (`BlockPossibilities`), zero-or-vacuous
+//!   entries (`ZeroMapFinding`, `zero_entries_across_worlds`), and the
+//!   staged-assumption support (`try_diffs_staged`) used by the joint
+//!   width-2 phase in the REPL driver. None of them alter how a trial
+//!   propagates; removing them recovers the plain sweep verbatim.
+//!
 //! Ports the original Python machinery in `~/EHP_SAT/ehp_sat/interpage.py` and
 //! `run_interpage.py`: assume a value for an uncertain differential on page
 //! E_r, incrementally update the solution, un-exclude the degrees on E_{r+1}
@@ -39,6 +62,10 @@ pub enum TrialError {
     D2 { r: i32, degree: Tridegree },
     /// The assumed differential is not a variable on the starting page.
     UnknownVar(DiffVar),
+    /// A staged (later-page) assumption never became applicable — the trial
+    /// broke off before its page, or the var did not exist there. NOT a
+    /// contradiction: the joint analysis must discard the pair, not force.
+    AssumptionUnreachable(DiffVar),
 }
 
 impl std::fmt::Display for TrialError {
@@ -49,6 +76,11 @@ impl std::fmt::Display for TrialError {
                 f,
                 "d_{}∘d_{} != 0 at ({}, {}, {})",
                 r, r, degree.n, degree.s, degree.f
+            ),
+            TrialError::AssumptionUnreachable(v) => write!(
+                f,
+                "staged assumption d({},{},{})[{},{}] never became applicable",
+                v.n, v.s, v.f, v.row, v.col
             ),
             TrialError::UnknownVar(v) => write!(
                 f,
@@ -1248,13 +1280,27 @@ pub fn try_diffs_full(
     assumptions: &[(DiffVar, bool)],
     cache: Option<&SweepCache>,
 ) -> Result<TrialRun, TrialError> {
+    try_diffs_staged(pages, assumptions, &[], cache)
+}
+
+/// [`try_diffs_full`] with additional STAGED assumptions applied when the
+/// propagation reaches their page `(r, var, value)` — the joint (multi-
+/// switch) case analysis pins unknowns living on DIFFERENT pages in one
+/// world. Errors with [`TrialError::AssumptionUnreachable`] if a staged
+/// assumption's page or variable is never reached.
+pub fn try_diffs_staged(
+    pages: &[InterpagePage],
+    assumptions: &[(DiffVar, bool)],
+    staged: &[(i32, DiffVar, bool)],
+    cache: Option<&SweepCache>,
+) -> Result<TrialRun, TrialError> {
     use std::time::Instant;
     let t_trial = Instant::now();
     trial_stats::TRIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if assumptions.iter().any(|&(_, v)| v) {
         trial_stats::ASSUMED_ONE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    let out = try_diffs_with_cache_inner(pages, assumptions, cache);
+    let out = try_diffs_with_cache_inner(pages, assumptions, staged, cache);
     match &out {
         Ok(run) => {
             // Learned-1 means a value-1 determination BEYOND the assumptions
@@ -1284,14 +1330,25 @@ pub fn try_diffs_full(
 fn try_diffs_with_cache_inner(
     pages: &[InterpagePage],
     assumptions: &[(DiffVar, bool)],
+    staged: &[(i32, DiffVar, bool)],
     cache: Option<&SweepCache>,
 ) -> Result<TrialRun, TrialError> {
+    let mut staged_applied = 0usize;
     use std::time::Instant;
     assert!(!pages.is_empty());
     let first = &pages[0];
     let r0 = first.page.r;
 
-    let mut cons = Vec::with_capacity(assumptions.len());
+    let mut cons = Vec::with_capacity(assumptions.len() + staged.len());
+    for &(ar, var, val) in staged.iter().filter(|&&(ar, _, _)| ar == first.page.r) {
+        let _ = ar;
+        let idx = *first
+            .result
+            .var_index
+            .get(&var)
+            .ok_or(TrialError::AssumptionUnreachable(var))?;
+        cons.push((vec![idx], val));
+    }
     for &(var, val) in assumptions {
         let idx = *first
             .result
@@ -1447,6 +1504,19 @@ fn try_diffs_with_cache_inner(
             verify_overlay_step(&overlay, &full, &lt, target, source_page, &ext_index, &stale_blocks, &new_cons);
         }
 
+        // Staged assumptions for THIS page join the batch (their vars may
+        // be base unknowns or trial-new vars — ext_index covers both).
+        let mut new_cons = new_cons;
+        for &(ar, av, aval) in staged {
+            if ar == target.page.r {
+                let Some(&ai) = ext_index.get(&av) else {
+                    return Err(TrialError::AssumptionUnreachable(av));
+                };
+                new_cons.push((vec![ai], aval));
+                staged_applied += 1;
+            }
+        }
+
         let t_solve = Instant::now();
         let solved = update_sat_result(target.result, &new_cons, &lt.new_vars);
         trial_stats::add(&trial_stats::NS_SOLVE, t_solve.elapsed().as_nanos());
@@ -1467,6 +1537,15 @@ fn try_diffs_with_cache_inner(
         trial_stats::add(&trial_stats::NS_DROP, t_drop.elapsed().as_nanos());
     }
     finals.push((dsat_r, dsat));
+    let staged_first = staged.iter().filter(|&&(ar, _, _)| ar == r0).count();
+    if staged_applied + staged_first < staged.len() {
+        let unreached = staged
+            .iter()
+            .find(|&&(ar, _, _)| ar != r0)
+            .map(|&(_, v, _)| v)
+            .unwrap();
+        return Err(TrialError::AssumptionUnreachable(unreached));
+    }
 
     let t_drop = Instant::now();
     drop(prev_overlay);
@@ -1683,12 +1762,95 @@ pub struct ZeroMapFinding {
     pub r: i32,
     /// Stable-rep source degree whose d_r block is zero in every world.
     pub degree: Tridegree,
+    /// The specific entries provably zero in every world (may be a strict
+    /// subset of the block: per-CLASS resolution — one source class's
+    /// differential can be Leibniz-forced while a sibling's stays genuinely
+    /// unknown).
+    pub entries: Vec<DiffVar>,
+}
+
+/// `EHP_ZM_DEBUG=n,s,f`: per-switch trace of the zero-map harvest decisions
+/// for ONE degree — prints why each candidate check passed or failed, so a
+/// non-firing case can be diagnosed remotely.
+fn zm_debug_deg() -> Option<Tridegree> {
+    static D: std::sync::OnceLock<Option<Tridegree>> = std::sync::OnceLock::new();
+    *D.get_or_init(|| {
+        let v = std::env::var("EHP_ZM_DEBUG").ok()?;
+        let p: Vec<i32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (p.len() == 3).then(|| Tridegree::new(p[0], p[1], p[2]))
+    })
 }
 
 /// `EHP_ZERO_CONSENSUS=0` disables the zero-map consensus channel.
 fn zero_consensus_enabled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FLAG.get_or_init(|| std::env::var("EHP_ZERO_CONSENSUS").map_or(true, |v| v != "0"))
+}
+
+/// The ONE per-entry zero-or-vacuous harvest, shared by the single-switch
+/// sweep and the joint width-2 phase. An entry of the d_`lr` block at
+/// (stable-rep) `deg` is recordable as 0 iff in EVERY world:
+/// - the world is vacuous there (its re-turned source or target dim is 0 —
+///   the classes are dead, nothing to send or hit), OR
+/// - the entry is individually determined 0 with the bases stable (dims at
+///   both `deg` and `tgt` unchanged in that world — otherwise row/col
+///   identity is not comparable across worlds).
+/// Entries the BASE system already determines are skipped (no information).
+/// Free or ABSENT variables never count as zero: unknown ≠ zero is the
+/// exclusion machinery's core distinction. Soundness of recording the
+/// survivors as 0 rests on zeros never quotienting anything — see
+/// [`ZeroMapFinding`].
+pub fn zero_entries_across_worlds(
+    worlds: &[&TrialRun],
+    base_res: &SATResult,
+    src_dim: usize,
+    tgt_dim: usize,
+    lr: i32,
+    deg: Tridegree,
+    tgt: Tridegree,
+) -> Vec<DiffVar> {
+    let entry_zero = |run: &TrialRun, v: &DiffVar| -> bool {
+        let nd_deg = run.new_dims.get(&(lr, deg)).copied();
+        let nd_tgt = run.new_dims.get(&(lr, tgt)).copied();
+        if nd_deg == Some(0) || nd_tgt == Some(0) {
+            return true;
+        }
+        // Basis stability ON THIS PAGE: if the world re-turned either degree
+        // here, the recomputed dim must equal the base dim (equal dims ⇒
+        // identical canonical bases). `TrialRun::dim_changed` must NOT be
+        // used for this — it is page-FLAT, so a legitimate dim change on a
+        // LATER page (e.g. the class dying on E5 after a learned nonzero d4)
+        // would wrongly veto a perfectly stable entry on this page (found
+        // via EHP_ZM_DEBUG on d4(10,43,13), 2026-08-02).
+        if nd_deg.is_some_and(|d| d != src_dim) || nd_tgt.is_some_and(|d| d != tgt_dim) {
+            return false;
+        }
+        let res = run
+            .final_results
+            .iter()
+            .find(|(rr, _)| *rr == lr)
+            .map(|(_, rr)| rr)
+            .unwrap_or(base_res);
+        match res.var_index.get(v) {
+            Some(&i) => !res.unknown.contains(&i) && !vec_get(&res.offset, i),
+            None => false,
+        }
+    };
+    let mut entries = Vec::new();
+    for row in 0..tgt_dim {
+        for col in 0..src_dim {
+            let v = DiffVar::new(deg.n, deg.s, deg.f, row as u16, col as u16);
+            if let Some(&i) = base_res.var_index.get(&v) {
+                if !base_res.unknown.contains(&i) {
+                    continue;
+                }
+            }
+            if worlds.iter().all(|w| entry_zero(w, &v)) {
+                entries.push(v);
+            }
+        }
+    }
+    entries
 }
 
 /// Is the d_r map at (stable-rep) `deg` provably the ZERO map in the world
@@ -1824,13 +1986,25 @@ pub fn trial_error_sweep_vars(
                         if learned1.get(&(l.r, l.var)) != Some(&l.value) {
                             continue;
                         }
-                        // Basis guard: the learned var's degrees must have
-                        // stock dimensions in BOTH worlds.
+                        // Basis guard, PAGE-AWARE (same fix as the zero-map
+                        // harvest, 2026-08-02): the learned var's degrees
+                        // must have stock dimensions in both worlds ON ITS
+                        // OWN PAGE — dim changes on later pages (a class
+                        // dying downstream) do not affect this statement's
+                        // basis and must not veto it.
                         let src = stable_rep(Tridegree::new(l.var.n, l.var.s, l.var.f));
                         let tgt = stable_rep(src.diff_target(l.r));
-                        if [src, tgt].iter().any(|t| {
-                            w0.dim_changed.contains(t) || w1.dim_changed.contains(t)
-                        }) {
+                        let Some(bp) = pages.iter().find(|p| p.page.r == l.r) else {
+                            continue;
+                        };
+                        let stable = |t: Tridegree| {
+                            let base = bp.page.dim_at(t);
+                            base > 0
+                                && [&w0, &w1].iter().all(|w| {
+                                    w.new_dims.get(&(l.r, t)).is_none_or(|&d| d == base)
+                                })
+                        };
+                        if !stable(src) || !stable(tgt) {
                             continue;
                         }
                         consensus.push(ConsensusFinding {
@@ -1900,26 +2074,53 @@ pub fn trial_error_sweep_vars(
                             // the target's other exclusion causes survive
                             // the recompute, so a target-dead world cannot
                             // be corrupted by the recorded stock-basis 0s.
-                            let zero_in = |run: &TrialRun| -> bool {
-                                if run.new_dims.get(&(lr, deg)) == Some(&0)
-                                    || run.new_dims.get(&(lr, tgt)) == Some(&0)
-                                {
-                                    return true;
-                                }
-                                let res = run
-                                    .final_results
-                                    .iter()
-                                    .find(|(rr, _)| *rr == lr)
-                                    .map(|(_, r)| r)
-                                    .unwrap_or(base_res);
-                                map_provably_zero(run.new_dims.get(&(lr, deg)).copied(), res, deg)
-                            };
-                            if zero_in(&w0) && zero_in(&w1) {
+                            if zm_debug_deg() == Some(deg) {
+                                let wd = |run: &TrialRun, tag: &str| {
+                                    eprintln!(
+                                        "[zm-debug] switch ({},{},{})[{},{}] {}: \
+                                         nd(deg)={:?} nd(tgt)={:?} dimchg(deg)={} \
+                                         dimchg(tgt)={} learned@deg={}",
+                                        var.n, var.s, var.f, var.row, var.col, tag,
+                                        run.new_dims.get(&(lr, deg)),
+                                        run.new_dims.get(&(lr, tgt)),
+                                        run.dim_changed.contains(&deg),
+                                        run.dim_changed.contains(&tgt),
+                                        run.learned.iter().filter(|l| l.r == lr
+                                            && Tridegree::new(l.var.n, l.var.s, l.var.f) == deg
+                                        ).count(),
+                                    );
+                                };
+                                eprintln!(
+                                    "[zm-debug] candidate ({},{},{}) r{} tgt ({},{},{}) \
+                                     base dims {}x{}",
+                                    deg.n, deg.s, deg.f, lr, tgt.n, tgt.s, tgt.f,
+                                    base_page.page.dim_at(deg), base_page.page.dim_at(tgt),
+                                );
+                                wd(&w0, "w0");
+                                wd(&w1, "w1");
+                            }
+                            let entries = zero_entries_across_worlds(
+                                &[&w0, &w1],
+                                base_res,
+                                base_page.page.dim_at(deg),
+                                base_page.page.dim_at(tgt),
+                                lr,
+                                deg,
+                                tgt,
+                            );
+                            if zm_debug_deg() == Some(deg) {
+                                eprintln!(
+                                    "[zm-debug] -> {} recordable entries via this switch",
+                                    entries.len(),
+                                );
+                            }
+                            if !entries.is_empty() {
                                 zeros.push(ZeroMapFinding {
                                     via: var,
                                     via_r: r0,
                                     r: lr,
                                     degree: deg,
+                                    entries,
                                 });
                             }
                         }
@@ -1928,9 +2129,19 @@ pub fn trial_error_sweep_vars(
                     if possibility_enabled() {
                         for &(lr, deg) in &touched {
                             let tgt = stable_rep(deg.diff_target(lr));
-                            if [deg, tgt].iter().any(|t| {
-                                w0.dim_changed.contains(t) || w1.dim_changed.contains(t)
-                            }) {
+                            // Page-aware basis guard (see the consensus
+                            // guard above).
+                            let Some(bp) = pages.iter().find(|p| p.page.r == lr) else {
+                                continue;
+                            };
+                            let stable = |t: Tridegree| {
+                                let base = bp.page.dim_at(t);
+                                base > 0
+                                    && [&w0, &w1].iter().all(|w| {
+                                        w.new_dims.get(&(lr, t)).is_none_or(|&d| d == base)
+                                    })
+                            };
+                            if !stable(deg) || !stable(tgt) {
                                 continue;
                             }
                             let proj = |run: &TrialRun| -> Option<(Vec<DiffVar>, Vec<u64>)> {

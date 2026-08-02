@@ -103,7 +103,17 @@ Interactive tool for exploring and editing EHP spectral sequence differentials.
     refuse because the var vanishes in one world — e.g. an uncertain d4 at
     (15,32,7) whose only obstruction is the class's own uncertain d3:
     world d3=0 learns d4=0 by Leibniz replay, world d3=1 kills the class
-    ⇒ d4 ≡ 0 recorded, the d4 target un-excludes, dashes clear.
+    ⇒ d4 ≡ 0 recorded, the d4 target un-excludes, dashes clear. Now
+    PER-ENTRY (one source class can record while a sibling stays unknown;
+    per-world guard: entry determined-0 with dims stable at src+tgt, or
+    src/tgt dead). JOINT width-2 phase (`EHP_JOINT=0` disables): suppressed
+    diffs whose `why`-trace obstruction set is exactly TWO unknown entries
+    (any pages) get a 4-world analysis — second switch applied as a STAGED
+    assumption (`try_diffs_staged`) when propagation reaches its page;
+    harvest runs over the consistent worlds. t=50 `interpage try`:
+    114 → 378 values forced (222 ≡0 recordings), fixpoint clean, but wall
+    461s → 3190s (joint trials are uncached; optimize only if asked —
+    user declared try-speed done). Width ≥3 → tier-3 recorded constraints.
   - Thin trial overlays (2026-08-01): the per-page-step overlay is a LAYERED
     view (`SATPage::thin_overlay` over `OverlayBases` Arc snapshots;
     ProductTable/MapTable base+tombstone fallthrough, mutations patch/COW) —

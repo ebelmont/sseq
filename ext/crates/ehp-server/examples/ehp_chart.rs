@@ -611,6 +611,130 @@ fn cached_to_states(cached: Vec<ehp_core::cache::CachedPage>, max_t: i32) -> Vec
 // Main
 // =============================================================================
 
+/// Provenance of every recorded differential value, by insertion site:
+/// "hand" (add/zero/toggle), "outside" (outside retry), "unsat"
+/// (interpage-try contradiction forcing), "consensus" (both-worlds value),
+/// "possibility" (possibility-set tier 1), "zeromap" (single-switch
+/// zero-map), "joint" (width-2 joint analysis). Values recorded before the
+/// session (startup outside-diffs merge, snapshot state) are untagged and
+/// export as "recorded_other". Feeds the `export` command only.
+static PROVENANCE: OnceLock<std::sync::Mutex<HashMap<(i32, DiffVar), &'static str>>> =
+    OnceLock::new();
+
+fn tag_prov(r: i32, var: DiffVar, src: &'static str) {
+    PROVENANCE
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert((r, var), src);
+}
+
+/// Determined set of the STARTUP solve (pre-mutation): the "basic
+/// propagation" bucket of the `export` command. Captured once, right before
+/// the REPL loop starts.
+static BASELINE: OnceLock<HashMap<(i32, DiffVar), bool>> = OnceLock::new();
+
+fn capture_baseline(pages: &[PageState]) {
+    let mut map = HashMap::new();
+    for ps in pages {
+        let Some(res) = ps.result.as_ref() else { continue };
+        let r = ps.page.r;
+        for (i, v) in res.vars.iter().enumerate() {
+            if !res.unknown.contains(&i) {
+                map.insert((r, *v), ehp_core::gf2::vec_get(&res.offset, i));
+            }
+        }
+    }
+    let _ = BASELINE.set(map);
+}
+
+/// `export` — one CSV per determination method (outside-diffs row format:
+/// r,n,s,f,row,col,value), plus the remaining uncertain and suppressed
+/// differentials, under output/export/.
+fn export_diff_csvs(pages: &[PageState]) {
+    let empty = HashMap::new();
+    let baseline = BASELINE.get().unwrap_or(&empty);
+    let prov = PROVENANCE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let prov = prov.lock().unwrap();
+    let mut buckets: std::collections::BTreeMap<&'static str, Vec<(i32, DiffVar, Option<bool>)>> =
+        std::collections::BTreeMap::new();
+    for ps in pages {
+        let r = ps.page.r;
+        let Some(res) = ps.result.as_ref() else { continue };
+        for (i, v) in res.vars.iter().enumerate() {
+            let key = (r, *v);
+            if res.unknown.contains(&i) {
+                buckets.entry("uncertain").or_default().push((r, *v, None));
+                continue;
+            }
+            let val = ehp_core::gf2::vec_get(&res.offset, i);
+            let cat = if baseline.contains_key(&key) {
+                "base"
+            } else if ps.known_diffs.contains_key(v) {
+                prov.get(&key).copied().unwrap_or("recorded_other")
+            } else {
+                "deduced"
+            };
+            buckets.entry(cat).or_default().push((r, *v, Some(val)));
+        }
+        // Suppressed differentials (no variables at all — excluded degrees
+        // with a plausible source AND target) are uncertain too.
+        let mut degs: Vec<Tridegree> = ps
+            .page
+            .page
+            .keys()
+            .copied()
+            .filter(|t| t.n <= t.s + 2)
+            .collect();
+        degs.sort();
+        for d in degs {
+            let tgt = stable_rep_deg(d.diff_target(r));
+            if ps.page.dim_at(d) == 0 || ps.page.dim_at(tgt) == 0 {
+                continue;
+            }
+            if res.var_index.contains_key(&DiffVar::new(d.n, d.s, d.f, 0, 0)) {
+                continue;
+            }
+            buckets
+                .entry("suppressed")
+                .or_default()
+                .push((r, DiffVar::new(d.n, d.s, d.f, 0, 0), None));
+        }
+    }
+    let dir = Path::new("output/export");
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("export: cannot create {:?}: {}", dir, e);
+        return;
+    }
+    for (cat, mut rows) in buckets {
+        rows.sort_by_key(|&(r, v, _)| (r, v));
+        let path = dir.join(format!("diffs_{}.csv", cat));
+        let mut out = String::from("\"r\",\"n\",\"s\",\"f\",\"row\",\"col\",\"value\"\n");
+        let n = rows.len();
+        for (r, v, val) in rows {
+            out.push_str(&format!(
+                "{},{},{},{},{},{},{}\n",
+                r,
+                v.n,
+                v.s,
+                v.f,
+                v.row,
+                v.col,
+                val.map(|b| (b as u8).to_string()).unwrap_or_else(|| "?".into()),
+            ));
+        }
+        match std::fs::write(&path, out) {
+            Ok(()) => eprintln!("  {} rows -> {}", n, path.display()),
+            Err(e) => eprintln!("  export {} FAILED: {}", path.display(), e),
+        }
+    }
+    eprintln!(
+        "(base = startup solve; deduced = solver consequences of recorded values; \
+         hand/outside/unsat/consensus/possibility/zeromap/joint = recorded by that \
+         method; uncertain/suppressed = still open)"
+    );
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -1244,6 +1368,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // are deferred until an explicit `interpage`.
     let mut auto_prop = true;
     let stdin = std::io::stdin();
+    capture_baseline(&pages);
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(l) => l,
@@ -2551,10 +2676,12 @@ fn process_stdin_cmd(
             match cmd {
                 "add" => {
                     pages[idx].known_diffs.insert(dv, true);
+                    tag_prov(pages[idx].page.r, dv, "hand");
                     eprintln!("Set d_{}[({},{},{})] row={} col={} = 1", r, n, s, f, row, col);
                 }
                 "zero" => {
                     pages[idx].known_diffs.insert(dv, false);
+                    tag_prov(pages[idx].page.r, dv, "hand");
                     eprintln!("Set d_{}[({},{},{})] row={} col={} = 0", r, n, s, f, row, col);
                 }
                 "toggle" => {
@@ -2563,6 +2690,7 @@ fn process_stdin_cmd(
                         None => true,
                     };
                     pages[idx].known_diffs.insert(dv, new_val);
+                    tag_prov(pages[idx].page.r, dv, "hand");
                     eprintln!(
                         "Toggled d_{}[({},{},{})] row={} col={} -> {}",
                         r, n, s, f, row, col,
@@ -2758,6 +2886,10 @@ fn process_stdin_cmd(
             } else {
                 eprintln!("Nothing to undo.");
             }
+        }
+
+        "export" => {
+            export_diff_csvs(pages);
         }
 
         "hidden" => {
@@ -3114,6 +3246,7 @@ fn process_stdin_cmd(
                 for &(idx, dv, val) in &admissible {
                     let r = pages[idx].page.r;
                     pages[idx].known_diffs.insert(dv, val);
+                    tag_prov(pages[idx].page.r, dv, "outside");
                     undo_stack.push(UndoEntry { r, var: dv, prev: None });
                     sources.push((r, dv));
                     eprintln!(
@@ -3655,6 +3788,7 @@ fn process_stdin_cmd(
     eprintln!("          terminal page; idx accepts sums like 0+2; Toda P(a∘E²b)=P(a)∘b propagates it)");
     eprintln!("          hidden list | hidden remove <same args> | hidden undo  (EHP_HIDDEN=0 disables)");
             eprintln!("          snapshot save <name> [force] | snapshot list | snapshot load <name>");
+            eprintln!("          export (write per-method differential CSVs to output/export/)");
         }
     }
 
@@ -3860,13 +3994,16 @@ fn process_multi_mutation(
         match m.cmd.as_str() {
             "add" => {
                 pages[m.idx].known_diffs.insert(m.dv, true);
+                tag_prov(pages[m.idx].page.r, m.dv, "hand");
             }
             "zero" => {
                 pages[m.idx].known_diffs.insert(m.dv, false);
+                tag_prov(pages[m.idx].page.r, m.dv, "hand");
             }
             "toggle" => {
                 let v = prev.map(|v| !v).unwrap_or(true);
                 pages[m.idx].known_diffs.insert(m.dv, v);
+                tag_prov(pages[m.idx].page.r, m.dv, "hand");
             }
             "remove" => {
                 pages[m.idx].known_diffs.remove(&m.dv);
@@ -4418,6 +4555,7 @@ fn run_interpage_try(
 
                 let prev = pages[idx].known_diffs.get(&var).copied();
                 pages[idx].known_diffs.insert(var, forced);
+                tag_prov(pages[idx].page.r, var, "unsat");
                 undo_stack.push(UndoEntry { r, var, prev });
                 applied_vars.push((idx, r, var));
                 applied += 1;
@@ -4485,6 +4623,7 @@ fn run_interpage_try(
                     eprintln!("  {}", line);
                     log_lines.push(line);
                     pages[cidx].known_diffs.insert(c.var, c.value);
+                    tag_prov(pages[cidx].page.r, c.var, "consensus");
                     undo_stack.push(UndoEntry { r: c.r, var: c.var, prev });
                     max_applied_idx = max_applied_idx.max(cidx);
                     applied_vars.push((cidx, c.r, c.var));
@@ -4510,11 +4649,8 @@ fn run_interpage_try(
                 // — report and apply nothing for this block.
                 let mut to_record: Vec<(DiffVar, Option<bool>)> = Vec::new();
                 let mut conflict = false;
-                for row in 0..tgt_dim {
-                    for col in 0..src_dim {
-                        let var = DiffVar::new(
-                            zm.degree.n, zm.degree.s, zm.degree.f, row as u16, col as u16,
-                        );
+                {
+                    for &var in &zm.entries {
                         if let Some(res) = pages[cidx].result.as_ref() {
                             if let Some(&i) = res.var_index.get(&var) {
                                 if !res.unknown.contains(&i) {
@@ -4560,6 +4696,7 @@ fn run_interpage_try(
                 log_lines.push(line);
                 for (var, prev) in to_record {
                     pages[cidx].known_diffs.insert(var, false);
+                    tag_prov(pages[cidx].page.r, var, "zeromap");
                     undo_stack.push(UndoEntry { r: zm.r, var, prev });
                     applied_vars.push((cidx, zm.r, var));
                     applied += 1;
@@ -4624,6 +4761,7 @@ fn run_interpage_try(
                         eprintln!("  {}", line);
                         log_lines.push(line);
                         pages[cidx].known_diffs.insert(var, value);
+                        tag_prov(pages[cidx].page.r, var, "possibility");
                         undo_stack.push(UndoEntry { r: bp.r, var, prev });
                         applied_vars.push((cidx, bp.r, var));
                         max_applied_idx = max_applied_idx.max(cidx);
@@ -4698,6 +4836,68 @@ fn run_interpage_try(
             all_deduced.extend(outcome.deduced);
             for (r_aff, degs) in outcome.affected_degrees {
                 all_affected.entry(r_aff).or_default().extend(degs);
+            }
+        }
+
+        // Joint (width-2) zero-map phase, EHP_JOINT=0 disables: suppressed
+        // differentials obstructed by exactly TWO distinct unknown entries
+        // (possibly on different pages) get a 4-world case analysis — both
+        // values of both switches, second switch applied as a STAGED
+        // assumption when the propagation reaches its page. Entries zero-or-
+        // vacuous in EVERY CONSISTENT world are recorded like the
+        // single-switch zero-map findings (the true world is among the
+        // consistent ones). Same generality contract: shape-independent,
+        // bounded by obstruction-set size, not tailored to any degree.
+        if std::env::var("EHP_JOINT").map_or(true, |v| v != "0") {
+            let hits = joint_zero_hits(pages, min_stem, max_stem);
+            // Sequential apply; one batched cascade for the whole phase.
+            let mut min_idx = usize::MAX;
+            let mut max_idx = 0usize;
+            let mut joint_applied = 0usize;
+            for (tidx, lr, d, entries, via) in hits {
+                let mut newly = 0usize;
+                for var in entries {
+                    if pages[tidx].known_diffs.contains_key(&var) {
+                        continue;
+                    }
+                    pages[tidx].known_diffs.insert(var, false);
+                    tag_prov(pages[tidx].page.r, var, "joint");
+                    undo_stack.push(UndoEntry { r: lr, var, prev: None });
+                    newly += 1;
+                }
+                if newly == 0 {
+                    continue;
+                }
+                let line = format!(
+                    "[pass {}] d_{}({},{},{}) ≡ 0 recorded ({} entries) — joint case analysis over {}",
+                    pass, lr, d.n, d.s, d.f, newly, via,
+                );
+                eprintln!("  {}", line);
+                log_lines.push(line);
+                joint_applied += newly;
+                min_idx = min_idx.min(tidx);
+                max_idx = max_idx.max(tidx);
+                if skip_enabled {
+                    let tgt = stable_rep_deg(d.diff_target(lr));
+                    change_log.push((lr, [d, tgt].into_iter().collect()));
+                }
+            }
+            if joint_applied > 0 {
+                forced_this_pass += joint_applied;
+                total_forced += joint_applied;
+                let t_c = Instant::now();
+                let outcome = cascade_resolve(pages, min_idx, max_idx, false);
+                cascade_secs += t_c.elapsed().as_secs_f64();
+                if !outcome.deduced.is_empty() {
+                    eprintln!(
+                        "  joint cascade deduced {} further differentials",
+                        outcome.deduced.len()
+                    );
+                }
+                all_deduced.extend(outcome.deduced);
+                for (r_aff, degs2) in outcome.affected_degrees {
+                    all_affected.entry(r_aff).or_default().extend(degs2);
+                }
             }
         }
 
@@ -4907,6 +5107,223 @@ fn why_differential(pages: &[PageState], idx: usize, n_raw: i32, s: i32, f: i32)
 /// `make_next_exclude_set`: an input degree x (an unknown-d_{r-1} source, a
 /// prior excluded degree, or its incoming-d pre-image (n, s+1, f-r)) excludes
 /// x itself (if unstable) and stable_rep(x.diff_target(r-1)).
+/// The joint (width-2) analysis phase, compute side: enumerate suppressed
+/// differentials whose obstruction set is exactly two unknown entries, run
+/// the 4-world staged trials (one shared SweepCache per starting page, pairs
+/// in parallel), and harvest recordable zero entries via the SAME shared
+/// per-entry test as the single-switch sweeps
+/// (`interpage::zero_entries_across_worlds`). Pure reader — application and
+/// the batched cascade stay in `run_interpage_try`.
+fn joint_zero_hits(
+    pages: &[PageState],
+    min_stem: i32,
+    max_stem: i32,
+) -> Vec<(usize, i32, Tridegree, Vec<DiffVar>, String)> {
+    // pair (low page idx, var, high page idx, var) -> suppressed (r, deg)
+    let mut pairs: HashMap<(usize, DiffVar, usize, DiffVar), Vec<(usize, Tridegree)>> =
+        HashMap::new();
+    for idx in 0..pages.len() {
+        let r = pages[idx].page.r;
+        let Some(res) = pages[idx].result.as_ref() else { continue };
+        let mut degs: Vec<Tridegree> = pages[idx]
+            .page
+            .page
+            .keys()
+            .copied()
+            .filter(|t| t.n <= t.s + 2)
+            .collect();
+        degs.sort();
+        for d in degs {
+            // Honor the interpage-try stem range (the sweeps do): the
+            // fringe of the computed region is almost entirely suppressed
+            // differentials — enumerating pairs there is exactly the
+            // low-information work the user scoped out.
+            if d.s < min_stem || d.s >= max_stem {
+                continue;
+            }
+            let tgt = stable_rep_deg(d.diff_target(r));
+            if pages[idx].page.dim_at(d) == 0 || pages[idx].page.dim_at(tgt) == 0 {
+                continue;
+            }
+            if res.var_index.contains_key(&DiffVar::new(d.n, d.s, d.f, 0, 0)) {
+                continue; // not suppressed
+            }
+            let mut obs: Vec<(usize, DiffVar)> = Vec::new();
+            for x in [d, tgt] {
+                if pages[idx].page.is_excluded(x) {
+                    collect_obstructions(pages, idx, x, 4, &mut obs);
+                }
+            }
+            obs.sort();
+            obs.dedup();
+            if obs.len() != 2 {
+                continue; // width-1 → sweeps; width>2 → tier 3
+            }
+            let (a, b) = (obs[0], obs[1]);
+            pairs.entry((a.0, a.1, b.0, b.1)).or_default().push((idx, d));
+        }
+    }
+    // Group pairs by starting page so each group shares ONE
+    // SweepCache (the staged assumption lives on a later page, so
+    // the first-step turned-data invariant is the same as sweeps');
+    // run each group's pairs in parallel; harvest inside the
+    // parallel region (read-only), apply + cascade sequentially.
+    let mut by_start: HashMap<usize, Vec<(usize, DiffVar, usize, DiffVar)>> =
+        HashMap::new();
+    for k in pairs.keys().copied().take(500) {
+        by_start.entry(k.0).or_default().push(k);
+    }
+    let mut start_idxs: Vec<usize> = by_start.keys().copied().collect();
+    start_idxs.sort();
+    let n_pairs: usize = by_start.values().map(|v| v.len()).sum();
+    if n_pairs > 0 {
+        eprintln!(
+            "  joint width-2 phase: {} obstruction pairs across {} starting pages...",
+            n_pairs,
+            start_idxs.len(),
+        );
+    }
+    let t_joint = Instant::now();
+    let done_pairs = std::sync::atomic::AtomicUsize::new(0);
+    // (target idx, page r, degree, entries, log line source pair)
+    type JointHit = (usize, i32, Tridegree, Vec<DiffVar>, String);
+    let mut hits: Vec<JointHit> = Vec::new();
+    for i1 in start_idxs {
+        let mut keys = by_start[&i1].clone();
+        keys.sort();
+        let Some(ip) = interpage_slice(pages, i1) else { continue };
+        // The shared cache costs a sweep-sized fixed build (pre-turn of the
+        // starting page + full table snapshots of every downstream page) —
+        // only worth it when the group has enough trials to amortize it.
+        let cache = if keys.len() >= 12 {
+            eprintln!(
+                "  joint: E_{} group ({} pairs) — building shared trial cache...",
+                pages[i1].page.r,
+                keys.len(),
+            );
+            Some(interpage::SweepCache::new(&ip))
+        } else {
+            eprintln!(
+                "  joint: E_{} group ({} pairs) — small group, running uncached",
+                pages[i1].page.r,
+                keys.len(),
+            );
+            None
+        };
+        let group_hits: Vec<Vec<JointHit>> = keys
+            .par_iter()
+            .map(|&(gi1, u1, i2, u2)| {
+                let nd = done_pairs.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if nd % 25 == 0 {
+                    eprintln!("  joint: {}/{} pairs", nd, n_pairs);
+                }
+                let mut out: Vec<JointHit> = Vec::new();
+                let r2 = pages[i2].page.r;
+                let mut worlds: Vec<interpage::TrialRun> = Vec::new();
+                for (v1, v2) in
+                    [(false, false), (false, true), (true, false), (true, true)]
+                {
+                    match interpage::try_diffs_staged(
+                        &ip,
+                        &[(u1, v1)],
+                        &[(r2, u2, v2)],
+                        cache.as_ref(),
+                    ) {
+                        Ok(run) => worlds.push(run),
+                        Err(interpage::TrialError::AssumptionUnreachable(_)) => {
+                            return out;
+                        }
+                        Err(_) => {} // impossible combination — excluded
+                    }
+                }
+                if worlds.is_empty() {
+                    return out;
+                }
+                for &(tidx, d) in &pairs[&(gi1, u1, i2, u2)] {
+                    let lr = pages[tidx].page.r;
+                    let tgt = stable_rep_deg(d.diff_target(lr));
+                    let Some(base_res) = pages[tidx].result.as_ref() else { continue };
+                    let sdim = pages[tidx].page.dim_at(d);
+                    let tdim = pages[tidx].page.dim_at(tgt);
+                    let entries: Vec<DiffVar> = interpage::zero_entries_across_worlds(
+                        &worlds.iter().collect::<Vec<_>>(),
+                        base_res,
+                        sdim,
+                        tdim,
+                        lr,
+                        d,
+                        tgt,
+                    )
+                    .into_iter()
+                    .filter(|v| !pages[tidx].known_diffs.contains_key(v))
+                    .collect();
+                    if !entries.is_empty() {
+                        let via = format!(
+                            "d_{}({},{},{})[{},{}] × d_{}({},{},{})[{},{}] \
+                             ({} consistent worlds)",
+                            pages[gi1].page.r, u1.n, u1.s, u1.f, u1.row, u1.col,
+                            r2, u2.n, u2.s, u2.f, u2.row, u2.col,
+                            worlds.len(),
+                        );
+                        out.push((tidx, lr, d, entries, via));
+                    }
+                }
+                out
+            })
+            .collect();
+        hits.extend(group_hits.into_iter().flatten());
+    }
+    if n_pairs > 0 {
+        eprintln!(
+            "  joint width-2 phase done in {:.1}s ({} pairs, {} block hits)",
+            t_joint.elapsed().as_secs_f64(),
+            n_pairs,
+            hits.len(),
+        );
+    }
+    hits
+}
+
+/// Silent form of [`explain_exclusion`]: collect the LEAF unknown entries
+/// (page index + var) responsible for `deg`'s exclusion on `pages[idx]`,
+/// following carried-forward exclusions. Feeds the joint (multi-switch)
+/// case analysis: a suppressed differential's obstruction SET.
+fn collect_obstructions(
+    pages: &[PageState],
+    idx: usize,
+    deg: Tridegree,
+    depth: usize,
+    out: &mut Vec<(usize, DiffVar)>,
+) {
+    if idx == 0 || depth == 0 {
+        return;
+    }
+    let prev = &pages[idx - 1];
+    let pr = prev.page.r;
+    let fold = stable_rep_deg;
+    if let Some(res) = prev.result.as_ref() {
+        for &vi in res.unknown.iter() {
+            let v = res.vars[vi];
+            let src = Tridegree::new(v.n, v.s, v.f);
+            if src == deg || fold(src.diff_target(pr)) == deg {
+                out.push((idx - 1, v));
+            }
+        }
+    }
+    let mut carried: Vec<Tridegree> = Vec::new();
+    for &pdeg in prev.page.exclude_set.iter() {
+        for x in [pdeg, Tridegree::new(pdeg.n, pdeg.s + 1, pdeg.f - pr)] {
+            let matches = (x.n <= x.s + 2 && x == deg) || fold(x.diff_target(pr)) == deg;
+            if matches && !carried.contains(&pdeg) {
+                carried.push(pdeg);
+            }
+        }
+    }
+    for pdeg in carried {
+        collect_obstructions(pages, idx - 1, pdeg, depth - 1, out);
+    }
+}
+
 fn explain_exclusion(pages: &[PageState], idx: usize, deg: Tridegree, depth: usize, indent: usize) {
     let pad = " ".repeat(indent);
     if idx == 0 {

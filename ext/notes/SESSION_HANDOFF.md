@@ -385,6 +385,15 @@ Executed the July 31 priority queue. All `cargo test -p ehp-core` green (31).
    absent in the source-dead world). Tier-1 possibility lines were confirmed
    ABSENT in the user's real run — matches t=50; per-entry consensus already
    extracts singletons; correlations (tier 2) reported but not yet forcing.
+   LATER same session: zero-map went PER-ENTRY, and a JOINT width-2 phase
+   landed (collect_obstructions silent why-trace + try_diffs_staged
+   later-page assumptions + 4-world per-entry harvest, EHP_JOINT=0
+   disables; capped 500 pairs/pass). t=50: 378 forced (was 114), 2-pass
+   fixpoint, clean; wall 461s→3190s (joint trials uncached — candidate
+   optimization: per-slice SweepCache, ONLY if user re-opens speed).
+   Acceptance set: (15,32,7)/(12,22,4)/(12,31,5) width-1 shapes,
+   (10,44,9) per-entry partial, (10,44,8) width-2 d2×d3. Width ≥3 and
+   partial-fact composition remain tier-3 (recorded_constraints).
 4. **Hidden-value constraint system, migration steps 1–2 —
    `ehp-core/src/hidden_solve.rs` (new), report-only.** Step 1: `HiddenVar`
    (kind, deg, δ, row, col) + `solve_hidden(page, store)`: regenerates the
