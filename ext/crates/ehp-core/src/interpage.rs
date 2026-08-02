@@ -784,7 +784,16 @@ fn build_overlay_page_from(
     for rep in &recompute {
         if let Some(squares) = idx.map_squares_by_rep.get(rep) {
             for &(kind, t, tgt) in squares {
-                if !removed.contains(&t) && seen_squares.insert((kind, t)) {
+                // `removed` used to gate this too ("skip recomputing a
+                // square whose source just vanished") but that's wrong: it
+                // doesn't just skip recomputation, it skips this square
+                // ENTIRELY, so the stale pre-trial map block (still sized
+                // for the old, nonzero dimension) is never removed from
+                // `overlay.maps` either. The zero-dimension case is already
+                // handled correctly by the `src_dim == 0 || tgt_dim == 0`
+                // removal further down — it just wasn't reachable for these
+                // squares before.
+                if seen_squares.insert((kind, t)) {
                     map_affected.push((kind, t, tgt));
                 }
             }
