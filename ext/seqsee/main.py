@@ -1092,20 +1092,41 @@ def generate_css_styles(data, theme="light"):
     }
 
 
-def process_json(input_file, output_file, theme="light", view_mode="sphere", filter_value=None):
+def process_json(input_file, output_file, theme="light", view_mode="sphere", filter_value=None, data=None):
+    """Render one chart HTML from SeqSee input JSON.
+
+    `data` (optional): an already-parsed input dict — the in-process fast path
+    used by ehp_batch.py, which gets the dict straight from
+    jsonmaker.process_csv and skips re-reading the .json file it just wrote
+    (the file is still written for the other consumers: mapview jmap
+    annotation, sidebyside targets). The dict is mutated in place below
+    (metadata, stem reflection, fiber positions), which is safe because
+    process_csv builds a fresh dict per chart AFTER dumping it to disk.
+    Schema validation of the dict path is opt-in via SEQSEE_VALIDATE=1,
+    matching jsonmaker's policy (the generator is deterministic); the
+    file path keeps its unconditional validation for external callers.
+    """
     global global_css
 
-    # Load input JSON
-    with open(input_file, "r") as f:
-        data = json.load(f)
+    if data is None:
+        # Load input JSON
+        with open(input_file, "r") as f:
+            data = json.load(f)
 
-    # validate against schema
-    try:
-        jsonschema.validate(instance=data, schema=schema)
-    except ValidationError as e:
-        print("Input JSON validation error:")
-        print(e)
-        sys.exit(1)
+        # validate against schema
+        try:
+            jsonschema.validate(instance=data, schema=schema)
+        except ValidationError as e:
+            print("Input JSON validation error:")
+            print(e)
+            sys.exit(1)
+    elif os.environ.get("SEQSEE_VALIDATE"):
+        try:
+            jsonschema.validate(instance=data, schema=schema)
+        except ValidationError as e:
+            print("Input JSON validation error:")
+            print(e)
+            sys.exit(1)
 
     global scale
     scale = get_value_or_schema_default(data, ["header", "chart", "scale"])

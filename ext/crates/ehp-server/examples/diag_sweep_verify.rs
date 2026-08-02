@@ -131,6 +131,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{l}");
     }
     eprintln!("Done in {:.1}s.", t0.elapsed().as_secs_f64());
+    if let Some(report) = interpage::trial_stats::report_and_reset() {
+        eprintln!("[timing] trial stages: {}", report);
+    }
     Ok(())
 }
 

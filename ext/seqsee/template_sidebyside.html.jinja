@@ -195,10 +195,29 @@
     }
 
     /*
-     * Shift+J "show full J-image" mode.
-     * A single .jmap-image-mode class on #right-panel drives everything
-     * via descendant selectors — no per-element JS class toggling needed.
-     * Uses cheap stroke/opacity instead of SVG filters.
+     * Shift+J/E/H/P "show full J-image" mode — TWO STYLES, one active at a
+     * time (a single class on each panel drives everything via descendant
+     * selectors; cheap stroke/opacity, no SVG filters):
+     *
+     *   .jmap-image-mode  (HIGHLIGHT, the original): non-image content in
+     *     the right panel fades hard and image elements are re-stroked in
+     *     the highlight color (d_r page colors are overridden while on).
+     *
+     *   .jmap-image-fade  (FADE, 2026-08-01): non-image content fades to
+     *     0.18 opacity and image elements KEEP THEIR ORIGINAL colors —
+     *     no stroke override anywhere. The left panel's non-source content
+     *     fades too (in highlight mode the sources are stroked instead).
+     *
+     * Both styles read the SAME [data-in-j-image] marks (nodes in the
+     * image; edges — including d{r}/n{r} differential edges — whose BOTH
+     * endpoints are in the image), so they classify identically. Dashed
+     * uncertain edges keep their dash in both (stroke-dasharray untouched);
+     * off-window offset edges are never marked and fade in both.
+     *
+     * UX: pressing Shift+J (or Shift+E/H/P via the REPL-injected handler,
+     * which calls toggleJmapImage()) cycles off → A → B → off, where A is
+     * the last-used style (persisted in localStorage 'seqsee-image-style',
+     * same pattern as the theme choice) and B the other one.
      */
     #right-panel.jmap-image-mode .defaultNode,
     #right-panel.jmap-image-mode .defaultEdge,
@@ -216,6 +235,21 @@
     #left-panel.jmap-image-mode [data-jmap] {
       stroke: var(--highlight-color) !important;
       stroke-width: 2px !important;
+    }
+
+    /* FADE style: only reduce opacity of non-image content; image
+       elements keep their original classes/colors (no stroke rules). */
+    #right-panel.jmap-image-fade .defaultNode,
+    #right-panel.jmap-image-fade .defaultEdge,
+    #right-panel.jmap-image-fade .node-text,
+    #left-panel.jmap-image-fade .defaultNode,
+    #left-panel.jmap-image-fade .defaultEdge,
+    #left-panel.jmap-image-fade .node-text {
+      opacity: 0.18;
+    }
+    #right-panel.jmap-image-fade [data-in-j-image],
+    #left-panel.jmap-image-fade [data-jmap] {
+      opacity: 1 !important;
     }
 
     #status-bar {
@@ -342,7 +376,7 @@
   </div>
 
   <div id="tooltip"></div>
-  <div id="status-bar">Synced pan/zoom | Hover SO nodes for J-map | j/Esc to return</div>
+  <div id="status-bar">Synced pan/zoom | Hover SO nodes for J-map | Shift+J cycles image mode | j/Esc to return</div>
 
   <script>
     // All theme colors live in per-theme CSS variable blocks in <head>
@@ -359,7 +393,14 @@
     let persistentSources = new Map();    // sourceId -> number
     let nextLabelNumber = 1;
     let suppressSync = false;
-    let jmapImageShown = false;
+    // Image-mode state: '' (off) | 'highlight' | 'fade'. See the CSS block
+    // above for what each style does. The last-used style persists in
+    // localStorage so it sticks across charts; the ACTIVE mode persists in
+    // sessionStorage so it survives WASD navigation between sibling views.
+    let jmapImageMode = '';
+    let jmapCycleFirst = '';  // style that started the current on-cycle
+    let preferredImageStyle =
+      localStorage.getItem('seqsee-image-style') === 'fade' ? 'fade' : 'highlight';
 
     // Back URL for returning to single chart
     const backUrl = "{{ back_url }}";
@@ -378,8 +419,8 @@
       btn.textContent = syncEnabled ? "Synced" : "Independent";
       btn.classList.toggle("active", syncEnabled);
       document.getElementById("status-bar").textContent =
-        syncEnabled ? "Synced pan/zoom | Hover SO nodes for J-map | j/Esc to return"
-                     : "Independent pan/zoom | Hover SO nodes for J-map | j/Esc to return";
+        syncEnabled ? "Synced pan/zoom | Hover SO nodes for J-map | Shift+J cycles image mode | j/Esc to return"
+                     : "Independent pan/zoom | Hover SO nodes for J-map | Shift+J cycles image mode | j/Esc to return";
     }
 
     function applyTheme() {
@@ -731,12 +772,50 @@
       }
     }
 
+    // Set panel classes from jmapImageMode. Exactly one (or neither) of the
+    // two style classes is ever present, so switching styles fully undoes
+    // the other style's rules — no stacking.
+    function applyJmapImageMode() {
+      ["left-panel", "right-panel"].forEach(id => {
+        const panel = document.getElementById(id);
+        panel.classList.toggle("jmap-image-mode", jmapImageMode === 'highlight');
+        panel.classList.toggle("jmap-image-fade", jmapImageMode === 'fade');
+      });
+    }
+
+    function showImageModeToast() {
+      // Reuse the theme toast element (same styling / hide timer).
+      let el = document.getElementById('theme-toast');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'theme-toast';
+        document.body.appendChild(el);
+      }
+      el.textContent = 'Image mode: ' + (jmapImageMode || 'off');
+      el.classList.add('visible');
+      clearTimeout(el._hideTimer);
+      el._hideTimer = setTimeout(() => el.classList.remove('visible'), 1600);
+    }
+
+    // Shift+J (and the injected Shift+E/H/P handlers) cycle
+    // off → A → B → off, where A = last-used style (localStorage) and B
+    // the other style. Entering a style records it as the new preference.
     function toggleJmapImage() {
-      // Just toggle one class on each panel — CSS descendant selectors do the rest
-      jmapImageShown = !jmapImageShown;
-      document.getElementById("left-panel").classList.toggle("jmap-image-mode", jmapImageShown);
-      document.getElementById("right-panel").classList.toggle("jmap-image-mode", jmapImageShown);
-      sessionStorage.setItem('seqsee_sbs_jmap', jmapImageShown ? '1' : '0');
+      if (jmapImageMode === '') {
+        jmapImageMode = preferredImageStyle;
+        jmapCycleFirst = jmapImageMode;
+      } else if (jmapImageMode === jmapCycleFirst) {
+        jmapImageMode = jmapCycleFirst === 'highlight' ? 'fade' : 'highlight';
+      } else {
+        jmapImageMode = '';
+      }
+      if (jmapImageMode) {
+        preferredImageStyle = jmapImageMode;
+        localStorage.setItem('seqsee-image-style', jmapImageMode);
+      }
+      applyJmapImageMode();
+      sessionStorage.setItem('seqsee_sbs_jmap', jmapImageMode);
+      showImageModeToast();
     }
 
     // ——— Initialize ———
@@ -790,9 +869,11 @@
       // This includes differential (d{r}) and unknown-differential (n{r})
       // edges: an image class supporting/receiving a differential within the
       // image is exactly what image mode should surface, so they get the same
-      // highlight treatment as the structure lines (dashed n{r} edges keep
-      // their dash pattern). Edges with only one endpoint in the image fade
-      // with the rest of the non-image content.
+      // treatment as the structure lines in BOTH image-mode styles — the
+      // highlight and fade CSS read these same data-in-j-image marks, so the
+      // two styles classify identically (dashed n{r} edges keep their dash
+      // pattern). Edges with only one endpoint in the image fade with the
+      // rest of the non-image content.
       document.querySelectorAll("#content-group-right .defaultEdge[data-source][data-target]").forEach(edge => {
         const src = edge.getAttribute("data-source");
         const tgt = edge.getAttribute("data-target");
@@ -802,10 +883,16 @@
       });
 
       // Restore J-map image mode if it was active before navigation
-      if (sessionStorage.getItem('seqsee_sbs_jmap') === '1') {
-        jmapImageShown = true;
-        document.getElementById("left-panel").classList.add("jmap-image-mode");
-        document.getElementById("right-panel").classList.add("jmap-image-mode");
+      // ('1' is the legacy pre-fade on-value; map it to the preferred style)
+      const storedImageMode = sessionStorage.getItem('seqsee_sbs_jmap');
+      if (storedImageMode === 'highlight' || storedImageMode === 'fade') {
+        jmapImageMode = storedImageMode;
+      } else if (storedImageMode === '1') {
+        jmapImageMode = preferredImageStyle;
+      }
+      if (jmapImageMode) {
+        jmapCycleFirst = jmapImageMode;
+        applyJmapImageMode();
       }
 
       // Set up J-map highlighting on left panel (SO) nodes

@@ -7,6 +7,7 @@ pub mod products;
 pub mod page;
 pub mod differentials;
 pub mod hidden;
+pub mod hidden_solve;
 pub mod cache;
 pub mod constraints;
 pub mod solver;

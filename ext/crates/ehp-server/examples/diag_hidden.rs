@@ -231,5 +231,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  [{tag}] {v}");
     }
 
+    // Constraint-system view (hidden_solve, migration step 1) + the v1
+    // oracle check, so a headless run also validates the linear system.
+    let report = ehp_core::hidden_solve::solve_hidden(&page, &store);
+    eprintln!(
+        "\nhidden_solve: {} vars, {} constraints, consistent={}, {} determined \
+         ({} beyond closure), oracle_ok={}",
+        report.num_vars,
+        report.num_constraints,
+        report.consistent,
+        report.determined.len(),
+        report.beyond_closure.len(),
+        report.oracle_ok,
+    );
+    for f in &report.oracle_failures {
+        eprintln!("  oracle: {f}");
+    }
+
     Ok(())
 }

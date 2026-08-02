@@ -16,7 +16,8 @@ writes fiber{N}_E{r}.json/.html (one chart per base sphere N >= 2, showing
 the fiber-sequence triple S^N, S^{N+1}, S^{2N+1} with E/H/P edges, per
 crates/fiber_spec.md). sidebyside mode reads one JSON object per line:
 {"src": ..., "tgt": ..., "out": ..., "theme": ..., "back": ...} and
-generates each split-screen map view.
+generates each split-screen map view. A manifest path of "-" reads the
+same format from stdin (on-demand single-view generation, no temp file).
 
 Prints one line per item: "OK <id>" or "FAIL <id> <reason>" (parsed by the
 Rust caller). For sphere/stem the id is n/k; for sidebyside it is the line
@@ -28,6 +29,7 @@ output bytes; the Rust caller aggregates these — unknown line prefixes are
 ignored by older parsers, so this is protocol-safe). With EHP_TIMING set in
 the environment, a per-item "TIME <mode> <id> ..." line is printed too.
 """
+import inspect
 import json
 import os
 import sys
@@ -37,6 +39,15 @@ import jsonmaker
 import main as seqsee_main
 
 PER_ITEM_TIMING = bool(os.environ.get("EHP_TIMING"))
+
+# In-process fast path: process_csv returns the JSON dict it just wrote, and a
+# process_json that accepts `data=` renders straight from it, skipping the
+# .json re-read + re-parse (the file is still written — mapview annotation and
+# sidebyside targets read it from disk). Capability-probed so this script also
+# runs against an older main.py without the kwarg.
+_PROCESS_JSON_ACCEPTS_DATA = (
+    "data" in inspect.signature(seqsee_main.process_json).parameters
+)
 
 
 def _report(ok, ident, err=None):
@@ -72,12 +83,17 @@ def run_slices(mode, csv_path, out_dir, theme, r, values):
         try:
             t0 = time.perf_counter()
             try:
-                jsonmaker.process_csv(csv_path, json_path, mode, v, quiet=True)
+                json_data = jsonmaker.process_csv(csv_path, json_path, mode, v, quiet=True)
             except TypeError:
                 # older process_csv without the quiet kwarg
-                jsonmaker.process_csv(csv_path, json_path, mode, v)
+                json_data = jsonmaker.process_csv(csv_path, json_path, mode, v)
             t1 = time.perf_counter()
-            seqsee_main.process_json(json_path, html_path, theme, mode, v)
+            if _PROCESS_JSON_ACCEPTS_DATA and json_data is not None:
+                seqsee_main.process_json(
+                    json_path, html_path, theme, mode, v, data=json_data
+                )
+            else:
+                seqsee_main.process_json(json_path, html_path, theme, mode, v)
             t2 = time.perf_counter()
             size = _size_of(html_path)
             items += 1
@@ -99,8 +115,14 @@ def run_slices(mode, csv_path, out_dir, theme, r, values):
 
 
 def run_sidebyside(manifest_path):
-    with open(manifest_path) as fh:
-        lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+    # "-" reads the manifest from stdin: the on-demand single-view path (no
+    # temp manifest file needed — the Rust caller pipes one JSON line in).
+    if manifest_path == "-":
+        text = sys.stdin.read()
+    else:
+        with open(manifest_path) as fh:
+            text = fh.read()
+    lines = [ln for ln in text.splitlines() if ln.strip()]
     items = 0
     render_s = 0.0
     nbytes = 0

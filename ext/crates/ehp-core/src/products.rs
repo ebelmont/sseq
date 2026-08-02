@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use fp::matrix::Matrix;
 use fp::vector::FpVector;
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 
 use crate::gf2::*;
 use crate::tridegree::Tridegree;
@@ -175,19 +175,73 @@ impl ProductMatrix {
 #[derive(Clone)]
 pub struct ProductTable {
     matrices: HashMap<(Tridegree, Tridegree), Arc<ProductMatrix>>,
+    /// Layered-overlay support (interpage trial overlays): reads fall through
+    /// to `base` for keys not in `matrices` and not in `tombstones`, so an
+    /// overlay table holds only its patch instead of a clone of the whole
+    /// base map (~2M Arc bumps per trial page step — the measured majority of
+    /// trial CPU). A base table must itself be flat (`base.base == None`).
+    ///
+    /// The fallthrough preserves the absent-block-is-zero semantics of
+    /// `multiply`/`has_block` exactly: a key is "present" iff the patched
+    /// view has it, which is what an eager clone-plus-patch would contain.
+    base: Option<Arc<ProductTable>>,
+    /// Keys removed relative to `base` (removal must shadow, since `multiply`
+    /// treats absent blocks as zero).
+    tombstones: HashSet<(Tridegree, Tridegree)>,
 }
 
 impl ProductTable {
     pub fn new() -> Self {
         ProductTable {
             matrices: HashMap::new(),
+            base: None,
+            tombstones: HashSet::new(),
         }
     }
 
     pub fn with_capacity(cap: usize) -> Self {
         ProductTable {
             matrices: HashMap::with_capacity(cap),
+            base: None,
+            tombstones: HashSet::new(),
         }
+    }
+
+    /// A layered view over `base`: initially identical to it, mutations land
+    /// in this table's own patch/tombstones. O(1) to build and to drop.
+    pub fn overlay_of(base: Arc<ProductTable>) -> Self {
+        assert!(
+            base.base.is_none(),
+            "ProductTable overlays do not stack (base must be flat)"
+        );
+        ProductTable {
+            matrices: HashMap::new(),
+            base: Some(base),
+            tombstones: HashSet::new(),
+        }
+    }
+
+    /// The block Arc visible at `k` through the layered view.
+    #[inline]
+    fn arc_at(&self, k: &(Tridegree, Tridegree)) -> Option<&Arc<ProductMatrix>> {
+        if let Some(a) = self.matrices.get(k) {
+            return Some(a);
+        }
+        if self.tombstones.contains(k) {
+            return None;
+        }
+        self.base.as_ref().and_then(|b| b.matrices.get(k))
+    }
+
+    /// Base entries still visible through the patch (for merged iteration).
+    fn base_visible(
+        &self,
+    ) -> impl Iterator<Item = (&(Tridegree, Tridegree), &Arc<ProductMatrix>)> {
+        self.base
+            .as_deref()
+            .into_iter()
+            .flat_map(|b| b.matrices.iter())
+            .filter(|(k, _)| !self.matrices.contains_key(*k) && !self.tombstones.contains(*k))
     }
 
     /// Insert a single basis×basis product result.
@@ -198,11 +252,24 @@ impl ProductTable {
         let block_key = (key.deg1, key.deg2);
         let tgt_dim = value.len();
 
-        let pm = Arc::make_mut(
-            self.matrices
-                .entry(block_key)
-                .or_insert_with(|| Arc::new(ProductMatrix::zero(dim1, dim2, tgt_dim))),
-        );
+        // A layered table must seed a first write to a base-visible block
+        // from the BASE block (what an eager clone would have mutated), not
+        // from zero. Tombstoned or absent keys start from zero as before.
+        if !self.matrices.contains_key(&block_key) {
+            let seed = if self.tombstones.remove(&block_key) {
+                None
+            } else {
+                self.base
+                    .as_ref()
+                    .and_then(|b| b.matrices.get(&block_key))
+                    .cloned()
+            };
+            self.matrices.insert(
+                block_key,
+                seed.unwrap_or_else(|| Arc::new(ProductMatrix::zero(dim1, dim2, tgt_dim))),
+            );
+        }
+        let pm = Arc::make_mut(self.matrices.get_mut(&block_key).unwrap());
 
         let row_idx = key.idx1 as usize * pm.dim2 as usize + key.idx2 as usize;
         if row_idx < pm.rows() && tgt_dim == pm.tgt_dim as usize {
@@ -212,23 +279,28 @@ impl ProductTable {
 
     /// Insert an entire block matrix for a degree pair.
     pub fn insert_block(&mut self, deg1: Tridegree, deg2: Tridegree, pm: ProductMatrix) {
+        self.tombstones.remove(&(deg1, deg2));
         self.matrices.insert((deg1, deg2), Arc::new(pm));
     }
 
     /// Remove the block matrix for a degree pair (if present).
     pub fn remove_block(&mut self, deg1: Tridegree, deg2: Tridegree) {
-        self.matrices.remove(&(deg1, deg2));
+        let k = (deg1, deg2);
+        self.matrices.remove(&k);
+        if self.base.as_ref().is_some_and(|b| b.matrices.contains_key(&k)) {
+            self.tombstones.insert(k);
+        }
     }
 
     /// Get the block matrix for a degree pair.
     pub fn block(&self, deg1: Tridegree, deg2: Tridegree) -> Option<&ProductMatrix> {
-        self.matrices.get(&(deg1, deg2)).map(|a| a.as_ref())
+        self.arc_at(&(deg1, deg2)).map(|a| a.as_ref())
     }
 
     /// Look up a basis × basis product.
     pub fn get(&self, key: &ProductKey) -> Option<FpVector> {
         let block_key = (key.deg1, key.deg2);
-        if let Some(pm) = self.matrices.get(&block_key) {
+        if let Some(pm) = self.arc_at(&block_key) {
             let row_idx = key.idx1 as usize * pm.dim2 as usize + key.idx2 as usize;
             if row_idx < pm.rows() {
                 return Some(pm.row_vec(row_idx));
@@ -242,7 +314,7 @@ impl ProductTable {
     /// `multiply(a, _, b, _, _)` is zero — used to fail fast in constraint
     /// generation.
     pub fn has_block(&self, deg1: Tridegree, deg2: Tridegree) -> bool {
-        self.matrices.contains_key(&(deg1, deg2))
+        self.arc_at(&(deg1, deg2)).is_some()
     }
 
     /// Multiply two elements given by coefficient vectors.
@@ -261,7 +333,7 @@ impl ProductTable {
         let mut result = vec_zero(result_dim);
 
         let block_key = (deg1, deg2);
-        let pm = match self.matrices.get(&block_key) {
+        let pm = match self.arc_at(&block_key) {
             Some(pm) => pm,
             None => return result,
         };
@@ -313,7 +385,7 @@ impl ProductTable {
         result_dim: usize,
     ) -> Matrix {
         let block_key = (deg1, deg2);
-        if let Some(pm) = self.matrices.get(&block_key) {
+        if let Some(pm) = self.arc_at(&block_key) {
             if pm.tgt_dim as usize == result_dim && (idx2 as usize) < pm.dim2 as usize {
                 // Strided row extraction (start=idx2, stride=dim2, count=dim1)
                 // into a dim1 × tgt_dim matrix, then transpose.
@@ -343,7 +415,7 @@ impl ProductTable {
         result_dim: usize,
     ) -> Matrix {
         let block_key = (deg1, deg2);
-        if let Some(pm) = self.matrices.get(&block_key) {
+        if let Some(pm) = self.arc_at(&block_key) {
             if pm.tgt_dim as usize == result_dim && (idx1 as usize) < pm.dim1 as usize {
                 // Contiguous rows starting at idx1*dim2 into a dim2 × tgt_dim
                 // matrix, then transpose.
@@ -365,39 +437,46 @@ impl ProductTable {
     pub fn len(&self) -> usize {
         self.matrices
             .values()
+            .chain(self.base_visible().map(|(_, v)| v))
             .map(|pm| pm.dim1 as usize * pm.dim2 as usize)
             .sum()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.matrices.is_empty()
+        self.matrices.is_empty() && self.base_visible().next().is_none()
     }
 
     /// Iterate over individual product entries as `(ProductKey, FpVector)`.
     /// Filters out zero products for compatibility with CSV save.
     pub fn iter(&self) -> impl Iterator<Item = (ProductKey, FpVector)> + '_ {
-        self.matrices.iter().flat_map(|(&(deg1, deg2), pm)| {
-            let dim2 = pm.dim2 as usize;
-            (0..pm.rows()).filter_map(move |row_idx| {
-                if pm.row_is_zero(row_idx) {
-                    return None;
-                }
-                let idx1 = (row_idx / dim2) as u16;
-                let idx2 = (row_idx % dim2) as u16;
-                let key = ProductKey::new(deg1, idx1, deg2, idx2);
-                Some((key, pm.row_vec(row_idx)))
+        self.matrices
+            .iter()
+            .chain(self.base_visible())
+            .flat_map(|(&(deg1, deg2), pm)| {
+                let dim2 = pm.dim2 as usize;
+                (0..pm.rows()).filter_map(move |row_idx| {
+                    if pm.row_is_zero(row_idx) {
+                        return None;
+                    }
+                    let idx1 = (row_idx / dim2) as u16;
+                    let idx2 = (row_idx % dim2) as u16;
+                    let key = ProductKey::new(deg1, idx1, deg2, idx2);
+                    Some((key, pm.row_vec(row_idx)))
+                })
             })
-        })
     }
 
     /// Iterate over block matrices: yields `(&(Tridegree, Tridegree), &ProductMatrix)`.
     pub fn iter_blocks(&self) -> impl Iterator<Item = (&(Tridegree, Tridegree), &ProductMatrix)> {
-        self.matrices.iter().map(|(k, v)| (k, v.as_ref()))
+        self.matrices
+            .iter()
+            .chain(self.base_visible())
+            .map(|(k, v)| (k, v.as_ref()))
     }
 
     /// Number of block matrices.
     pub fn num_blocks(&self) -> usize {
-        self.matrices.len()
+        self.matrices.len() + self.base_visible().count()
     }
 
     /// Share storage between blocks with IDENTICAL content (dims + bits):
@@ -412,6 +491,7 @@ impl ProductTable {
     pub fn dedup_shared_blocks(&mut self) -> usize {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
+        debug_assert!(self.base.is_none(), "dedup runs on flat (load-time) tables only");
         let mut by_content: HashMap<u64, Vec<Arc<ProductMatrix>>> = HashMap::new();
         let mut shared = 0usize;
         for arc in self.matrices.values_mut() {

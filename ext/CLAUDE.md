@@ -80,6 +80,55 @@ Interactive tool for exploring and editing EHP spectral sequence differentials.
     applied — they signal base-system inconsistency). Consensus values can
     land on pages beyond the swept one; the applying cascade's solve_through
     covers the highest such page.
+  - Possibility-set consensus tiers 1–2 (2026-08-01, `EHP_POSSIBILITY=0`
+    disables; addendum in notes/HIDDEN_VALUE_PROPAGATION_NOTES.md): sweeps
+    also project each world's final solution space onto per-tridegree
+    variable BLOCKS (explicit cosets, caps 16 bits/rank 12), union the two
+    worlds per switch, intersect across switches and the base projection —
+    carrying CORRELATIONS per-entry consensus cannot. `interpage try`
+    applies entries constant across every surviving matrix (tier 1: same
+    guards/undo as consensus values) and logs shrunken sets (tier 2:
+    "k of m matrices remain possible"); `sweep` reports both. Tier 3
+    (recording the sets' linear hulls as constraints) is deferred to a
+    `recorded_constraints` channel shared with the hidden-value system.
+  - Zero-map consensus (2026-08-01, `EHP_ZERO_CONSENSUS=0` disables): if in
+    BOTH worlds of a switch the d_r block at a degree is provably zero
+    (every entry determined 0) or VACUOUS (source classes dead, re-turned
+    dim 0), the target is not hit in any possible world — `interpage try`
+    records the whole stock-basis block as 0 ("d_r(deg) ≡ 0 recorded …
+    target not hit"; `sweep` reports). Sound despite the SOURCE basis
+    differing between worlds (zeros never quotient; the only effect is
+    un-excluding the TARGET, dim-guarded at the target in both worlds).
+    This resolves SELF-obstructed ghosts the per-entry consensus must
+    refuse because the var vanishes in one world — e.g. an uncertain d4 at
+    (15,32,7) whose only obstruction is the class's own uncertain d3:
+    world d3=0 learns d4=0 by Leibniz replay, world d3=1 kills the class
+    ⇒ d4 ≡ 0 recorded, the d4 target un-excludes, dashes clear.
+  - Thin trial overlays (2026-08-01): the per-page-step overlay is a LAYERED
+    view (`SATPage::thin_overlay` over `OverlayBases` Arc snapshots;
+    ProductTable/MapTable base+tombstone fallthrough, mutations patch/COW) —
+    build/drop O(patch) instead of the old ~2M-entry clone+drop.
+    `EHP_TRIAL_VERIFY=1` rebuilds every step the old eager way and
+    cross-checks pointwise (the guard against a missed base block silently
+    reading as zero); gated by diag_sweep_verify byte-parity at t=25/50 and
+    a clean full-sweep verify run at t=50. `MapTable.matrices` is private
+    now — go through matrix_at/iter/remove_matrix.
+  - Influence-based pass skipping (2026-08-01): OPT-IN `EHP_TRY_SKIP=1`,
+    default OFF and UNVALIDATED (user declared interpage try fast enough —
+    the gauntlet was not run). Skips re-trials whose influence cone (kernel
+    component + downstream turn/partner closure) misses everything changed
+    since their last trial. Before trusting it, run once with
+    `EHP_TRY_SKIP_VERIFY=1` (trials everything, reports would-skip outcome
+    violations; must be 0).
+  - `hidden solve` / `hidden exactness [margin]` (2026-08-01, report-only;
+    `ehp-core/src/hidden_solve.rs` = migration steps 1–2 of the hidden-value
+    notes): `hidden solve` recasts the v1 Toda closure as a linear system
+    over HiddenVar entries — reports UNSAT on mutually inconsistent
+    assertions, individually determined entries, solver-only determinations
+    (beyond the forward closure), and a v1-oracle containment check (also
+    printed by diag_hidden). `hidden exactness` lists terminal-page cells
+    where rank(incoming) < dim ker(outgoing) (in-window, un-excluded,
+    frontier-margined) — the engine-side pink fiber_hidden candidates.
   - `interpage try [min_stem [max_stem]]` — the automated fixpoint form: sweeps every page's unknowns (lowest r first), APPLIES each forced value (recorded like add/zero, with an undo entry each), cascades immediately so later sweeps see the consequences, and repeats whole passes until nothing new is forced. Findings go to the propagation log, the charts, and `output/interpage_try.log`. Trials are cheap since the overlay page shares product/map blocks via Arc (~0.2s per 4-page try at max_t=50); the final pass is always a full sweep that forces nothing.
   - `propagate off` defers mutations (add/zero/toggle just record, instantly); `interpage [r]` then propagates everything recorded through all pages in one pass, printing every newly determined differential (the on-demand form of the original run_interpage workflow; notes/INTERPAGE_SPEC.md documents the original). `propagate on` restores cascade-per-add.
 - Uncertainty-aware page turning: differential matrices are used *partially* — determined
@@ -324,10 +373,14 @@ Interactive tool for exploring and editing EHP spectral sequence differentials.
   explicit skip of `d{r}`/`n{r}`-classed edges is REMOVED — a differential whose
   source AND target are both in the image gets the structline highlight
   treatment (dashed uncertain edges keep their dash; off-window offset edges
-  naturally excluded). Currently image elements take the HIGHLIGHT COLOR
-  (d_r page colors are overridden while the mode is on). USER'S PLANNED
-  DIRECTION: prefer a mode that only FADES non-image content and leaves image
-  elements in their original colors — or offer both as an option/toggle.
+  naturally excluded). TWO STYLES since 2026-08-01: HIGHLIGHT
+  (the original — image elements take the highlight color) and FADE (non-image
+  content drops to 0.18 opacity, image elements KEEP their original d_r/
+  structline colors). Shift+J/E/H/P cycles off → A → B → off where A = the
+  last-used style (localStorage `seqsee-image-style`); the active mode still
+  survives WASD navigation via sessionStorage. Both styles read the same
+  data-in-j-image marks, so they classify identically. Template-only change
+  (template_sidebyside.html.jinja) — regen + hard reload required.
 - Split-screen map views are pre-generated at startup for every map/sphere/page
   (J-map style; `ehp_batch.py sidebyside` manifest mode; EHP_MAPVIEWS=0 skips), so the
   e/h/p keys and WASD navigation work immediately.
@@ -350,7 +403,13 @@ Interactive tool for exploring and editing EHP spectral sequence differentials.
   NOT touched (it's older — no fiber mode — and not the runtime copy).
   `regen_affected_charts` also runs its per-page plan entries in PARALLEL now
   (was 4 pages × 3 modes = 12 sequential batch invocations; entries are
-  page-independent — own CSV, own chart files).
+  page-independent — own CSV, own chart files). 2026-08-01: the JSON file
+  round-trip inside a batch chunk is gone (ehp_batch passes jsonmaker's dict
+  straight to main.py `process_json(data=...)`; .json files are still
+  WRITTEN — the Rust mapview/annotate path reads them); `sidebyside -` reads
+  a JSONL manifest from stdin (on-demand map-view groundwork; Rust-side plan
+  in notes/CHARTGEN_SPEEDUP_INVESTIGATION.md); compact_json deliberately NOT
+  replaced (byte-format is load-bearing). Byte-parity verified at t=25.
 - Chart generation runs sphere-parallel with rayon and calls the SeqSee venv python
   directly (resolved once via `poetry env info --executable`), skipping `poetry run`
   startup per invocation. Stale charts from previous runs are cleared at startup.

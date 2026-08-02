@@ -74,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- Step 3: overlay + new vars ----
     let mut lt = lt0;
-    let overlay0 = build_overlay_page(&e3, &e4, &lt, &dsat, None, None).expect("no d2 error");
+    let overlay0 = build_overlay_page(&e3, &e4, &lt, &dsat, None, None, None).expect("no d2 error");
     lt.new_vars = collect_new_vars(&overlay0, &res4, &lt.unexclude);
     eprintln!("\nnew E_4 vars ({}):", lt.new_vars.len());
     for v in &lt.new_vars {

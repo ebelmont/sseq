@@ -102,6 +102,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     eprintln!("Sweep finished in {:.1}s.", t0.elapsed().as_secs_f64());
+    if let Some(report) = interpage::trial_stats::report_and_reset() {
+        eprintln!("[timing] trial stages: {}", report);
+    }
 
     if findings.is_empty() {
         eprintln!("No contradictions — no values forced.");

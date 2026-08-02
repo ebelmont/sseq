@@ -21,7 +21,7 @@ use crate::constraints::{
 use crate::element::Element;
 use crate::gf2::*;
 use crate::map::MapKind;
-use crate::page::SATPage;
+use crate::page::{OverlayBases, SATPage};
 use crate::pageturning::{
     compute_induced_map_single_tb, compute_induced_products_single, make_next_exclude_set,
     TurnContext, TurnedBidegree,
@@ -410,6 +410,10 @@ pub struct SweepCache {
     pub source_index: SourceIndex,
     /// [`PageIndex`] for each target page `pages[1..]`.
     pub target_indexes: Vec<PageIndex>,
+    /// Arc'd table snapshots for each target page `pages[1..]` — the base
+    /// layer every trial's thin overlay reads through. One full table clone
+    /// per page per sweep instead of per trial page step.
+    pub target_bases: Vec<OverlayBases>,
 }
 
 impl SweepCache {
@@ -419,6 +423,7 @@ impl SweepCache {
             tb: TbCache::new(first.page, first.result),
             source_index: SourceIndex::new(first.page),
             target_indexes: pages[1..].iter().map(|p| PageIndex::new(p.page)).collect(),
+            target_bases: pages[1..].iter().map(|p| OverlayBases::new(p.page)).collect(),
         }
     }
 }
@@ -574,11 +579,55 @@ pub fn build_overlay_page(
     d_result: &SATResult,
     shared: Option<&SharedTurn>,
     index: Option<&PageIndex>,
+    bases: Option<&OverlayBases>,
 ) -> Result<SATPage, TrialError> {
-    // Cheap since ProductTable/MapTable blocks are Arc-shared (the deep-copy
-    // version of this clone was ~50s per page at max_t=50) and pairs/names
-    // are skipped (nothing on this path reads them).
-    let mut overlay = target_page.overlay_clone();
+    // THIN overlay: a layered view over the stock tables — O(patch) to build
+    // and drop, vs the old eager `overlay_clone` (~2M-entry HashMap clone
+    // plus the matching teardown per page step, the measured 76–91% of trial
+    // CPU at t=100). Sweeps share `bases` across all trials; the uncached
+    // path builds one here (same cost as the eager clone it replaces).
+    let owned_bases;
+    let bases = match bases {
+        Some(b) => b,
+        None => {
+            owned_bases = OverlayBases::new(target_page);
+            &owned_bases
+        }
+    };
+    let overlay = target_page.thin_overlay(bases);
+    build_overlay_page_from(overlay, source_page, target_page, lt, d_result, shared, index)
+}
+
+/// The eager-clone form of [`build_overlay_page`] — the pre-thin-overlay
+/// behavior, kept as the ground truth for `EHP_TRIAL_VERIFY`.
+pub fn build_overlay_page_eager(
+    source_page: &SATPage,
+    target_page: &SATPage,
+    lt: &LocalTurn,
+    d_result: &SATResult,
+    shared: Option<&SharedTurn>,
+    index: Option<&PageIndex>,
+) -> Result<SATPage, TrialError> {
+    build_overlay_page_from(
+        target_page.overlay_clone(),
+        source_page,
+        target_page,
+        lt,
+        d_result,
+        shared,
+        index,
+    )
+}
+
+fn build_overlay_page_from(
+    mut overlay: SATPage,
+    source_page: &SATPage,
+    target_page: &SATPage,
+    lt: &LocalTurn,
+    d_result: &SATResult,
+    shared: Option<&SharedTurn>,
+    index: Option<&PageIndex>,
+) -> Result<SATPage, TrialError> {
     overlay.exclude_set = lt.new_exclude.clone();
     overlay.target_only_exclude = lt.new_target_only.clone();
 
@@ -822,7 +871,7 @@ pub fn build_overlay_page(
         let tgt_dim = overlay.dim_at(tgt);
         let map_table = overlay.maps.get_mut(&kind).unwrap();
         if src_dim == 0 || tgt_dim == 0 {
-            map_table.matrices.remove(&src);
+            map_table.remove_matrix(src);
             continue;
         }
         let mut mat = mat_zero(src_dim, tgt_dim);
@@ -837,7 +886,7 @@ pub fn build_overlay_page(
         if any {
             map_table.set_matrix(src, mat);
         } else {
-            map_table.matrices.remove(&src);
+            map_table.remove_matrix(src);
         }
     }
 
@@ -945,6 +994,139 @@ pub fn make_new_constraints(
 }
 
 // =============================================================================
+// Thin-overlay verification (EHP_TRIAL_VERIFY)
+// =============================================================================
+
+/// `EHP_TRIAL_VERIFY=1`: per page step, build BOTH the thin and the eager
+/// overlay and cross-check them (see [`verify_overlay_step`]).
+fn trial_verify_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("EHP_TRIAL_VERIFY").is_ok_and(|v| !v.is_empty() && v != "0")
+    })
+}
+
+/// Panic (with per-entry diffs) unless `thin` and `full` are pointwise
+/// identical as pages AND produce identical `collect_new_vars` /
+/// `make_new_constraints` outputs. Constraint lists are compared as SETS —
+/// the two pages' internal hash layouts differ, and generator output order
+/// (never the content) can depend on them.
+#[allow(clippy::too_many_arguments)]
+fn verify_overlay_step(
+    thin: &SATPage,
+    full: &SATPage,
+    lt: &LocalTurn,
+    target: &InterpagePage,
+    source_page: &SATPage,
+    ext_index: &HashMap<DiffVar, usize>,
+    stale_blocks: &HashSet<Tridegree>,
+    thin_cons: &[(Vec<usize>, bool)],
+) {
+    let mut errs: Vec<String> = Vec::new();
+    let d = |t: Tridegree| format!("({},{},{})", t.n, t.s, t.f);
+
+    for (&t, &dim) in &full.dimension {
+        if thin.dim_at(t) != dim {
+            errs.push(format!("dim{}: thin {} vs full {}", d(t), thin.dim_at(t), dim));
+        }
+    }
+    for (&t, &dim) in &thin.dimension {
+        if full.dim_at(t) != dim {
+            errs.push(format!("dim{}: thin {} vs full {}", d(t), dim, full.dim_at(t)));
+        }
+    }
+    for t in full.page.keys() {
+        if !thin.page.contains_key(t) {
+            errs.push(format!("page key {} missing in thin", d(*t)));
+        }
+    }
+    for t in thin.page.keys() {
+        if !full.page.contains_key(t) {
+            errs.push(format!("page key {} extra in thin", d(*t)));
+        }
+    }
+    if thin.exclude_set != full.exclude_set {
+        errs.push("exclude_set differs".to_string());
+    }
+    if thin.target_only_exclude != full.target_only_exclude {
+        errs.push("target_only_exclude differs".to_string());
+    }
+
+    for (&(d1, d2), pb) in full.products.iter_blocks() {
+        match thin.products.block(d1, d2) {
+            Some(pa) if pa == pb => {}
+            Some(_) => errs.push(format!("product block {}x{} differs", d(d1), d(d2))),
+            None => errs.push(format!("product block {}x{} missing in thin", d(d1), d(d2))),
+        }
+    }
+    for (&(d1, d2), _) in thin.products.iter_blocks() {
+        if full.products.block(d1, d2).is_none() {
+            errs.push(format!("product block {}x{} extra in thin", d(d1), d(d2)));
+        }
+    }
+
+    for (kind, fmt) in &full.maps {
+        let Some(tmt) = thin.maps.get(kind) else {
+            errs.push(format!("{:?} map table missing in thin", kind));
+            continue;
+        };
+        for (t, arc) in fmt.iter() {
+            match tmt.matrix_at(*t) {
+                Some(m) if m == arc.as_ref() => {}
+                Some(_) => errs.push(format!("{:?} map at {} differs", kind, d(*t))),
+                None => errs.push(format!("{:?} map at {} missing in thin", kind, d(*t))),
+            }
+        }
+        for (t, _) in tmt.iter() {
+            if !fmt.contains(*t) {
+                errs.push(format!("{:?} map at {} extra in thin", kind, d(*t)));
+            }
+        }
+    }
+
+    // Derived outputs from the eager page.
+    let full_vars = collect_new_vars(full, target.result, &lt.unexclude);
+    if full_vars != lt.new_vars {
+        errs.push(format!(
+            "collect_new_vars differs: thin {} vs full {} vars",
+            lt.new_vars.len(),
+            full_vars.len()
+        ));
+    }
+    let mut full_m = full.clone();
+    let full_cons = make_new_constraints(
+        &mut full_m,
+        source_page.max_t,
+        source_page.r,
+        &lt.unexclude,
+        target.excluded_leibniz,
+        ext_index,
+        stale_blocks,
+    );
+    let as_set = |cons: &[(Vec<usize>, bool)]| -> HashSet<(Vec<usize>, bool)> {
+        cons.iter().cloned().collect()
+    };
+    let (ts, fs) = (as_set(thin_cons), as_set(&full_cons));
+    for c in fs.difference(&ts) {
+        errs.push(format!("constraint only in full: {:?}", c));
+    }
+    for c in ts.difference(&fs) {
+        errs.push(format!("constraint only in thin: {:?}", c));
+    }
+
+    if !errs.is_empty() {
+        for e in &errs {
+            eprintln!("[EHP_TRIAL_VERIFY] {}", e);
+        }
+        panic!(
+            "EHP_TRIAL_VERIFY: thin overlay diverges from eager overlay on E_{} step ({} diffs)",
+            thin.r,
+            errs.len()
+        );
+    }
+}
+
+// =============================================================================
 // Assumption propagation driver (ports run_interpage.py::try_diffs_from_list)
 // =============================================================================
 
@@ -968,6 +1150,17 @@ pub fn try_diffs(
 pub struct TrialRun {
     pub learned: Vec<LearnedDiff>,
     pub dim_changed: HashSet<Tridegree>,
+    /// Re-turned dimensions per `(page r, degree)` — the world's corrected
+    /// dims wherever a page step recomputed them (`LocalTurn::new_dims`).
+    /// Consumed by the zero-map consensus (a dim of 0 = the source classes
+    /// are dead in this world, so its differential is vacuously zero).
+    pub new_dims: HashMap<(i32, Tridegree), usize>,
+    /// The trial's final updated solve result per page reached: `(r, result)`
+    /// for the swept page and every stepped page. Pages beyond the last
+    /// entry were never stepped — their state is the base result. Consumed
+    /// by the possibility-set consensus (block projections of the final
+    /// solution spaces); moves, never clones, so it is essentially free.
+    pub final_results: Vec<(i32, SATResult)>,
 }
 
 /// Per-stage trial profiling: lock-free atomic sums over every
@@ -1136,6 +1329,11 @@ fn try_diffs_with_cache_inner(
 
     let mut prev_overlay: Option<SATPage> = None;
     let mut dim_changed_all: HashSet<Tridegree> = HashSet::new();
+    // Final per-page results: `dsat` moves in here whenever the loop replaces
+    // it with the next page's result (and once at the end).
+    let mut finals: Vec<(i32, SATResult)> = Vec::new();
+    let mut new_dims_all: HashMap<(i32, Tridegree), usize> = HashMap::new();
+    let mut dsat_r = r0;
 
     for i in 1..pages.len() {
         let target = &pages[i];
@@ -1152,6 +1350,7 @@ fn try_diffs_with_cache_inner(
             None
         };
         let step_index = cache.and_then(|c| c.target_indexes.get(i - 1));
+        let step_bases = cache.and_then(|c| c.target_bases.get(i - 1));
 
         trial_stats::PAGE_STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let t_turn = Instant::now();
@@ -1163,8 +1362,15 @@ fn try_diffs_with_cache_inner(
             break;
         }
         let t_ov = Instant::now();
-        let mut overlay =
-            build_overlay_page(source_page, target.page, &lt, &dsat, step_shared, step_index)?;
+        let mut overlay = build_overlay_page(
+            source_page,
+            target.page,
+            &lt,
+            &dsat,
+            step_shared,
+            step_index,
+            step_bases,
+        )?;
         trial_stats::add(&trial_stats::NS_OVERLAY, t_ov.elapsed().as_nanos());
 
         lt.new_vars = collect_new_vars(&overlay, target.result, &lt.unexclude);
@@ -1223,6 +1429,24 @@ fn try_diffs_with_cache_inner(
             new_cons.len()
         );
 
+        // EHP_TRIAL_VERIFY=1: rebuild this page step's overlay the old eager
+        // way and require the thin overlay to be POINTWISE identical (dims,
+        // page keys, exclusions, every visible product block and map matrix,
+        // both directions) and to yield identical new_vars/new_cons. This is
+        // the guard against the thin overlay's one failure mode — a missed
+        // base block silently reading as zero. Panics with per-entry diffs.
+        if trial_verify_enabled() {
+            let full = build_overlay_page_eager(
+                source_page,
+                target.page,
+                &lt,
+                &dsat,
+                step_shared,
+                step_index,
+            )?;
+            verify_overlay_step(&overlay, &full, &lt, target, source_page, &ext_index, &stale_blocks, &new_cons);
+        }
+
         let t_solve = Instant::now();
         let solved = update_sat_result(target.result, &new_cons, &lt.new_vars);
         trial_stats::add(&trial_stats::NS_SOLVE, t_solve.elapsed().as_nanos());
@@ -1235,11 +1459,14 @@ fn try_diffs_with_cache_inner(
             value,
         }));
 
-        dsat = next_dsat;
+        new_dims_all.extend(lt.new_dims.iter().map(|(&t, &d)| ((target.page.r, t), d)));
+        finals.push((dsat_r, std::mem::replace(&mut dsat, next_dsat)));
+        dsat_r = target.page.r;
         let t_drop = Instant::now();
         drop(std::mem::replace(&mut prev_overlay, Some(overlay)));
         trial_stats::add(&trial_stats::NS_DROP, t_drop.elapsed().as_nanos());
     }
+    finals.push((dsat_r, dsat));
 
     let t_drop = Instant::now();
     drop(prev_overlay);
@@ -1247,6 +1474,8 @@ fn try_diffs_with_cache_inner(
     Ok(TrialRun {
         learned: learned_all,
         dim_changed: dim_changed_all,
+        new_dims: new_dims_all,
+        final_results: finals,
     })
 }
 
@@ -1293,10 +1522,203 @@ pub struct ConsensusFinding {
     pub value: bool,
 }
 
+/// Possibility set of one differential block, after case analysis over the
+/// sweep's switches (the addendum's "possibility-set consensus", tiers 1–2).
+///
+/// The true d_r matrix at `degree` must lie in `P_w0(u) ∪ P_w1(u)` for EVERY
+/// unknown switch u (each world's projected solution-space coset), so the
+/// running intersection of those unions — further intersected with the BASE
+/// solution's projection — is a sound upper bound on the possible matrices.
+/// Per-entry consensus only sees "same singleton in both worlds"; this
+/// carries the CORRELATIONS (whole-block cosets), so it can rule out
+/// matrices no single entry rules out, and different switches can rule out
+/// different candidates.
+#[derive(Clone, Debug)]
+pub struct BlockPossibilities {
+    pub r: i32,
+    /// Stable-rep source degree of the block.
+    pub degree: Tridegree,
+    /// The block's variables, sorted; bit `i` of a mask is `vars[i]`'s value.
+    pub vars: Vec<DiffVar>,
+    /// Sorted masks not ruled out. Empty = the base system is inconsistent.
+    pub possible: Vec<u64>,
+    /// Size of the base solution's projection (what "no new information"
+    /// looks like); `possible.len() < base_count` means something was ruled
+    /// out.
+    pub base_count: usize,
+    /// Number of switches whose union contributed to the intersection.
+    pub via_count: usize,
+}
+
+impl BlockPossibilities {
+    /// Tier-1 extraction: entries constant across every surviving mask are
+    /// forced. Returns `(var, value)` pairs.
+    pub fn forced_entries(&self) -> Vec<(DiffVar, bool)> {
+        if self.possible.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (i, &v) in self.vars.iter().enumerate() {
+            let first = self.possible[0] >> i & 1;
+            if self.possible.iter().all(|m| m >> i & 1 == first) {
+                out.push((v, first == 1));
+            }
+        }
+        out
+    }
+}
+
+/// `EHP_POSSIBILITY=0` disables the possibility-set consensus computation.
+fn possibility_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("EHP_POSSIBILITY").map_or(true, |v| v != "0"))
+}
+
+/// Block size caps: blocks with more variables, or restricted-kernel rank
+/// beyond this, are skipped (the sets get too large to be useful anyway).
+const POSS_MAX_BITS: usize = 16;
+const POSS_MAX_RANK: usize = 12;
+
+/// Project a solution space `offset + span(kernel)` onto the variable block
+/// at (stable-rep) `deg`: the coset enumerated as bitmasks. `None` if the
+/// degree has no variables, the block exceeds the caps, or (conservatively)
+/// anything else prevents an exact small enumeration.
+fn project_block(result: &SATResult, deg: Tridegree) -> Option<(Vec<DiffVar>, Vec<u64>)> {
+    let mut block: Vec<(usize, DiffVar)> = result
+        .vars
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| Tridegree::new(v.n, v.s, v.f) == deg)
+        .map(|(i, v)| (i, *v))
+        .collect();
+    if block.is_empty() || block.len() > POSS_MAX_BITS {
+        return None;
+    }
+    block.sort_by_key(|&(_, v)| v);
+
+    let mut off: u64 = 0;
+    for (bit, &(idx, _)) in block.iter().enumerate() {
+        if vec_get(&result.offset, idx) {
+            off |= 1 << bit;
+        }
+    }
+
+    // Restrict kernel rows to the block and build an independent XOR basis
+    // (bit-indexed: slot `b` holds the basis vector with leading bit `b`).
+    let mut by_bit = [0u64; POSS_MAX_BITS];
+    let mut rank = 0usize;
+    for i in 0..result.kernel.rows() {
+        let mut m: u64 = 0;
+        for (bit, &(idx, _)) in block.iter().enumerate() {
+            if mat_get(&result.kernel, i, idx) {
+                m |= 1 << bit;
+            }
+        }
+        while m != 0 {
+            let lead = 63 - m.leading_zeros() as usize;
+            if by_bit[lead] == 0 {
+                by_bit[lead] = m;
+                rank += 1;
+                if rank > POSS_MAX_RANK {
+                    return None;
+                }
+                break;
+            }
+            m ^= by_bit[lead];
+        }
+    }
+    let basis: Vec<u64> = by_bit.iter().copied().filter(|&b| b != 0).collect();
+
+    let k = basis.len();
+    let mut pts: Vec<u64> = Vec::with_capacity(1 << k);
+    for mask in 0u32..(1u32 << k) {
+        let mut p = off;
+        for (j, &b) in basis.iter().enumerate() {
+            if mask >> j & 1 == 1 {
+                p ^= b;
+            }
+        }
+        pts.push(p);
+    }
+    pts.sort_unstable();
+    pts.dedup();
+    let vars = block.into_iter().map(|(_, v)| v).collect();
+    Some((vars, pts))
+}
+
+/// Sorted-vec intersection.
+fn intersect_sorted(a: &[u64], b: &[u64]) -> Vec<u64> {
+    let mut out = Vec::with_capacity(a.len().min(b.len()));
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                out.push(a[i]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out
+}
+
+/// A d_r source block that is provably ZERO OR VACUOUS in BOTH worlds of a
+/// switch: every entry individually determined 0 (block projection = {0}),
+/// or the source classes dead (re-turned dim 0). In no possible world does a
+/// differential from `degree` hit its target — so the target is not killed
+/// by it, unconditionally. Recording the stock-basis block as 0 is sound
+/// even though the SOURCE basis differs between the worlds (a value the
+/// per-entry consensus must refuse): zeros never quotient anything, and the
+/// only downstream effect is un-excluding the TARGET, whose dims are
+/// guarded unchanged in both worlds. This is the resolution for
+/// self-obstructed ghosts — e.g. an uncertain d4 whose only obstruction is
+/// the class's own uncertain d3 (Leibniz forces d4 = 0 if the class
+/// survives; the class is dead if it doesn't).
+#[derive(Clone, Debug)]
+pub struct ZeroMapFinding {
+    pub via: DiffVar,
+    pub via_r: i32,
+    pub r: i32,
+    /// Stable-rep source degree whose d_r block is zero in every world.
+    pub degree: Tridegree,
+}
+
+/// `EHP_ZERO_CONSENSUS=0` disables the zero-map consensus channel.
+fn zero_consensus_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("EHP_ZERO_CONSENSUS").map_or(true, |v| v != "0"))
+}
+
+/// Is the d_r map at (stable-rep) `deg` provably the ZERO map in the world
+/// described by `result` (`dim_override` = the world's re-turned source dim,
+/// where it changed)? Zero means: no source classes at all, or every block
+/// entry individually determined 0. Free or ABSENT variables are NOT zero —
+/// unknown ≠ zero is the whole point of the exclusion machinery.
+fn map_provably_zero(
+    dim_override: Option<usize>,
+    result: &SATResult,
+    deg: Tridegree,
+) -> bool {
+    if dim_override == Some(0) {
+        return true;
+    }
+    match project_block(result, deg) {
+        Some((_, pts)) => pts.len() == 1 && pts[0] == 0,
+        None => false,
+    }
+}
+
 /// Contradiction forcings plus both-worlds consensus determinations.
 pub struct SweepOutcome {
     pub contradictions: Vec<SweepFinding>,
     pub consensus: Vec<ConsensusFinding>,
+    /// Possibility-set consensus results (only blocks where something was
+    /// ruled out relative to the base projection).
+    pub possibilities: Vec<BlockPossibilities>,
+    /// Zero-map consensus results ("target not hit in any world").
+    pub zero_maps: Vec<ZeroMapFinding>,
 }
 
 /// [`trial_error_sweep`] that ALSO harvests the both-worlds consensus:
@@ -1314,7 +1736,6 @@ pub fn trial_error_sweep_full(
     progress: impl Fn(usize, usize) + Sync,
 ) -> SweepOutcome {
     let first = &pages[0];
-    let r0 = first.page.r;
     let mut unknown_vars: Vec<DiffVar> = first
         .result
         .unknown
@@ -1323,7 +1744,20 @@ pub fn trial_error_sweep_full(
         .filter(|v| v.s >= min_stem && v.s < max_stem)
         .collect();
     unknown_vars.sort();
+    trial_error_sweep_vars(pages, &unknown_vars, progress)
+}
 
+/// [`trial_error_sweep_full`] over an EXPLICIT list of unknown vars on
+/// `pages[0]` — the influence-based pass skipping in `interpage try` sweeps
+/// only the vars whose influence cone intersects what previous passes
+/// changed; everything else provably repeats its previous outcome.
+pub fn trial_error_sweep_vars(
+    pages: &[InterpagePage],
+    unknown_vars: &[DiffVar],
+    progress: impl Fn(usize, usize) + Sync,
+) -> SweepOutcome {
+    let first = &pages[0];
+    let r0 = first.page.r;
     let total = 2 * unknown_vars.len();
     let done = std::sync::atomic::AtomicUsize::new(0);
 
@@ -1335,7 +1769,14 @@ pub fn trial_error_sweep_full(
     // One job per var, running both values, so the two worlds' learned sets
     // can be intersected. Ordering matches the old flat sweep: vars
     // ascending, the value-0 finding before the value-1 finding.
-    let per_var: Vec<(Vec<SweepFinding>, Vec<ConsensusFinding>)> = unknown_vars
+    type PerSwitchPoss = Vec<(i32, Tridegree, Vec<DiffVar>, Vec<u64>)>;
+    type PerVarOut = (
+        Vec<SweepFinding>,
+        Vec<ConsensusFinding>,
+        PerSwitchPoss,
+        Vec<ZeroMapFinding>,
+    );
+    let per_var: Vec<PerVarOut> = unknown_vars
         .par_iter()
         .map(|&var| {
             let tick = || {
@@ -1349,6 +1790,8 @@ pub fn trial_error_sweep_full(
 
             let mut findings = Vec::new();
             let mut consensus = Vec::new();
+            let mut poss: PerSwitchPoss = Vec::new();
+            let mut zeros: Vec<ZeroMapFinding> = Vec::new();
             match (run0, run1) {
                 (Err(e), Ok(_)) => findings.push(SweepFinding {
                     var,
@@ -1398,19 +1841,300 @@ pub fn trial_error_sweep_full(
                             value: l.value,
                         });
                     }
+
+                    // Possibility sets: union the two worlds' block cosets
+                    // at every degree either world touched. A degree only
+                    // one world stepped past still projects from that
+                    // world's final result (untouched ⇒ base projection —
+                    // still a correct P_w). Degrees whose basis either
+                    // world changed are skipped (same guard as the value
+                    // consensus); blocks whose var lists differ between the
+                    // worlds (world-specific new vars) are skipped too.
+                    let mut touched: Vec<(i32, Tridegree)> = w0
+                        .learned
+                        .iter()
+                        .chain(w1.learned.iter())
+                        .map(|l| (l.r, stable_rep(Tridegree::new(l.var.n, l.var.s, l.var.f))))
+                        .collect();
+                    touched.sort();
+                    touched.dedup();
+
+                    // Zero-map consensus: candidates are every degree a
+                    // world learned about OR re-turned (new_dims) — the
+                    // latter catches blocks that are dead in one world and
+                    // zero in the other without anything being learned
+                    // (e.g. both worlds kill the class). One uniform test,
+                    // no per-case logic.
+                    if zero_consensus_enabled() {
+                        let mut zm_candidates = touched.clone();
+                        for run in [&w0, &w1] {
+                            for &(lr, t) in run.new_dims.keys() {
+                                if t.n <= t.s + 2 {
+                                    zm_candidates.push((lr, t));
+                                }
+                            }
+                        }
+                        zm_candidates.sort();
+                        zm_candidates.dedup();
+                        for &(lr, deg) in &zm_candidates {
+                            let tgt = stable_rep(deg.diff_target(lr));
+                            let Some(base_page) = pages.iter().find(|p| p.page.r == lr)
+                            else {
+                                continue;
+                            };
+                            let base_res = base_page.result;
+                            // No information if the base block is already
+                            // fully determined zero, or no diff is possible
+                            // at all (source or target empty in the base).
+                            if base_page.page.dim_at(deg) == 0
+                                || base_page.page.dim_at(tgt) == 0
+                                || map_provably_zero(None, base_res, deg)
+                            {
+                                continue;
+                            }
+                            // Per-world zero test: source dead, TARGET dead
+                            // (vacuous — nothing to hit; covers targets
+                            // excluded by their OWN unknown diff, killed in
+                            // one world), or every entry determined 0. No
+                            // target-dim guard: zeros never quotient, and
+                            // the target's other exclusion causes survive
+                            // the recompute, so a target-dead world cannot
+                            // be corrupted by the recorded stock-basis 0s.
+                            let zero_in = |run: &TrialRun| -> bool {
+                                if run.new_dims.get(&(lr, deg)) == Some(&0)
+                                    || run.new_dims.get(&(lr, tgt)) == Some(&0)
+                                {
+                                    return true;
+                                }
+                                let res = run
+                                    .final_results
+                                    .iter()
+                                    .find(|(rr, _)| *rr == lr)
+                                    .map(|(_, r)| r)
+                                    .unwrap_or(base_res);
+                                map_provably_zero(run.new_dims.get(&(lr, deg)).copied(), res, deg)
+                            };
+                            if zero_in(&w0) && zero_in(&w1) {
+                                zeros.push(ZeroMapFinding {
+                                    via: var,
+                                    via_r: r0,
+                                    r: lr,
+                                    degree: deg,
+                                });
+                            }
+                        }
+                    }
+
+                    if possibility_enabled() {
+                        for &(lr, deg) in &touched {
+                            let tgt = stable_rep(deg.diff_target(lr));
+                            if [deg, tgt].iter().any(|t| {
+                                w0.dim_changed.contains(t) || w1.dim_changed.contains(t)
+                            }) {
+                                continue;
+                            }
+                            let proj = |run: &TrialRun| -> Option<(Vec<DiffVar>, Vec<u64>)> {
+                                let res = run
+                                    .final_results
+                                    .iter()
+                                    .find(|(rr, _)| *rr == lr)
+                                    .map(|(_, res)| res)
+                                    .or_else(|| {
+                                        pages
+                                            .iter()
+                                            .find(|p| p.page.r == lr)
+                                            .map(|p| p.result)
+                                    })?;
+                                project_block(res, deg)
+                            };
+                            let (Some((v0, p0)), Some((v1, p1))) = (proj(&w0), proj(&w1))
+                            else {
+                                continue;
+                            };
+                            if v0 != v1 {
+                                continue;
+                            }
+                            let mut union = p0;
+                            union.extend(p1);
+                            union.sort_unstable();
+                            union.dedup();
+                            poss.push((lr, deg, v0, union));
+                        }
+                    }
                 }
             }
-            (findings, consensus)
+            (findings, consensus, poss, zeros)
         })
         .collect();
 
     let mut contradictions = Vec::new();
     let mut consensus = Vec::new();
-    for (f, c) in per_var {
+    // Running intersection of the per-switch unions, per (r, degree), then
+    // against the base projection. Blocks whose var lists disagree across
+    // switches are dropped (basis drift between passes of the same sweep
+    // cannot happen, but new-var sets can differ — conservative).
+    let mut poss_map: HashMap<(i32, Tridegree), BlockPossibilities> = HashMap::new();
+    let mut poss_dropped: HashSet<(i32, Tridegree)> = HashSet::new();
+    let mut zero_maps: Vec<ZeroMapFinding> = Vec::new();
+    let mut zero_seen: HashSet<(i32, Tridegree)> = HashSet::new();
+    for (f, c, ps, zs) in per_var {
         contradictions.extend(f);
         consensus.extend(c);
+        for z in zs {
+            if zero_seen.insert((z.r, z.degree)) {
+                zero_maps.push(z);
+            }
+        }
+        for (lr, deg, vars, union) in ps {
+            let key = (lr, deg);
+            if poss_dropped.contains(&key) {
+                continue;
+            }
+            match poss_map.entry(key) {
+                hashbrown::hash_map::Entry::Occupied(mut e) => {
+                    let bp = e.get_mut();
+                    if bp.vars != vars {
+                        e.remove();
+                        poss_dropped.insert(key);
+                        continue;
+                    }
+                    bp.possible = intersect_sorted(&bp.possible, &union);
+                    bp.via_count += 1;
+                }
+                hashbrown::hash_map::Entry::Vacant(slot) => {
+                    // Seed with the BASE projection intersected in — the
+                    // possibility set may never exceed what the base system
+                    // already allows.
+                    let Some(base_res) =
+                        pages.iter().find(|p| p.page.r == lr).map(|p| p.result)
+                    else {
+                        continue;
+                    };
+                    let Some((bvars, bset)) = project_block(base_res, deg) else {
+                        continue;
+                    };
+                    if bvars != vars {
+                        poss_dropped.insert(key);
+                        continue;
+                    }
+                    let possible = intersect_sorted(&bset, &union);
+                    slot.insert(BlockPossibilities {
+                        r: lr,
+                        degree: deg,
+                        vars,
+                        possible,
+                        base_count: bset.len(),
+                        via_count: 1,
+                    });
+                }
+            }
+        }
     }
-    SweepOutcome { contradictions, consensus }
+    let mut possibilities: Vec<BlockPossibilities> = poss_map
+        .into_values()
+        .filter(|bp| bp.possible.len() < bp.base_count)
+        .collect();
+    possibilities.sort_by_key(|bp| (bp.r, bp.degree));
+    zero_maps.sort_by_key(|z| (z.r, z.degree));
+    SweepOutcome { contradictions, consensus, possibilities, zero_maps }
+}
+
+// =============================================================================
+// Kernel degree components (influence-cone support for pass skipping)
+// =============================================================================
+
+/// Connected components of the CURRENT solution space's kernel, at degree
+/// granularity: two (stable-rep) degrees are joined iff some kernel row
+/// touches variables at both (transitively). A trial that pins one variable
+/// can determine values only within that variable's component — that is what
+/// bounds its influence on its own page.
+///
+/// Components must be computed from the result CURRENT at decision time:
+/// applying a forced value shrinks the kernel to a subspace whose rows can
+/// COMBINE previously separate rows, so components computed on a stale
+/// result can be finer than the true ones (an unsound under-approximation).
+pub struct DegreeComponents {
+    comp: HashMap<Tridegree, usize>,
+    members: Vec<Vec<Tridegree>>,
+}
+
+impl DegreeComponents {
+    pub fn new(result: &SATResult) -> Self {
+        // Union-find over stable-rep degrees, joined per kernel row.
+        let mut parent: HashMap<Tridegree, Tridegree> = HashMap::new();
+        fn find(parent: &mut HashMap<Tridegree, Tridegree>, t: Tridegree) -> Tridegree {
+            let p = *parent.entry(t).or_insert(t);
+            if p == t {
+                return t;
+            }
+            let root = find(parent, p);
+            parent.insert(t, root);
+            root
+        }
+        for i in 0..result.kernel.rows() {
+            let row = mat_get_row(&result.kernel, i);
+            let mut first: Option<Tridegree> = None;
+            for idx in vec_support(&row) {
+                let v = result.vars[idx];
+                let t = stable_rep(Tridegree::new(v.n, v.s, v.f));
+                match first {
+                    None => {
+                        first = Some(find(&mut parent, t));
+                    }
+                    Some(root) => {
+                        let r2 = find(&mut parent, t);
+                        if r2 != root {
+                            parent.insert(r2, root);
+                        }
+                    }
+                }
+            }
+        }
+        let keys: Vec<Tridegree> = parent.keys().copied().collect();
+        let mut comp: HashMap<Tridegree, usize> = HashMap::new();
+        let mut members: Vec<Vec<Tridegree>> = Vec::new();
+        let mut root_id: HashMap<Tridegree, usize> = HashMap::new();
+        for t in keys {
+            let root = find(&mut parent, t);
+            let id = *root_id.entry(root).or_insert_with(|| {
+                members.push(Vec::new());
+                members.len() - 1
+            });
+            comp.insert(t, id);
+            members[id].push(t);
+        }
+        DegreeComponents { comp, members }
+    }
+
+    /// Component id of the (stable-rep) degree, if it touches any kernel row.
+    /// Vars in the same component have identical influence cones — memoize on
+    /// this.
+    pub fn id_of(&self, t: Tridegree) -> Option<usize> {
+        self.comp.get(&t).copied()
+    }
+
+    /// Component members of the (stable-rep) degree, or an empty slice if the
+    /// degree touches no kernel row (fully determined there).
+    pub fn members_of(&self, t: Tridegree) -> &[Tridegree] {
+        match self.comp.get(&t) {
+            Some(&id) => &self.members[id],
+            None => &[],
+        }
+    }
+
+    /// All components intersecting `set` (rep form), unioned.
+    pub fn closure(&self, set: &HashSet<Tridegree>) -> HashSet<Tridegree> {
+        let mut out = set.clone();
+        let mut seen_comps: HashSet<usize> = HashSet::new();
+        for t in set {
+            if let Some(&id) = self.comp.get(t) {
+                if seen_comps.insert(id) {
+                    out.extend(self.members[id].iter().copied());
+                }
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -1437,6 +2161,70 @@ mod tests {
         // x0 = x1 with x1 free: BOTH are undetermined, as is untouched x2.
         let res = base_result();
         assert_eq!(res.unknown.len(), 3, "x0 is correlated, not determined");
+    }
+
+    /// Zero-map decision: vacuous (dim 0) and all-determined-zero blocks
+    /// count as zero; free or absent vars do not (unknown ≠ zero).
+    #[test]
+    fn zero_map_decision() {
+        let deg = Tridegree::new(2, 5, 1);
+        let bv = |col: u16| DiffVar::new(2, 5, 1, 0, col);
+        // All entries pinned to 0 → zero map.
+        let mut sys = ConstraintSystem::new(vec![bv(0), bv(1)]);
+        sys.add_constraint_indices(&[0], false);
+        sys.add_constraint_indices(&[1], false);
+        let res = solve(&sys).expect("consistent");
+        assert!(map_provably_zero(None, &res, deg));
+        // One entry free → NOT zero.
+        let mut sys2 = ConstraintSystem::new(vec![bv(0), bv(1)]);
+        sys2.add_constraint_indices(&[0], false);
+        let res2 = solve(&sys2).expect("consistent");
+        assert!(!map_provably_zero(None, &res2, deg));
+        // No vars at the degree → NOT zero (absent ≠ zero)...
+        let sys3 = ConstraintSystem::new(vec![dv(9)]);
+        let res3 = solve(&sys3).expect("consistent");
+        assert!(!map_provably_zero(None, &res3, deg));
+        // ...unless the world's re-turned dim is 0 (source dead) → vacuous.
+        assert!(map_provably_zero(Some(0), &res3, deg));
+    }
+
+    /// project_block enumerates exactly the solution coset restricted to a
+    /// degree's block, and forced_entries extracts the constant bits.
+    #[test]
+    fn possibility_projection_and_forced_entries() {
+        // Three vars at ONE degree; constraint x0 ⊕ x1 = 1, x2 = 1.
+        let deg = Tridegree::new(2, 5, 1);
+        let bv = |col: u16| DiffVar::new(2, 5, 1, 0, col);
+        let vars = vec![bv(0), bv(1), bv(2)];
+        let mut sys = ConstraintSystem::new(vars.clone());
+        sys.add_constraint_indices(&[0, 1], true);
+        sys.add_constraint_indices(&[2], true);
+        let res = solve(&sys).expect("consistent");
+
+        let (bvars, pts) = project_block(&res, deg).expect("projectable");
+        assert_eq!(bvars, vars);
+        // x0 ≠ x1, x2 = 1 → masks {bit2 | bit0} and {bit2 | bit1}.
+        assert_eq!(pts, vec![0b101, 0b110]);
+
+        let bp = BlockPossibilities {
+            r: 2,
+            degree: deg,
+            vars: bvars,
+            possible: pts,
+            base_count: 8,
+            via_count: 1,
+        };
+        assert_eq!(bp.forced_entries(), vec![(bv(2), true)]);
+
+        // Intersecting with a set that pins x0 leaves a singleton whose
+        // remaining entries all become forced.
+        let inter = intersect_sorted(&bp.possible, &[0b100, 0b101]);
+        assert_eq!(inter, vec![0b101]);
+        let bp2 = BlockPossibilities { possible: inter, ..bp };
+        assert_eq!(
+            bp2.forced_entries(),
+            vec![(bv(0), true), (bv(1), false), (bv(2), true)]
+        );
     }
 
     #[test]

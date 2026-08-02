@@ -324,6 +324,101 @@ viewport persistence, regen cap removed, seqsee python probe fix.
    per-page-turn cutoff decrement for ITS OWN edge determinations (Python
    does) — unaudited.
 
+## Aug 1 2026 session — thin overlay, possibility-set consensus, hidden-value linear system
+
+Executed the July 31 priority queue. All `cargo test -p ehp-core` green (31).
+
+1. **Thin overlay (INTERPAGE_TRY_SPEEDUP Design 1) — LANDED.** Trial overlays
+   are LAYERED views instead of eager clones: `ProductTable`/`MapTable` gained
+   an optional `base: Arc<..>` + tombstone layer (reads fall through; removals
+   shadow; a first write to a base block seeds from it via COW).
+   `MapTable.matrices` is now PRIVATE (that audit was the point). New
+   `OverlayBases` (Arc'd table snapshots, one per target page per sweep, in
+   `SweepCache.target_bases`); `SATPage::thin_overlay(bases)` replaces
+   `overlay_clone()` on the trial path; build/drop are O(patch). The
+   absent-block-is-zero danger is sidestepped BY CONSTRUCTION (fallthrough),
+   not by enumerating consultations. Gates all PASSED: `diag_sweep_verify`
+   byte-parity t=25+t=50 (uncached path), cached-path findings parity,
+   `EHP_TRIAL_VERIFY=1` (NEW: per page step builds BOTH thin and eager
+   overlays, compares them pointwise — dims/page keys/exclusions/every block
+   both directions — plus `collect_new_vars`/`make_new_constraints` outputs;
+   full t=50 sweep, 0 divergences). Measured (diag_sweep, cached, t=50 E3):
+   sweep 95.7→73.8s wall; teardown CPU 31.8→6.8s; overlay CPU 604→477s — the
+   remaining overlay cost is fresh `get_tb` re-turning of needed degrees on
+   steps ≥ 2 (genuine work, untouched). Expected larger at t=100 (2M blocks).
+   USER DECISION (2026-08-01, mid-session): interpage try is "fast enough" —
+   no further speed work.
+2. **Pass skipping (Design 2) — implemented, OPT-IN, UNVALIDATED.**
+   `EHP_TRY_SKIP=1` enables; default OFF per the same user decision (the
+   validation gauntlet was deliberately not run). Mechanism: per-var influence
+   cones (own-page kernel component via `interpage::DegreeComponents` +
+   downstream turn/partner hops closed under current components, ehp_chart
+   `influence_cone`) intersected against a change log (applied values +
+   cascade-affected degrees, component-closed at record time — that closure
+   is what keeps later component SHRINKAGE sound). `EHP_TRY_SKIP_VERIFY=1`
+   trials everything and reports would-skip outcome violations (must be 0
+   before trusting EHP_TRY_SKIP). `trial_error_sweep_vars` (explicit var
+   list) is the new entry point; `trial_error_sweep_full` delegates.
+3. **Possibility-set consensus tiers 1–2 (HIDDEN notes addendum) — LANDED,
+   default ON (`EHP_POSSIBILITY=0` disables).** `TrialRun.final_results`
+   carries each trial's per-page updated results (moves, no clones);
+   `project_block` enumerates a result's solution coset restricted to one
+   degree's variable block (bit-indexed XOR basis; caps 16 bits/rank 12);
+   sweep jobs union the two worlds' cosets per touched degree (same
+   dim-changed basis guard as value consensus; var-list mismatch ⇒ skip),
+   the aggregation intersects across switches AND the base projection
+   (`SweepOutcome.possibilities`, only shrunken blocks). `interpage try`
+   applies tier 1 (`forced_entries` = bits constant across survivors, only
+   currently-unknown vars, same conflict guards/undo as consensus) and
+   reports tier 2 ("k of m matrices remain", also in interpage_try.log);
+   `sweep` reports both. t=50 run: 33 tier-2 findings, fixpoint clean, zero
+   conflicts with contradiction/consensus values. Parity re-verified
+   byte-identical after this change. Tier 3 (recording linear hulls as
+   constraints) DEFERRED to a per-page `recorded_constraints` channel to be
+   SHARED with the hidden-value system — design note in hidden_solve.rs docs.
+   ADDED same day (user's (15,32,7) case): ZERO-MAP consensus
+   (`ZeroMapFinding`, `EHP_ZERO_CONSENSUS=0` disables) — block zero or
+   source-dead in BOTH worlds ⇒ target not hit unconditionally ⇒ record the
+   stock block as 0 (known_diffs, undo-tracked, conflict-guarded; dim-guard
+   moved to the TARGET; `TrialRun.new_dims` carries per-world re-turned
+   dims). Handles the self-obstructed case value-consensus refuses (var
+   absent in the source-dead world). Tier-1 possibility lines were confirmed
+   ABSENT in the user's real run — matches t=50; per-entry consensus already
+   extracts singletons; correlations (tier 2) reported but not yet forcing.
+4. **Hidden-value constraint system, migration steps 1–2 —
+   `ehp-core/src/hidden_solve.rs` (new), report-only.** Step 1: `HiddenVar`
+   (kind, deg, δ, row, col) + `solve_hidden(page, store)`: regenerates the
+   v1 Toda closure from the ASSERTED values via v1's own propagate (gate
+   semantics identical by construction), pins every closure value as linear
+   rows Σ x_j·M[i,j] = y_i, solves with gauss; reports UNSAT (mutually
+   inconsistent assertions — v1 could never see this), individually
+   determined entries, and `beyond_closure` (solver-only determinations,
+   e.g. overlapping combos — unit-tested). v1-oracle check: every closure
+   combo must be kernel-orthogonal with the right offset value (tautological
+   today, the regression tripwire for future constraint families). Step 2:
+   `exactness_deficiencies` — Rust-side fiber rank bookkeeping (rank
+   incoming < dim ker outgoing at in-window, un-excluded, frontier-margined
+   cells ⇒ exactness FORCES a hidden value; this is the engine-side version
+   of the pink fiber_hidden candidates). REPL: `hidden solve`, `hidden
+   exactness [margin]`; diag_hidden prints the report too. 3 unit tests.
+5. **Chart-gen leftovers (subagent)**: JSON round-trip skipped in-process
+   (main.py `process_json(data=...)`, ehp_batch passes the dict; .json files
+   still written — the Rust mapview path reads them), `jsonschema` opt-in on
+   that path, `sidebyside -` stdin manifest mode (on-demand groundwork),
+   compact_json KEPT (stdlib can't reproduce its table-aligned bytes —
+   documented at the site). Byte-parity t=25 PASS (808 files). On-demand
+   map-view Rust plan appended to CHARTGEN_SPEEDUP_INVESTIGATION.md.
+6. **Fade-only image mode (subagent)**: `template_sidebyside.html.jinja`
+   only. Shift+J/E/H/P now cycles off → A → B → off (A = last-used style,
+   localStorage `seqsee-image-style`); new `.jmap-image-fade` fades
+   non-image content to 0.18 and leaves image elements their ORIGINAL
+   colors; both styles share the `data-in-j-image` classification. Needs
+   chart regen + hard reload to appear (standing gotcha).
+
+NOT committed: `Cargo.toml` (+ untracked uanss/zpn crates it references) and
+`src/secondary/ops.rs` — separate workstreams. Benchmark worktree at
+/tmp/ehp-head-bench and scratch dirs /tmp/ehp-* are disposable.
+
 ## July 31 2026 session — hidden values v1, incremental cascades, chart-gen 10×, consensus sweeps
 
 Full mechanisms in CLAUDE.md bullets (each feature has one) + three new

@@ -1230,6 +1230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("          hidden <E|H|P> <n> <s> <f> <idx> <tn> <ts> <tf> <tidx>  (assert a hidden map value on the");
     eprintln!("          terminal page; idx accepts sums like 0+2; Toda P(a∘E²b)=P(a)∘b propagates it)");
     eprintln!("          hidden list | hidden remove <same args> | hidden undo  (EHP_HIDDEN=0 disables)");
+    eprintln!("          hidden solve (linear-system view + v1-oracle check) | hidden exactness [margin]");
     eprintln!("Tip: click two nodes in a chart to copy an `add` command; shift-click extra");
     eprintln!("     targets first for a sum. ';'-separated commands solve as one batch.");
     eprintln!("Chart keys: Shift+M maps minimap | e/h/p open map view | Shift+E/H/P highlight map image");
@@ -1512,6 +1513,82 @@ fn hidden_cmd(
             }
             None => eprintln!("No asserted hidden values to undo."),
         },
+        // Constraint-system view of the hidden values (migration step 1,
+        // report-only): the v1 closure as a linear system + the solver's
+        // extra determinations, with v1 as the regression oracle.
+        Some("solve") => {
+            let report = ehp_core::hidden_solve::solve_hidden(page, &hidden.store);
+            eprintln!(
+                "Hidden linear system: {} vars, {} constraints from a closure of {} values.",
+                report.num_vars, report.num_constraints, report.closure_len,
+            );
+            for w in &report.warnings {
+                eprintln!("  warning: {}", w);
+            }
+            if !report.consistent {
+                eprintln!("  UNSAT — the asserted hidden values are mutually inconsistent!");
+                return;
+            }
+            eprintln!(
+                "  {} entries individually determined ({} beyond the forward closure).",
+                report.determined.len(),
+                report.beyond_closure.len(),
+            );
+            for (v, val) in &report.beyond_closure {
+                eprintln!("    {} = {}  (solver-only)", v, *val as u8);
+            }
+            if report.oracle_ok {
+                eprintln!("  v1-oracle check: OK (closure fully contained in the solved system).");
+            } else {
+                eprintln!("  v1-oracle check FAILED:");
+                for f in &report.oracle_failures {
+                    eprintln!("    {}", f);
+                }
+            }
+        }
+        // Exactness rank bookkeeping (migration step 2, report-only):
+        // cells where the terminal page cannot be exact without a hidden
+        // value — compare against the pink fiber_hidden candidates.
+        Some("exactness") => {
+            let margin: i32 = parts
+                .get(2)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2);
+            let defs =
+                ehp_core::hidden_solve::exactness_deficiencies(page, &hidden.store, margin);
+            if defs.is_empty() {
+                eprintln!(
+                    "No exactness deficiencies on E_{} (frontier margin {}).",
+                    r, margin
+                );
+            } else {
+                eprintln!(
+                    "Exactness FORCES hidden values at {} cells on E_{} (margin {}):",
+                    defs.len(),
+                    r,
+                    margin
+                );
+                for d in &defs {
+                    eprintln!(
+                        "  {}→{} at ({},{},{}): rank in {} < dim ker out {} (deficiency {}{})",
+                        d.incoming,
+                        d.outgoing,
+                        d.middle.n,
+                        d.middle.s,
+                        d.middle.f,
+                        d.rank_in,
+                        d.dim_ker_out,
+                        d.deficiency,
+                        if d.hidden_at_cell > 0 {
+                            format!("; {} hidden value(s) recorded at this cell", d.hidden_at_cell)
+                        } else {
+                            String::new()
+                        },
+                    );
+                }
+                eprintln!("  (report-only; compare with the pink candidates in the fiber charts)");
+            }
+        }
         Some("remove") => {
             let (kind, source, target) = match hidden::parse_hidden_args(page, &parts[2..]) {
                 Ok(v) => v,
@@ -1780,9 +1857,9 @@ fn page_structural_diff(a: &SATPage, b: &SATPage, limit: usize) -> Vec<String> {
     }
     for kind in MapKind::all_with_lh0() {
         let (Some(ma), Some(mb)) = (a.maps.get(&kind), b.maps.get(&kind)) else { continue };
-        for (t, mat_b) in &mb.matrices {
-            match ma.matrices.get(t) {
-                Some(mat_a) if mat_a.as_ref() == mat_b.as_ref() => {}
+        for (t, mat_b) in mb.iter() {
+            match ma.matrix_at(*t) {
+                Some(mat_a) if mat_a == mat_b.as_ref() => {}
                 Some(_) => out.push(format!("{} map at ({},{},{}) differs", kind, t.n, t.s, t.f)),
                 None => out.push(format!("{} map at ({},{},{}) missing in patched", kind, t.n, t.s, t.f)),
             }
@@ -1790,8 +1867,8 @@ fn page_structural_diff(a: &SATPage, b: &SATPage, limit: usize) -> Vec<String> {
                 return out;
             }
         }
-        for t in ma.matrices.keys() {
-            if !mb.matrices.contains_key(t) {
+        for (t, _) in ma.iter() {
+            if !mb.contains(*t) {
                 out.push(format!("{} map at ({},{},{}) extra in patched", kind, t.n, t.s, t.f));
             }
             if out.len() >= limit {
@@ -1828,12 +1905,12 @@ fn page_structural_equal(a: &SATPage, b: &SATPage) -> bool {
         let (Some(ma), Some(mb)) = (a.maps.get(&kind), b.maps.get(&kind)) else {
             return a.maps.get(&kind).is_none() == b.maps.get(&kind).is_none();
         };
-        if ma.matrices.len() != mb.matrices.len() {
+        if ma.len() != mb.len() {
             return false;
         }
-        for (t, mat_a) in &ma.matrices {
-            let Some(mat_b) = mb.matrices.get(t) else { return false };
-            if mat_a.as_ref() != mat_b.as_ref() {
+        for (t, mat_a) in ma.iter() {
+            let Some(mat_b) = mb.matrix_at(*t) else { return false };
+            if mat_a.as_ref() != mat_b {
                 return false;
             }
         }
@@ -3484,6 +3561,46 @@ fn process_stdin_cmd(
                 eprintln!("  (run `interpage try` to apply these automatically)");
             }
 
+            // Zero-map consensus (report-only here; `interpage try` records
+            // the zero blocks): in every world of some switch the block is
+            // zero or its source dead — its target is not hit.
+            if !sweep_outcome.zero_maps.is_empty() {
+                eprintln!("Zero in EVERY world (target never hit):");
+                for zm in &sweep_outcome.zero_maps {
+                    let tgt = zm.degree.diff_target(zm.r);
+                    eprintln!(
+                        "  d_{}({},{},{}) ≡ 0 — target ({},{},{}) not hit in any world of \
+                         d_{}({},{},{})[{},{}]",
+                        zm.r, zm.degree.n, zm.degree.s, zm.degree.f,
+                        tgt.n, tgt.s, tgt.f,
+                        zm.via_r, zm.via.n, zm.via.s, zm.via.f, zm.via.row, zm.via.col,
+                    );
+                }
+                eprintln!("  (run `interpage try` to record these automatically)");
+            }
+
+            // Possibility-set consensus (report-only here; `interpage try`
+            // applies the tier-1 forced entries): block matrices ruled out
+            // by case analysis over the swept unknowns.
+            if !sweep_outcome.possibilities.is_empty() {
+                eprintln!("Possibility sets shrunk by case analysis:");
+                for bp in &sweep_outcome.possibilities {
+                    eprintln!(
+                        "  d_{} block at ({},{},{}) ({} vars): {} of {} matrices remain \
+                         (over {} switches){}",
+                        bp.r, bp.degree.n, bp.degree.s, bp.degree.f, bp.vars.len(),
+                        bp.possible.len(), bp.base_count, bp.via_count,
+                        if bp.possible.is_empty() { " — BASE SYSTEM INCONSISTENT" } else { "" },
+                    );
+                    for (var, value) in bp.forced_entries() {
+                        eprintln!(
+                            "    entry d_{}({},{},{})[{},{}] = {} in every surviving matrix",
+                            bp.r, var.n, var.s, var.f, var.row, var.col, value as u8,
+                        );
+                    }
+                }
+            }
+
             if findings.is_empty() {
                 eprintln!("No contradictions found — no values forced.");
             } else {
@@ -3904,6 +4021,119 @@ fn interpage_slice(pages: &[PageState], start_idx: usize) -> Option<Vec<Interpag
     }
 }
 
+/// `EHP_TRY_SKIP=1` enables influence-based pass skipping in `interpage try`
+/// (see [`influence_cone`]). OPT-IN and default OFF: implemented and
+/// compiling but never validated at scale (the user declared interpage try
+/// fast enough, 2026-08-01, so the validation gauntlet was not run). Anyone
+/// enabling it should first run a session with EHP_TRY_SKIP_VERIFY=1 and
+/// check the violation count is 0.
+fn try_skip_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("EHP_TRY_SKIP").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// `EHP_TRY_SKIP_VERIFY=1`: trial everything anyway, but check that every
+/// trial the skipper would have skipped repeats its previous outcome, and
+/// report violations loudly. Nothing is skipped in this mode, so state stays
+/// correct regardless — the report tells us whether skipping would be sound.
+fn try_skip_verify() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("EHP_TRY_SKIP_VERIFY").is_ok_and(|v| !v.is_empty() && v != "0")
+    })
+}
+
+/// Conservative over-approximation of the state an `interpage try` trial of
+/// `var` (an unknown on `pages[idx]`) can read or write, as stable-rep
+/// degree sets per page r:
+/// - on its own page: `var`'s kernel component (a pinned value determines
+///   values exactly within its component) plus those degrees' d_r targets;
+/// - propagated downstream page by page (t → {t, d_target(t)}), plus one hop
+///   of naturality partners and re-activatable Leibniz-pair partners (the
+///   degrees `make_new_constraints` consults around un-excluded degrees),
+///   then closed under the target page's CURRENT kernel components (a new
+///   constraint touching a component can determine values anywhere in it).
+///
+/// If nothing recorded in the change log since the var's last trial
+/// intersects this cone, the trial's inputs are unchanged and its outcome is
+/// provably identical (deterministic pipeline) — it can be skipped. Change
+/// entries are themselves component-closed AT RECORD TIME, which is what
+/// keeps the scheme sound when components later shrink (a determined degree
+/// drops out of its component, but the change that determined it recorded
+/// the full then-component, which contains the skipped var's degree if they
+/// were coupled).
+fn influence_cone(
+    pages: &[PageState],
+    idx: usize,
+    var: DiffVar,
+    comps: &[Option<interpage::DegreeComponents>],
+) -> HashMap<i32, HashSet<Tridegree>> {
+    let rep = stable_rep_deg;
+    let mut cone: HashMap<i32, HashSet<Tridegree>> = HashMap::new();
+    let r0 = pages[idx].page.r;
+    let vdeg = rep(Tridegree::new(var.n, var.s, var.f));
+
+    let mut cur: HashSet<Tridegree> = HashSet::new();
+    cur.insert(vdeg);
+    if let Some(c) = comps[idx].as_ref() {
+        cur.extend(c.members_of(vdeg).iter().copied());
+    }
+    let with_targets = |s: &HashSet<Tridegree>, r: i32| -> HashSet<Tridegree> {
+        let mut out = s.clone();
+        for &t in s {
+            out.insert(rep(t.diff_target(r)));
+        }
+        out
+    };
+    cur = with_targets(&cur, r0);
+    cone.insert(r0, cur.clone());
+
+    for j in (idx + 1)..pages.len() {
+        let r_prev = pages[j - 1].page.r;
+        let rj = pages[j].page.r;
+        // Carried through turning: the degree and its d_{r_prev} target.
+        let mut next = with_targets(&cur, r_prev);
+        // One partner hop on page j (what new constraints at these degrees
+        // reference): own d_rj source/target, naturality square partners,
+        // and recorded excluded-Leibniz pair partners.
+        let mut hop: HashSet<Tridegree> = HashSet::new();
+        for &t in &next {
+            hop.insert(rep(t.diff_target(rj)));
+            hop.insert(rep(Tridegree::new(t.n, t.s + 1, t.f - rj)));
+            for kind in MapKind::all() {
+                hop.insert(rep(kind.target_degree(t)));
+                hop.insert(rep(kind.source_degree(t)));
+            }
+            if let Some(pairs) = pages[j].excluded_leibniz.get(&t) {
+                for &(d1, d2) in pairs {
+                    let prod = Tridegree::new(d1.n, d1.s + d2.s, d1.f + d2.f);
+                    for u in [d1, d2, prod] {
+                        hop.insert(rep(u));
+                        hop.insert(rep(u.diff_target(rj)));
+                    }
+                }
+            }
+        }
+        next.extend(hop);
+        if let Some(c) = comps[j].as_ref() {
+            next = c.closure(&next);
+        }
+        cone.insert(rj, next.clone());
+        cur = next;
+    }
+    cone
+}
+
+/// Stable representative of a degree (variables/exclusions are keyed by
+/// n = min(n, s+2)).
+fn stable_rep_deg(t: Tridegree) -> Tridegree {
+    if t.n > t.s + 2 {
+        Tridegree::new(t.s + 2, t.s, t.f)
+    } else {
+        t
+    }
+}
+
 /// `interpage try [min_stem [max_stem]]` — automated trial-and-error to a
 /// fixpoint. For every page (lowest first), sweep both values of every
 /// unknown differential; a contradiction forces the opposite value, which is
@@ -3946,6 +4176,19 @@ fn run_interpage_try(
     let mut sweep_secs = 0f64;
     let mut cascade_secs = 0f64;
     let mut total_trials = 0usize;
+    // Influence-based pass skipping (EHP_TRY_SKIP, default on): a var is
+    // re-trialed only if something recorded in `change_log` since its last
+    // trial intersects its influence cone; otherwise its outcome is provably
+    // unchanged. Entries are (page r, rep-degree set), appended per applied
+    // batch; `trial_epoch` holds change_log.len() at each var's last trial.
+    // Verify mode needs the skip DECISIONS (to check them) without skipping,
+    // so it turns the machinery on by itself.
+    let skip_verify = try_skip_verify();
+    let skip_enabled = try_skip_enabled() || skip_verify;
+    let mut change_log: Vec<(i32, HashSet<Tridegree>)> = Vec::new();
+    let mut trial_epoch: HashMap<(i32, DiffVar), usize> = HashMap::new();
+    let mut total_skipped = 0usize;
+    let mut skip_verify_violations = 0usize;
 
     loop {
         pass += 1;
@@ -3955,49 +4198,155 @@ fn run_interpage_try(
             let r = pages[idx].page.r;
 
             // Sweep against the current state (immutable borrow ends before
-            // the forced values are applied below).
-            let (findings, consensus, trialed) = {
+            // the forced values are applied below). `comps` (current kernel
+            // components per page) is reused below to component-close the
+            // change entries this batch records.
+            let comps: Vec<Option<interpage::DegreeComponents>> = if skip_enabled {
+                pages
+                    .iter()
+                    .map(|ps| ps.result.as_ref().map(interpage::DegreeComponents::new))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let (findings, consensus, possibilities, zero_maps, trialed, would_skip) = {
                 let Some(ip) = interpage_slice(pages, idx) else {
                     eprintln!("[pass {}] skipping E_{}: {}", pass, r, no_result_msg(&pages[idx]));
                     continue;
                 };
-                let trialed: Vec<DiffVar> = ip[0]
+                let mut all_vars: Vec<DiffVar> = ip[0]
                     .result
                     .unknown
                     .iter()
                     .map(|&i| ip[0].result.vars[i])
                     .filter(|v| v.s >= min_stem && v.s < max_stem)
                     .collect();
-                if trialed.is_empty() {
+                all_vars.sort();
+                if all_vars.is_empty() {
+                    continue;
+                }
+
+                // Partition into re-trial / provably-unchanged. Cones are
+                // identical for vars in the same swept-page component —
+                // memoized on the component id.
+                let mut would_skip: Vec<DiffVar> = Vec::new();
+                let mut to_trial: Vec<DiffVar> = Vec::new();
+                if skip_enabled && !change_log.is_empty() {
+                    let mut cone_memo: HashMap<Option<usize>, HashMap<i32, HashSet<Tridegree>>> =
+                        HashMap::new();
+                    for &v in &all_vars {
+                        let Some(&ep) = trial_epoch.get(&(r, v)) else {
+                            to_trial.push(v);
+                            continue;
+                        };
+                        if ep >= change_log.len() {
+                            would_skip.push(v);
+                            continue;
+                        }
+                        let vdeg = stable_rep_deg(Tridegree::new(v.n, v.s, v.f));
+                        let comp_id = comps[idx].as_ref().and_then(|c| c.id_of(vdeg));
+                        // Vars at different degrees of one component share a
+                        // cone; componentless vars key on their own degree.
+                        let cone = if comp_id.is_some() {
+                            cone_memo
+                                .entry(comp_id)
+                                .or_insert_with(|| influence_cone(pages, idx, v, &comps))
+                                .clone()
+                        } else {
+                            influence_cone(pages, idx, v, &comps)
+                        };
+                        let hit = change_log[ep..].iter().any(|(cr, degs)| {
+                            cone.get(cr).is_some_and(|c| !c.is_disjoint(degs))
+                        });
+                        if hit {
+                            to_trial.push(v);
+                        } else {
+                            would_skip.push(v);
+                        }
+                    }
+                } else {
+                    to_trial = all_vars.clone();
+                }
+                let effective: Vec<DiffVar> = if skip_verify {
+                    all_vars.clone()
+                } else {
+                    to_trial.clone()
+                };
+                if !would_skip.is_empty() {
+                    total_skipped += would_skip.len();
+                    eprintln!(
+                        "[pass {}] E_{}: skipping {}/{} unknowns (influence-disjoint since \
+                         last trial){}",
+                        pass,
+                        r,
+                        would_skip.len(),
+                        all_vars.len(),
+                        if skip_verify { " — VERIFY mode, trialing anyway" } else { "" },
+                    );
+                }
+                if effective.is_empty() {
                     continue;
                 }
                 eprintln!(
                     "[pass {}] E_{}: sweeping {} unknown vars × 2 values...",
                     pass,
                     r,
-                    trialed.len(),
+                    effective.len(),
                 );
                 let t1 = Instant::now();
                 let outcome =
-                    interpage::trial_error_sweep_full(&ip, min_stem, max_stem, |done, total| {
+                    interpage::trial_error_sweep_vars(&ip, &effective, |done, total| {
                         if done % 50 == 0 || done == total {
                             eprintln!("  E_{}: {}/{} trials", r, done, total);
                         }
                     });
                 eprintln!("  E_{}: sweep done in {:.1}s", r, t1.elapsed().as_secs_f64());
                 sweep_secs += t1.elapsed().as_secs_f64();
-                total_trials += 2 * trialed.len();
+                total_trials += 2 * effective.len();
                 if timing_enabled() {
                     if let Some(report) = interpage::trial_stats::report_and_reset() {
                         eprintln!("  [timing] E_{} trial stages: {}", r, report);
                     }
                 }
-                (outcome.contradictions, outcome.consensus, trialed)
+                for &v in &effective {
+                    trial_epoch.insert((r, v), change_log.len());
+                }
+                (outcome.contradictions, outcome.consensus, outcome.possibilities, outcome.zero_maps, effective, would_skip)
             };
 
-            // Outcome-repeat measurement (EHP_TIMING): compare this sweep's
-            // per-var contradiction pattern with the previous pass's.
-            if timing_enabled() {
+            // Skip-verify: every would-be-skipped trial must repeat its
+            // previous outcome (the skipper's soundness claim). Nothing was
+            // actually skipped in this mode, so state is correct either way;
+            // violations mean the cone under-approximates — report loudly.
+            if skip_verify && !would_skip.is_empty() {
+                let contradicted: HashSet<(DiffVar, bool)> =
+                    findings.iter().map(|f| (f.var, f.contradicted_value)).collect();
+                for &v in &would_skip {
+                    let outcome = (
+                        contradicted.contains(&(v, false)),
+                        contradicted.contains(&(v, true)),
+                    );
+                    if let Some(prev) = prev_outcomes.get(&(r, v)) {
+                        if *prev != outcome {
+                            skip_verify_violations += 1;
+                            let line = format!(
+                                "[EHP_TRY_SKIP_VERIFY] VIOLATION pass {}: d_{}({},{},{})[{},{}] \
+                                 would have been skipped but its outcome changed \
+                                 ({:?} -> {:?})",
+                                pass, r, v.n, v.s, v.f, v.row, v.col, prev, outcome,
+                            );
+                            eprintln!("  {}", line);
+                            log_lines.push(line);
+                        }
+                    }
+                }
+            }
+
+            // Outcome bookkeeping (always on — the skip-verify assertions
+            // read it): record each trialed var's contradiction pattern;
+            // under EHP_TIMING also report how many re-trialed vars repeated
+            // their previous outcome (the empirical skippable ceiling).
+            {
                 let contradicted: HashSet<(DiffVar, bool)> =
                     findings.iter().map(|f| (f.var, f.contradicted_value)).collect();
                 let mut repeated = 0usize;
@@ -4017,7 +4366,7 @@ fn run_interpage_try(
                     cur.push(((r, var), outcome));
                 }
                 prev_outcomes.extend(cur);
-                if compared > 0 {
+                if timing_enabled() && compared > 0 {
                     eprintln!(
                         "  [timing] E_{} pass {}: {}/{} re-trialed vars had IDENTICAL outcomes \
                          to the previous pass (skippable ceiling)",
@@ -4025,7 +4374,7 @@ fn run_interpage_try(
                     );
                 }
             }
-            if findings.is_empty() && consensus.is_empty() {
+            if findings.is_empty() && consensus.is_empty() && possibilities.is_empty() && zero_maps.is_empty() {
                 continue;
             }
 
@@ -4040,6 +4389,9 @@ fn run_interpage_try(
             vars_sorted.sort();
 
             let mut applied = 0usize;
+            // (page index, r, var) of every value applied this batch — the
+            // change-log entry for pass skipping is built from these.
+            let mut applied_vars: Vec<(usize, i32, DiffVar)> = Vec::new();
             // Highest page index that received a value this batch — the
             // cascade must re-solve at least through it (consensus values
             // can land on pages beyond the swept one).
@@ -4067,6 +4419,7 @@ fn run_interpage_try(
                 let prev = pages[idx].known_diffs.get(&var).copied();
                 pages[idx].known_diffs.insert(var, forced);
                 undo_stack.push(UndoEntry { r, var, prev });
+                applied_vars.push((idx, r, var));
                 applied += 1;
             }
 
@@ -4134,7 +4487,163 @@ fn run_interpage_try(
                     pages[cidx].known_diffs.insert(c.var, c.value);
                     undo_stack.push(UndoEntry { r: c.r, var: c.var, prev });
                     max_applied_idx = max_applied_idx.max(cidx);
+                    applied_vars.push((cidx, c.r, c.var));
                     applied += 1;
+                }
+            }
+            // Zero-map consensus: in EVERY world of the switch, the d_r block
+            // at this degree is zero or its source classes are dead — the
+            // target is not hit unconditionally. Record the whole stock
+            // block as 0 (sound: zeros never quotient; the recorded values
+            // un-exclude the TARGET, whose dims both worlds left unchanged).
+            // This resolves self-obstructed ghosts the per-entry consensus
+            // must refuse because the var vanishes in one world.
+            for zm in &zero_maps {
+                let Some(cidx) = page_index(pages, zm.r) else { continue };
+                let src_dim = pages[cidx].page.dim_at(zm.degree);
+                let tgt_dim = pages[cidx].page.dim_at(zm.degree.diff_target(zm.r));
+                if src_dim == 0 || tgt_dim == 0 {
+                    continue;
+                }
+                // Collect the block entries still needing a record; a
+                // determined-or-recorded 1 anywhere contradicts the finding
+                // — report and apply nothing for this block.
+                let mut to_record: Vec<(DiffVar, Option<bool>)> = Vec::new();
+                let mut conflict = false;
+                for row in 0..tgt_dim {
+                    for col in 0..src_dim {
+                        let var = DiffVar::new(
+                            zm.degree.n, zm.degree.s, zm.degree.f, row as u16, col as u16,
+                        );
+                        if let Some(res) = pages[cidx].result.as_ref() {
+                            if let Some(&i) = res.var_index.get(&var) {
+                                if !res.unknown.contains(&i) {
+                                    if ehp_core::gf2::vec_get(&res.offset, i) {
+                                        conflict = true;
+                                    }
+                                    continue; // already determined (0 = redundant)
+                                }
+                            }
+                        }
+                        match pages[cidx].known_diffs.get(&var).copied() {
+                            Some(true) => conflict = true,
+                            Some(false) => {}
+                            None => to_record.push((var, None)),
+                        }
+                    }
+                }
+                if conflict {
+                    let line = format!(
+                        "[pass {}] d_{}({},{},{}) ≡ 0 (no world of d_{}({},{},{})[{},{}] \
+                         hits its target) CONTRADICTS a determined/recorded 1 — not \
+                         applied, base system suspect!",
+                        pass, zm.r, zm.degree.n, zm.degree.s, zm.degree.f,
+                        zm.via_r, zm.via.n, zm.via.s, zm.via.f, zm.via.row, zm.via.col,
+                    );
+                    eprintln!("  {}", line);
+                    log_lines.push(line);
+                    continue;
+                }
+                if to_record.is_empty() {
+                    continue; // block already fully known-zero
+                }
+                let tgt = zm.degree.diff_target(zm.r);
+                let line = format!(
+                    "[pass {}] d_{}({},{},{}) ≡ 0 recorded — in every world of \
+                     d_{}({},{},{})[{},{}] the source is dead or the map is zero; \
+                     target ({},{},{}) is not hit ({} entries)",
+                    pass, zm.r, zm.degree.n, zm.degree.s, zm.degree.f,
+                    zm.via_r, zm.via.n, zm.via.s, zm.via.f, zm.via.row, zm.via.col,
+                    tgt.n, tgt.s, tgt.f, to_record.len(),
+                );
+                eprintln!("  {}", line);
+                log_lines.push(line);
+                for (var, prev) in to_record {
+                    pages[cidx].known_diffs.insert(var, false);
+                    undo_stack.push(UndoEntry { r: zm.r, var, prev });
+                    applied_vars.push((cidx, zm.r, var));
+                    applied += 1;
+                }
+                max_applied_idx = max_applied_idx.max(cidx);
+            }
+
+            // Possibility-set consensus (tiers 1-2, the HIDDEN_VALUE notes
+            // addendum): each block's surviving-matrix set is the running
+            // intersection over all switches of the two worlds' projected
+            // cosets (and the base projection). Tier 1: entries constant
+            // across every surviving matrix are determined — applied like
+            // consensus values (undo entry each, same conflict guards).
+            // Tier 2: a shrunken but non-forcing set is REPORTED (log +
+            // interpage_try.log); tier 3 (recording the set's linear hull as
+            // constraints) is deferred to the shared recorded-constraints
+            // channel designed with the hidden-value system.
+            if consensus_enabled() {
+                for bp in &possibilities {
+                    let Some(cidx) = page_index(pages, bp.r) else { continue };
+                    if bp.possible.is_empty() {
+                        let line = format!(
+                            "[pass {}] d_{} block at ({},{},{}): NO possible matrix survives \
+                             case analysis — base system inconsistent!",
+                            pass, bp.r, bp.degree.n, bp.degree.s, bp.degree.f,
+                        );
+                        eprintln!("  {}", line);
+                        log_lines.push(line);
+                        continue;
+                    }
+                    let mut forced_here = 0usize;
+                    for (var, value) in bp.forced_entries() {
+                        // Only vars the CURRENT solve leaves unknown are new
+                        // information (blocks include already-determined
+                        // entries, constant in every projection).
+                        let is_unknown = pages[cidx].result.as_ref().is_some_and(|res| {
+                            res.var_index.get(&var).is_some_and(|i| res.unknown.contains(i))
+                        });
+                        if !is_unknown {
+                            continue;
+                        }
+                        let prev = pages[cidx].known_diffs.get(&var).copied();
+                        if prev == Some(value) {
+                            continue;
+                        }
+                        if prev == Some(!value) {
+                            let line = format!(
+                                "[pass {}] d_{}({},{},{})[{},{}]: possibility-set value {} \
+                                 CONTRADICTS the recorded value — not applied!",
+                                pass, bp.r, var.n, var.s, var.f, var.row, var.col, value as u8,
+                            );
+                            eprintln!("  {}", line);
+                            log_lines.push(line);
+                            continue;
+                        }
+                        let line = format!(
+                            "[pass {}] d_{}({},{},{})[{},{}] = {} determined (possibility-set: \
+                             {} of {} matrices survive case analysis over {} switches)",
+                            pass, bp.r, var.n, var.s, var.f, var.row, var.col, value as u8,
+                            bp.possible.len(), bp.base_count, bp.via_count,
+                        );
+                        eprintln!("  {}", line);
+                        log_lines.push(line);
+                        pages[cidx].known_diffs.insert(var, value);
+                        undo_stack.push(UndoEntry { r: bp.r, var, prev });
+                        applied_vars.push((cidx, bp.r, var));
+                        max_applied_idx = max_applied_idx.max(cidx);
+                        applied += 1;
+                        forced_here += 1;
+                    }
+                    if forced_here == 0 && bp.possible.len() > 1 {
+                        // Tier 2: information without a forced entry. (A
+                        // singleton that forced nothing NEW — its entries
+                        // were already applied via contradiction/consensus
+                        // this batch — is silent, not information.)
+                        let line = format!(
+                            "[pass {}] d_{} block at ({},{},{}) ({} vars): {} of {} matrices \
+                             remain possible (case analysis over {} switches)",
+                            pass, bp.r, bp.degree.n, bp.degree.s, bp.degree.f,
+                            bp.vars.len(), bp.possible.len(), bp.base_count, bp.via_count,
+                        );
+                        eprintln!("  {}", line);
+                        log_lines.push(line);
+                    }
                 }
             }
             if applied == 0 {
@@ -4151,6 +4660,41 @@ fn run_interpage_try(
             if !outcome.deduced.is_empty() {
                 eprintln!("  cascade deduced {} further differentials", outcome.deduced.len());
             }
+
+            // Record this batch in the change log for pass skipping: applied
+            // var degrees + their diff targets, component-closed with the
+            // PRE-application components (`comps`, computed at sweep start —
+            // that closure is what a coupled var could have felt), plus every
+            // degree the cascade touched (dims/exclusions/patches/deduced),
+            // all in stable-rep form.
+            if skip_enabled {
+                let mut by_r: HashMap<i32, HashSet<Tridegree>> = HashMap::new();
+                for &(pidx, pr, v) in &applied_vars {
+                    let vdeg = stable_rep_deg(Tridegree::new(v.n, v.s, v.f));
+                    let e = by_r.entry(pr).or_default();
+                    e.insert(vdeg);
+                    e.insert(stable_rep_deg(vdeg.diff_target(pr)));
+                    if let Some(c) = comps.get(pidx).and_then(|c| c.as_ref()) {
+                        e.extend(c.members_of(vdeg).iter().copied());
+                    }
+                }
+                for (r_aff, degs) in &outcome.affected_degrees {
+                    let e = by_r.entry(*r_aff).or_default();
+                    let folded: HashSet<Tridegree> =
+                        degs.iter().map(|&t| stable_rep_deg(t)).collect();
+                    if let Some(pidx) = page_index(pages, *r_aff) {
+                        if let Some(c) = comps.get(pidx).and_then(|c| c.as_ref()) {
+                            e.extend(c.closure(&folded));
+                            continue;
+                        }
+                    }
+                    e.extend(folded);
+                }
+                for (cr, degs) in by_r {
+                    change_log.push((cr, degs));
+                }
+            }
+
             all_deduced.extend(outcome.deduced);
             for (r_aff, degs) in outcome.affected_degrees {
                 all_affected.entry(r_aff).or_default().extend(degs);
@@ -4166,13 +4710,23 @@ fn run_interpage_try(
             );
             if timing_enabled() {
                 eprintln!(
-                    "  [timing] interpage try: {} passes, {} trials, sweeps {:.1}s, \
-                     cascades {:.1}s, total {:.1}s",
+                    "  [timing] interpage try: {} passes, {} trials, {} vars skipped \
+                     (influence-disjoint), sweeps {:.1}s, cascades {:.1}s, total {:.1}s",
                     pass,
                     total_trials,
+                    total_skipped,
                     sweep_secs,
                     cascade_secs,
                     t0.elapsed().as_secs_f64(),
+                );
+            }
+            if skip_verify {
+                eprintln!(
+                    "  [EHP_TRY_SKIP_VERIFY] {} would-skip trials checked, {} outcome \
+                     violations{}",
+                    total_skipped,
+                    skip_verify_violations,
+                    if skip_verify_violations == 0 { " — skipping is sound on this run" } else { " — DO NOT trust EHP_TRY_SKIP on this configuration" },
                 );
             }
             break;

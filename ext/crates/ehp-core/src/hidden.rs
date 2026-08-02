@@ -817,7 +817,7 @@ mod tests {
         // (a) E²b = 0: drop the stored 23→24 E matrix and give the degrees
         // different dims so the stable default is Zero, not Identity.
         let mut page = deduction_page();
-        page.maps.get_mut(&MapKind::E).unwrap().matrices.remove(&deg(23, 1, 1));
+        page.maps.get_mut(&MapKind::E).unwrap().remove_matrix(deg(23, 1, 1));
         page.dimension.insert(deg(24, 1, 1), 0);
         let mut store = HiddenStore::new();
         assert_example(&mut store, &page);

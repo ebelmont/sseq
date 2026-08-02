@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         page.names.len(),
     );
     let pairs_total: usize = page.pairs.values().map(|v| v.len()).sum();
-    let maps_total: usize = page.maps.values().map(|mt| mt.matrices.len()).sum();
+    let maps_total: usize = page.maps.values().map(|mt| mt.len()).sum();
     eprintln!("pairs total entries: {}, map matrices: {}", pairs_total, maps_total);
 
     let t = Instant::now();

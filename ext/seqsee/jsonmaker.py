@@ -1262,6 +1262,15 @@ def process_csv(input_file, output_file, view_mode="sphere", filter_value=None, 
     try:
         if _VALIDATE:
             validate(instance=json_data, schema=schema)
+        # NB: compact_json is deliberately NOT replaced by stdlib json — its
+        # output is a table-aligned format (padded keys, right-aligned numbers,
+        # trailing spaces after line-end commas, length-budget object/array
+        # inlining) that json.dumps cannot reproduce byte-identically with any
+        # separators/indent combination, and the .json files are consumed
+        # downstream (mapview jmap annotation in ehp_chart.rs, sidebyside
+        # src/tgt inputs), so their bytes are kept stable. The render path no
+        # longer re-reads this file (ehp_batch passes the returned dict to
+        # process_json directly).
         formatter = Formatter()
         formatter.indent_spaces = 2
         formatter.dump(json_data, output_file)

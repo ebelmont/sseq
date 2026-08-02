@@ -533,7 +533,7 @@ pub fn patch_page_from_turned(
                 match new_block {
                     Some(nb) => table.set_block(src, nb),
                     None => {
-                        table.matrices.remove(&src);
+                        table.remove_matrix(src);
                     }
                 }
             }

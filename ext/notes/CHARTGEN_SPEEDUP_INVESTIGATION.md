@@ -161,3 +161,90 @@ at t=100 first — jsonmaker and render are now the same order.
   236 charts takes 0.14s (the ceiling to aim for).
 - Mutation-time regen: 59 affected charts ≈ 15s (≈ 0.25s/chart).
 - At t=100 the user reports chart generation dominates the whole pipeline.
+
+## ROUND-TRIP SKIP LANDED + on-demand map-view plan (2026-08-01)
+
+### 1. JSON round-trip skip (landed, vendored ext/seqsee/ only)
+
+`main.py process_json` gained an optional `data=` kwarg: when passed an
+already-parsed input dict it skips the `.json` re-read AND the unconditional
+`jsonschema.validate` (opt back in with SEQSEE_VALIDATE=1, matching
+jsonmaker's policy; the file path keeps unconditional validation for external
+callers). `ehp_batch.py run_slices` now feeds the dict returned by
+`jsonmaker.process_csv` straight into `process_json` (capability-probed via
+`inspect.signature`, so the script still runs against an older main.py).
+
+The `.json` files ARE still written, byte-identically — they have real
+consumers: `annotate_json_with_jmap` in ehp_chart.rs reads `S{n}_E{r}.json`
+to build the `map_*_src.json` inputs, and `generate_sidebyside_html` reads
+both src and tgt JSONs from disk. Only the same-process re-read is skipped.
+Mutation-in-place is safe: `process_csv` dumps to disk BEFORE returning the
+dict, and builds a fresh dict per chart (the shared `_rows(df)` cache is
+read-only in the extraction code). Float/typedata fidelity of the skipped
+round-trip was verified (compact_json preserves 0.0-vs-0, full float repr).
+
+Verified: full t=25 corpus (mapviews+fiberviews ON), 808 files (404 HTML +
+403 JSON + index) — `diff -r` baseline vs post-change: byte-identical.
+Controlled single-process benchmark (26 sphere charts, E2 CSV, warm caches):
+render 3.93s -> 2.19s (~1.8x; the removed work is json.load + validate,
+which scale with JSON size, so the win grows at t=100). Startup TIMESUM at
+t=25 (cpu-side sums, noisy across parallel chunks): render
+sphere 5.0->3.4s, stem 4.0->3.7s, fiber 5.8->5.5s.
+
+### 2. compact_json -> stdlib json: NO (deliberate)
+
+compact_json's output is a table-aligned format: padded keys
+(`"S5_0_0" : `), right-aligned numbers (`"x":  0`), trailing spaces after
+line-end commas, and length-budget object/array inlining. No
+`json.dumps(separators=..., indent=...)` combination reproduces those bytes,
+and the `.json` bytes are consumed downstream (jmap annotation, sidebyside
+inputs) and archived, so they must stay stable. Kept; comment at the
+`Formatter()` site in jsonmaker.py. (If the dump itself ever shows up in a
+profile, the option is a hand-rolled byte-identical formatter, not stdlib.)
+
+### 3. On-demand map views — python groundwork landed, Rust plan
+
+Groundwork (landed): `ehp_batch.py sidebyside -` reads the JSONL manifest
+from stdin — a single-view job needs no temp manifest file. Measured: one
+view renders in ~0.05s; a cold one-shot process (interpreter + pandas/jinja
+imports) is ~1–3s wall. `run_slices`' dict fast path applies to all modes.
+
+Rust-side plan (ehp_chart.rs — NOT implemented here, owned by another
+workstream):
+
+- **`generate_map_sidebyside` first** (independent, immediate win): replace
+  its `poetry run python main.py --sidebyside` invocation with
+  `batch_cmd(seqsee_dir)` + `sidebyside -`, piping the single manifest line
+  (same JSON shape as `pregenerate_mapviews` emits) to stdin. Kills the
+  per-`mapview` poetry startup and uses the resolved venv python;
+  `annotate_json_with_jmap` and `post_process_mapview` unchanged.
+- **`EHP_MAPVIEWS` becomes tri-state**: `0` = off (unchanged), `all` =
+  today's synchronous pre-generation, default flips to `background`:
+  startup SKIPS the synchronous `pregenerate_mapviews` block (the
+  `want_mapviews` branch after startup generation) and instead spawns ONE
+  background thread that runs the existing per-page
+  `pregenerate_mapviews` + `refresh_mapview_nav` + `inject_map_info`
+  refresh, then prints a completion line. Startup stops paying the
+  maps × spheres × pages multiplier (133 views/4.6s at t=25; the dominant
+  count at t=100); the tail fills in while the user works. NB the chart
+  state stamp embeds `mapviews={bool}` — fold the new mode in so `all` and
+  `background` share a stamp value once views are complete (or archive only
+  after the background fill finishes; simplest: stamp on completion).
+- **e/h/p key fallback flow**: unchanged JS already handles missing files
+  (`entry.view` null -> `copyMapCmd('mapview …')`); with `background` the
+  window where that fires shrinks to the first minutes. Optional polish:
+  the copied-command status message can say "generating in background —
+  reload shortly" when mode=background (MAP_INFO gains a `pending` flag).
+- **Regen hooks**: mutation-time `regen_affected_charts` regenerates
+  sphere/stem/fiber charts but NOT map views (they go stale today, silently
+  — `mapview all` is the manual refresh). Add: for each affected sphere n
+  on page r, enqueue the (kind, n, tgt, r) jobs whose `map_*.html` exists
+  to the background generator (or, minimal version: delete the stale
+  `map_*` HTML + `_src.json` so navigation falls back to the on-demand
+  copy-command flow instead of showing stale data). Same hook after
+  `interpage`/`outside retry` cascades (they funnel through
+  regen_affected_charts already).
+- **Snapshots/archive**: no format change — the charts-dir clone simply
+  contains whichever views exist; missing ones regenerate on demand after
+  restore. `snapshot save` during an unfinished background fill just saves
+  fewer map views.

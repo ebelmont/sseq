@@ -149,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             current_page
                 .maps
                 .values()
-                .map(|mt| mt.matrices.len())
+                .map(|mt| mt.len())
                 .sum::<usize>(),
         );
 

@@ -356,7 +356,7 @@ fn cmd_info(prefix: &str, r: i32, max_total: i32) -> Result<(), Box<dyn std::err
 
     for kind in ehp_core::map::MapKind::all() {
         if let Some(map_table) = page.maps.get(&kind) {
-            let count = map_table.matrices.len();
+            let count = map_table.len();
             println!("{} map: {} source tridegrees", kind.name(), count);
         }
     }

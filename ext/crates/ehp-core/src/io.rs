@@ -450,7 +450,7 @@ pub fn save_page_json(page: &SATPage, directory: &str) -> io::Result<()> {
             let map_path = format!("{}/E{}_{}.csv", directory, page.r, kind.name());
             let mut map_file = std::fs::File::create(&map_path)?;
             writeln!(map_file, "\"element\",\"image\"")?;
-            for (&src_t, mat) in &map_table.matrices {
+            for (&src_t, mat) in map_table.iter() {
                 let src_dim = page.dim_at(src_t);
                 let tgt_t = kind.target_degree(src_t);
                 for i in 0..src_dim {
@@ -635,11 +635,11 @@ pub fn save_to_binary(page: &SATPage, path: &str) -> io::Result<()> {
     // Sections 8/9/10/11: MAP_E/H/P/LH0 (compact V2 — raw block words verbatim)
     for kind in MapKind::all_with_lh0() {
         if let Some(map_table) = page.maps.get(&kind) {
-            if map_table.matrices.is_empty() {
+            if map_table.is_empty() {
                 continue;
             }
             let mut buf = Vec::new();
-            let entries: Vec<_> = map_table.matrices.iter().collect();
+            let entries: Vec<_> = map_table.iter().collect();
             write_u32(&mut buf, entries.len() as u32);
             for (&t, mat) in &entries {
                 write_i32(&mut buf, t.n);

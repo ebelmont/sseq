@@ -22,7 +22,14 @@ pub struct MapTable {
     /// Bit-block of the map at each source tridegree.
     /// Convention: rows = source basis vectors, columns = target coordinates.
     /// So applying the map to element v gives v * matrix.
-    pub matrices: HashMap<Tridegree, std::sync::Arc<crate::products::ProductMatrix>>,
+    /// Private so every read honors the layered `base` (see below) — go
+    /// through `matrix_at`/`iter`/`remove_matrix` etc.
+    matrices: HashMap<Tridegree, std::sync::Arc<crate::products::ProductMatrix>>,
+    /// Layered-overlay support, mirroring `ProductTable`: interpage trial
+    /// overlays hold only their patch; reads fall through to `base` unless
+    /// the key is patched or tombstoned. Base tables must be flat.
+    base: Option<std::sync::Arc<MapTable>>,
+    tombstones: hashbrown::HashSet<Tridegree>,
 }
 
 impl MapTable {
@@ -30,13 +37,51 @@ impl MapTable {
         MapTable {
             kind,
             matrices: HashMap::new(),
+            base: None,
+            tombstones: hashbrown::HashSet::new(),
         }
+    }
+
+    /// A layered view over `base` (same kind): initially identical to it,
+    /// mutations land in this table's own patch/tombstones.
+    pub fn overlay_of(base: std::sync::Arc<MapTable>) -> Self {
+        assert!(
+            base.base.is_none(),
+            "MapTable overlays do not stack (base must be flat)"
+        );
+        MapTable {
+            kind: base.kind,
+            matrices: HashMap::new(),
+            base: Some(base),
+            tombstones: hashbrown::HashSet::new(),
+        }
+    }
+
+    #[inline]
+    fn arc_at(&self, t: &Tridegree) -> Option<&std::sync::Arc<crate::products::ProductMatrix>> {
+        if let Some(a) = self.matrices.get(t) {
+            return Some(a);
+        }
+        if self.tombstones.contains(t) {
+            return None;
+        }
+        self.base.as_ref().and_then(|b| b.matrices.get(t))
+    }
+
+    fn base_visible(
+        &self,
+    ) -> impl Iterator<Item = (&Tridegree, &std::sync::Arc<crate::products::ProductMatrix>)> {
+        self.base
+            .as_deref()
+            .into_iter()
+            .flat_map(|b| b.matrices.iter())
+            .filter(|(k, _)| !self.matrices.contains_key(*k) && !self.tombstones.contains(*k))
     }
 
     /// Apply the map to an element.
     pub fn apply(&self, elem: &Element, target_dim: usize) -> Element {
         let target_deg = self.kind.target_degree(elem.degree);
-        if let Some(b) = self.matrices.get(&elem.degree) {
+        if let Some(b) = self.arc_at(&elem.degree) {
             let mut result = vec_zero(b.tgt_dim as usize);
             for i in vec_support(&elem.vec) {
                 if i < b.rows() {
@@ -51,7 +96,38 @@ impl MapTable {
 
     /// Get the block at a tridegree.
     pub fn matrix_at(&self, t: Tridegree) -> Option<&crate::products::ProductMatrix> {
-        self.matrices.get(&t).map(|a| a.as_ref())
+        self.arc_at(&t).map(|a| a.as_ref())
+    }
+
+    /// Whether a block is stored at a tridegree.
+    pub fn contains(&self, t: Tridegree) -> bool {
+        self.arc_at(&t).is_some()
+    }
+
+    /// Remove the block at a tridegree (shadowing the base in a layered
+    /// table — a removed entry must read as absent, i.e. the zero/identity
+    /// default).
+    pub fn remove_matrix(&mut self, t: Tridegree) {
+        self.matrices.remove(&t);
+        if self.base.as_ref().is_some_and(|b| b.matrices.contains_key(&t)) {
+            self.tombstones.insert(t);
+        }
+    }
+
+    /// Iterate stored blocks (merged view in a layered table).
+    pub fn iter(
+        &self,
+    ) -> impl Iterator<Item = (&Tridegree, &std::sync::Arc<crate::products::ProductMatrix>)> {
+        self.matrices.iter().chain(self.base_visible())
+    }
+
+    /// Number of stored blocks.
+    pub fn len(&self) -> usize {
+        self.matrices.len() + self.base_visible().count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.matrices.is_empty() && self.base_visible().next().is_none()
     }
 
     /// Set the matrix at a tridegree (fp form — converted to the compact
@@ -63,11 +139,13 @@ impl MapTable {
             mat.columns() as u16,
             &mat,
         );
+        self.tombstones.remove(&t);
         self.matrices.insert(t, std::sync::Arc::new(block));
     }
 
     /// Set a pre-built compact block (the binary V2 read path).
     pub fn set_block(&mut self, t: Tridegree, block: crate::products::ProductMatrix) {
+        self.tombstones.remove(&t);
         self.matrices.insert(t, std::sync::Arc::new(block));
     }
 
@@ -78,6 +156,7 @@ impl MapTable {
     pub fn dedup_shared(&mut self) -> usize {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
+        debug_assert!(self.base.is_none(), "dedup runs on flat (load-time) tables only");
         let mut by_content: HashMap<u64, Vec<std::sync::Arc<crate::products::ProductMatrix>>> =
             HashMap::new();
         let mut shared = 0usize;
@@ -163,6 +242,28 @@ impl MapMatrixRef<'_> {
     }
 }
 
+/// Shared (Arc'd) snapshots of a stock page's product/map tables, the base
+/// layer for [`SATPage::thin_overlay`]. Building one costs a full table clone
+/// (Arc bump per block — what `overlay_clone` used to pay PER TRIAL page
+/// step); a sweep builds one per target page and every trial reuses it.
+pub struct OverlayBases {
+    pub products: std::sync::Arc<ProductTable>,
+    pub maps: HashMap<MapKind, std::sync::Arc<MapTable>>,
+}
+
+impl OverlayBases {
+    pub fn new(page: &SATPage) -> Self {
+        OverlayBases {
+            products: std::sync::Arc::new(page.products.clone()),
+            maps: page
+                .maps
+                .iter()
+                .map(|(&k, mt)| (k, std::sync::Arc::new(mt.clone())))
+                .collect(),
+        }
+    }
+}
+
 /// One page E_r of the spectral sequence.
 #[derive(Clone)]
 pub struct SATPage {
@@ -223,6 +324,37 @@ impl SATPage {
             max_t: None,
             exclude_set: hashbrown::HashSet::new(),
             target_only_exclude: hashbrown::HashSet::new(),
+        }
+    }
+
+    /// Thin trial-overlay page over pre-shared table handles: `dimension`,
+    /// `page` and the exclusion sets are real clones (they are patched
+    /// per-degree and iterated by the turn/constraint code), but the product
+    /// and map tables are LAYERED views over `bases` — building and dropping
+    /// them is O(patch), not O(page). Reads through the table methods are
+    /// indistinguishable from [`SATPage::overlay_clone`] by construction
+    /// (fallthrough, with tombstones shadowing removals), which is what keeps
+    /// `ProductTable::multiply`'s absent-block-is-zero semantics safe here —
+    /// see `EHP_TRIAL_VERIFY` in `interpage.rs` for the paranoid cross-check.
+    pub fn thin_overlay(&self, bases: &OverlayBases) -> SATPage {
+        let mut maps = HashMap::with_capacity(bases.maps.len());
+        for (&kind, mt) in &bases.maps {
+            maps.insert(kind, MapTable::overlay_of(std::sync::Arc::clone(mt)));
+        }
+        SATPage {
+            r: self.r,
+            dimension: self.dimension.clone(),
+            page: self.page.clone(),
+            products: ProductTable::overlay_of(std::sync::Arc::clone(&bases.products)),
+            maps,
+            names: HashMap::new(),
+            pairs: HashMap::new(),
+            max_n: self.max_n,
+            max_s: self.max_s,
+            max_f: self.max_f,
+            max_t: self.max_t,
+            exclude_set: self.exclude_set.clone(),
+            target_only_exclude: self.target_only_exclude.clone(),
         }
     }
 
