@@ -438,8 +438,11 @@ impl SourceIndex {
 pub struct SweepCache {
     /// Turned-degree cache for `(pages[0].page, pages[0].result)`.
     pub tb: TbCache,
-    /// [`SourceIndex`] for `pages[0].page` (first-step `turn_page_local`).
-    pub source_index: SourceIndex,
+    /// [`SourceIndex`] for each stock page `pages[..pages.len()-1]` (one per
+    /// page-turn step's `turn_page_local`, not just the first step — a
+    /// step's `turn_page_local` may be re-turning a later stock page, and
+    /// each needs its own stable-copy index).
+    pub source_indexes: Vec<SourceIndex>,
     /// [`PageIndex`] for each target page `pages[1..]`.
     pub target_indexes: Vec<PageIndex>,
     /// Arc'd table snapshots for each target page `pages[1..]` — the base
@@ -453,7 +456,10 @@ impl SweepCache {
         let first = &pages[0];
         SweepCache {
             tb: TbCache::new(first.page, first.result),
-            source_index: SourceIndex::new(first.page),
+            source_indexes: pages[..pages.len() - 1]
+                .iter()
+                .map(|p| SourceIndex::new(p.page))
+                .collect(),
             target_indexes: pages[1..].iter().map(|p| PageIndex::new(p.page)).collect(),
             target_bases: pages[1..].iter().map(|p| OverlayBases::new(p.page)).collect(),
         }
@@ -492,15 +498,36 @@ pub fn turn_page_local(
     source_page: &SATPage,
     target_page: &SATPage,
     d_result: &SATResult,
+    source_stock_page: &SATPage,
     source_index: Option<&SourceIndex>,
 ) -> Result<LocalTurn, TrialError> {
     let r = source_page.r;
-    let (new_exclude, new_target_only) = make_next_exclude_set(source_page, d_result);
-    let mut unexclude: Vec<Tridegree> = target_page
+    let (mut new_exclude, new_target_only) = make_next_exclude_set(source_page, d_result);
+    let candidates: Vec<Tridegree> = target_page
         .exclude_set
         .difference(&new_exclude)
         .copied()
         .collect();
+
+    // A degree past source_page's own max_t can't be un-excluded here, full
+    // stop -- even on occasions its dimension happens to already be correct
+    // (e.g. an earlier stage legitimately computed it from a wider-max_t
+    // source and carried it forward). That data is deliberately built
+    // "generously" and isn't fully constrained there, so trusting it can
+    // spuriously un-exclude a degree with a dimension no real constraint
+    // ever verified. Applied to `candidates` (the set this page would
+    // otherwise newly un-exclude), not the full raw `target_page.exclude_set`,
+    // which reaches into a region neither side has ever needed to agree on
+    // before.
+    let in_range = |t: Tridegree| source_page.max_t.is_none_or(|mt| t.s + t.f <= mt);
+    let mut unexclude: Vec<Tridegree> = Vec::new();
+    for t in candidates {
+        if in_range(t) {
+            unexclude.push(t);
+        } else {
+            new_exclude.insert(t);
+        }
+    }
     unexclude.sort();
 
     let ctx = TurnContext::new(source_page, d_result);
@@ -533,7 +560,7 @@ pub fn turn_page_local(
                     .get(&(t.s, t.f))
                     .map(|v| v.clone())
                     .unwrap_or_default(),
-                None => source_page
+                None => source_stock_page
                     .page
                     .keys()
                     .filter(|x| x.n > x.s + 2 && x.s == t.s && x.f == t.f)
@@ -1404,23 +1431,31 @@ fn try_diffs_with_cache_inner(
     for i in 1..pages.len() {
         let target = &pages[i];
         let source_page: &SATPage = prev_overlay.as_ref().unwrap_or(first.page);
-        // The turned-degree cache and source index are built from the stock
-        // first page (+ base result); they are only valid while that page is
-        // the turning source (the first step). The target-page index depends
-        // only on the stock target page, which every step uses.
+        // source_page may be a previous step's overlay; the STOCK page at
+        // that same level (pages[i-1].page, never mutated) is passed
+        // separately below and used only for stable-copy enumeration — see
+        // turn_page_local's doc comment.
+        let source_stock_page = pages[i - 1].page;
+        // The turned-degree cache (`shared`) is built from the stock first
+        // page (+ base result); only valid while that page is the turning
+        // source (the first step). The source-page and target-page indices
+        // depend only on stock pages, so they're valid (and cached) for
+        // every step.
         let first_step = prev_overlay.is_none();
         let step_shared = if first_step { shared.as_ref() } else { None };
-        let step_source_index = if first_step {
-            cache.map(|c| &c.source_index)
-        } else {
-            None
-        };
+        let step_source_index = cache.and_then(|c| c.source_indexes.get(i - 1));
         let step_index = cache.and_then(|c| c.target_indexes.get(i - 1));
         let step_bases = cache.and_then(|c| c.target_bases.get(i - 1));
 
         trial_stats::PAGE_STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let t_turn = Instant::now();
-        let mut lt = turn_page_local(source_page, target.page, &dsat, step_source_index)?;
+        let mut lt = turn_page_local(
+            source_page,
+            target.page,
+            &dsat,
+            source_stock_page,
+            step_source_index,
+        )?;
         trial_stats::add(&trial_stats::NS_TURN, t_turn.elapsed().as_nanos());
         if lt.unexclude.is_empty() {
             // No degree became certain: the target page's system gains no new

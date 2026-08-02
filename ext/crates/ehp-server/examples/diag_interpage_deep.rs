@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ---- Step 2: local turn E3 -> E4 ----
-    let lt0 = turn_page_local(&e3, &e4, &dsat, None).expect("no d2 error");
+    let lt0 = turn_page_local(&e3, &e4, &dsat, &e3, None).expect("no d2 error");
     eprintln!("\nun-excluded degrees on E_4 ({}):", lt0.unexclude.len());
     for t in &lt0.unexclude {
         eprintln!(
