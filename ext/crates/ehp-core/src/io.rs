@@ -69,6 +69,13 @@ pub fn load_from_csv(prefix: &str, r: i32, max_t: i32) -> io::Result<SATPage> {
     // Load dimensions
     eprintln!("Loading dimensions from {}...", rank_file);
     load_dimensions(&rank_file, &mut page, max_t)?;
+    // Must be the actual configured cutoff, not a value derived from which
+    // degrees happen to have nonzero dimension in the (already max_t-filtered)
+    // data — compute_max_values's data-derived estimate can undershoot the
+    // real cutoff, and code (e.g. turn_page_local's max_t trust guard) reads
+    // page.max_t expecting it to be the true boundary the Python reference
+    // (SATPage.max_t) uses.
+    page.max_t = Some(max_t);
     page.compute_max_values();
     let tridegree_count = page.dimension.values().filter(|&&d| d > 0).count();
     eprintln!("  Loaded {} tridegrees with non-zero dimension", tridegree_count);

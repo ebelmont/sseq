@@ -442,32 +442,20 @@ impl SATPage {
         self.polygon_check(t, true)
     }
 
-    fn polygon_check(&self, t: Tridegree, source: bool) -> bool {
+    fn polygon_check(&self, t: Tridegree, _source: bool) -> bool {
         if t.n < -1 || t.s < -1 || t.f < -1 {
             return false;
         }
-        let max_f = match self.max_f {
-            Some(v) => v,
-            None => return true,
-        };
-        let max_s = match self.max_s {
-            Some(v) => v,
-            None => return true,
-        };
         let max_t = match self.max_t {
             Some(v) => v,
             None => return true,
         };
-        if t.f > max_f || t.s > max_s || t.s + t.f > max_t {
-            return false;
-        }
-        if let Some(max_n) = self.max_n {
-            let bound = if source { 2 * max_n - 3 } else { max_n };
-            if t.n > bound {
-                return false;
-            }
-        }
-        true
+        // Matches the Python reference's SATPage.in_bounds, which checks
+        // only s + f <= max_t: checking max_s/max_f as independent bounds
+        // on top of that rejects degrees the Python side accepts (a small
+        // s+f total can still have a large individual s or f), and using
+        // max_n as a source-only cutoff has no Python counterpart either.
+        t.s + t.f <= max_t
     }
 
     pub fn is_excluded(&self, t: Tridegree) -> bool {
